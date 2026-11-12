@@ -1,0 +1,5 @@
+reference-projects/
+target/
+result
+.direnv/
+*.log
