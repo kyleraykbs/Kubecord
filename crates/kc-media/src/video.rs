@@ -159,14 +159,32 @@ impl VideoSource {
     ) -> Result<Self> {
         let node_id = portal.node_id;
         let fd = portal.fd();
-        let source = format!("pipewiresrc path={node_id} fd={fd} do-timestamp=true");
-        let mut source = Self::start_pipeline(
-            &pipeline_description(&source, &settings),
-            1000 / settings.fps.max(1),
-            on_frame,
-        )?;
+        let mut source = Self::from_pipewire(node_id, fd, &settings, on_frame)?;
         source._portal = Some(portal);
         Ok(source)
+    }
+
+    /// Captures a camera selected through the XDG camera portal.
+    pub fn camera_portal(
+        camera: crate::portal::CameraCast,
+        settings: VideoSettings,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self> {
+        Self::from_pipewire(camera.node_id, camera.fd(), &settings, on_frame)
+    }
+
+    fn from_pipewire(
+        node_id: u32,
+        fd: std::os::fd::RawFd,
+        settings: &VideoSettings,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self> {
+        let source = format!("pipewiresrc path={node_id} fd={fd} do-timestamp=true");
+        Self::start_pipeline(
+            &pipeline_description(&source, settings),
+            1000 / settings.fps.max(1),
+            on_frame,
+        )
     }
 }
 

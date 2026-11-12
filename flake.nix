@@ -52,6 +52,7 @@
           ];
 
           nativeBuildInputs = with pkgs; [
+            clang
             pkg-config
             wrapGAppsHook4
           ];
@@ -60,6 +61,7 @@
             gtk4
             libadwaita
             opus
+            pipewire
           ] ++ gstPlugins;
 
           commonArgs = {
@@ -68,6 +70,7 @@
             strictDeps = true;
             GIT_HASH = inputs.self.shortRev or "dirty";
             GST_PLUGIN_SYSTEM_PATH_1_0 = lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins;
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           };
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -108,6 +111,7 @@
               export RUST_BACKTRACE=1
               export XDG_DATA_DIRS="${pkgs.libadwaita}/share:${pkgs.gtk4}/share:${pkgs.gsettings-desktop-schemas}/share:$XDG_DATA_DIRS"
               export GST_PLUGIN_SYSTEM_PATH_1_0="${lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}:$GST_PLUGIN_SYSTEM_PATH_1_0"
+              export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             '';
           };
 

@@ -60,6 +60,7 @@ pub struct VoiceUiState {
     pub muted: bool,
     pub deafened: bool,
     pub camera: bool,
+    pub streaming: bool,
 }
 
 /// Everything one account owns on the GTK side.
@@ -108,6 +109,8 @@ pub enum VoiceCommand {
     SetMute(bool),
     SetDeafen(bool),
     SetCamera(bool),
+    StartStream,
+    StopStream,
 }
 
 /// Voice command senders for running accounts, filled by [`spawn_account`].
@@ -173,6 +176,12 @@ pub enum Command {
         account: AccountId,
         camera: bool,
     },
+    StartStream {
+        account: AccountId,
+    },
+    StopStream {
+        account: AccountId,
+    },
 }
 
 /// Tokio-to-GTK notifications.
@@ -221,6 +230,16 @@ pub enum UiEvent {
         speaking: bool,
     },
     VoiceError {
+        account: AccountId,
+        message: String,
+    },
+    StreamStarted {
+        account: AccountId,
+    },
+    StreamStopped {
+        account: AccountId,
+    },
+    StreamError {
         account: AccountId,
         message: String,
     },
@@ -340,6 +359,12 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
+        Command::StartStream { account } => {
+            forward_voice(account, VoiceCommand::StartStream, ui).await;
+        }
+        Command::StopStream { account } => {
+            forward_voice(account, VoiceCommand::StopStream, ui).await;
+        }
     }
 }
 
@@ -422,6 +447,14 @@ fn spawn_account(
             deafened: false,
             camera: false,
             generation: 0,
+            stream_key: None,
+            stream_rtc_id: None,
+            stream_token: None,
+            stream_endpoint: None,
+            stream_connection: None,
+            stream_pending: false,
+            streaming: false,
+            stream_generation: 0,
         };
 
         loop {
@@ -456,6 +489,35 @@ fn spawn_account(
                                         account,
                                         &ui,
                                         &control_tx,
+                                    )
+                                    .await;
+                                }
+                                "STREAM_CREATE" => {
+                                    handle_stream_create(
+                                        &mut voice,
+                                        &data,
+                                        account,
+                                        &ui,
+                                        &control_tx,
+                                    )
+                                    .await;
+                                }
+                                "STREAM_SERVER_UPDATE" => {
+                                    handle_stream_server_update(
+                                        &mut voice,
+                                        &data,
+                                        account,
+                                        &ui,
+                                        &control_tx,
+                                    )
+                                    .await;
+                                }
+                                "STREAM_DELETE" => {
+                                    handle_stream_delete(
+                                        &mut voice,
+                                        &data,
+                                        account,
+                                        &ui,
                                     )
                                     .await;
                                 }
@@ -497,10 +559,46 @@ fn spawn_account(
                     apply_voice_command(&mut voice, command, account, &ui, &control_tx).await;
                 }
                 control = control_rx.recv() => {
-                    if let Some(VoiceControl::Closed { generation }) = control
-                        && generation == voice.generation && voice.connection.is_some() {
-                            teardown_voice(&mut voice, account, &ui, true).await;
+                    let Some(control) = control else { break };
+                    match control {
+                        VoiceControl::Closed { generation } => {
+                            if generation == voice.generation && voice.connection.is_some() {
+                                teardown_voice(&mut voice, account, &ui, true).await;
+                            }
                         }
+                        VoiceControl::StreamReady { generation } => {
+                            if generation == voice.stream_generation
+                                && voice.stream_connection.is_some()
+                            {
+                                voice.streaming = true;
+                                let _ = ui.send(UiEvent::StreamStarted { account }).await;
+                            }
+                        }
+                        VoiceControl::StreamClosed { generation } => {
+                            if generation == voice.stream_generation
+                                && voice.stream_connection.is_some()
+                            {
+                                teardown_stream(&mut voice, account, &ui, true).await;
+                            }
+                        }
+                        VoiceControl::StreamSource { generation, result } => {
+                            if generation != voice.stream_generation {
+                                continue;
+                            }
+                            match result {
+                                Ok(source) => {
+                                    if let Some(connection) = &mut voice.stream_connection {
+                                        connection.source = Some(source);
+                                    }
+                                }
+                                Err(message) => {
+                                    let _ =
+                                        ui.send(UiEvent::StreamError { account, message }).await;
+                                    teardown_stream(&mut voice, account, &ui, true).await;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -525,6 +623,14 @@ struct VoiceRuntime {
     deafened: bool,
     camera: bool,
     generation: u64,
+    stream_key: Option<String>,
+    stream_rtc_id: Option<Snowflake>,
+    stream_token: Option<String>,
+    stream_endpoint: Option<String>,
+    stream_connection: Option<StreamConnection>,
+    stream_pending: bool,
+    streaming: bool,
+    stream_generation: u64,
 }
 
 struct VoiceConnection {
@@ -532,11 +638,30 @@ struct VoiceConnection {
     audio: Option<Arc<VoiceAudio>>,
     camera: Option<VideoSource>,
     guild_id: Option<Snowflake>,
+    channel_id: Snowflake,
+}
+
+struct StreamConnection {
+    handle: VoiceHandle,
+    source: Option<VideoSource>,
+    key: String,
 }
 
 /// Signals from a voice connection's consumer task back to the account loop.
 enum VoiceControl {
-    Closed { generation: u64 },
+    Closed {
+        generation: u64,
+    },
+    StreamReady {
+        generation: u64,
+    },
+    StreamClosed {
+        generation: u64,
+    },
+    StreamSource {
+        generation: u64,
+        result: Result<VideoSource, String>,
+    },
 }
 
 async fn handle_voice_state(
@@ -597,6 +722,223 @@ async fn handle_server_update(
         voice.endpoint = Some(endpoint.to_owned());
     }
     maybe_connect(voice, account, ui, control_tx).await;
+}
+
+/// Returns the user id that owns a stream key such as
+/// `guild:<guild>:<channel>:<user>` or `call:<channel>:<user>`.
+fn stream_key_owner(key: &str) -> Option<Snowflake> {
+    key.rsplit(':').next().and_then(|id| id.parse().ok())
+}
+
+/// Splits a stream key into `(guild, channel, owner)`. The guild is absent for
+/// DM calls.
+fn stream_key_target(key: &str) -> Option<(Option<Snowflake>, Snowflake, Snowflake)> {
+    let mut parts = key.split(':');
+    match parts.next()? {
+        "guild" => {
+            let guild = parts.next()?.parse().ok()?;
+            let channel = parts.next()?.parse().ok()?;
+            let user = parts.next()?.parse().ok()?;
+            Some((Some(guild), channel, user))
+        }
+        "call" => {
+            let channel = parts.next()?.parse().ok()?;
+            let user = parts.next()?.parse().ok()?;
+            Some((None, channel, user))
+        }
+        _ => None,
+    }
+}
+
+async fn handle_stream_create(
+    voice: &mut VoiceRuntime,
+    data: &serde_json::Value,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    if !voice.stream_pending {
+        return;
+    }
+    let Some(self_user_id) = voice.self_user_id else {
+        return;
+    };
+    let Some(key) = data["stream_key"].as_str() else {
+        return;
+    };
+    let Some((guild_id, channel_id, owner)) = stream_key_target(key) else {
+        return;
+    };
+    if owner != self_user_id {
+        return;
+    }
+    let Some(connection) = &voice.connection else {
+        return;
+    };
+    if channel_id != connection.channel_id || guild_id != connection.guild_id {
+        return;
+    }
+    voice.stream_key = Some(key.to_owned());
+    voice.stream_rtc_id = data["rtc_server_id"]
+        .as_str()
+        .and_then(|id| id.parse().ok());
+    maybe_start_stream(voice, account, ui, control_tx).await;
+}
+
+async fn handle_stream_server_update(
+    voice: &mut VoiceRuntime,
+    data: &serde_json::Value,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    if let Some(key) = data["stream_key"].as_str() {
+        match voice.stream_key.as_deref() {
+            Some(ours) if ours != key => return,
+            Some(_) => {}
+            None => {
+                // Without a key from STREAM_CREATE the owner is all we can
+                // check before accepting the token.
+                if stream_key_owner(key) != voice.self_user_id {
+                    return;
+                }
+            }
+        }
+    }
+    if voice.stream_key.is_none() && !voice.stream_pending && voice.stream_connection.is_none() {
+        return;
+    }
+    if let Some(token) = data["token"].as_str() {
+        voice.stream_token = Some(token.to_owned());
+    }
+    if let Some(endpoint) = data["endpoint"].as_str() {
+        voice.stream_endpoint = Some(endpoint.to_owned());
+    }
+    maybe_start_stream(voice, account, ui, control_tx).await;
+}
+
+async fn handle_stream_delete(
+    voice: &mut VoiceRuntime,
+    data: &serde_json::Value,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+) {
+    let Some(key) = data["stream_key"].as_str() else {
+        return;
+    };
+    let ours = voice.stream_key.as_deref() == Some(key)
+        || voice
+            .stream_connection
+            .as_ref()
+            .is_some_and(|connection| connection.key == key);
+    if ours {
+        teardown_stream(voice, account, ui, true).await;
+    }
+}
+
+async fn maybe_start_stream(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    if !voice.stream_pending || voice.stream_connection.is_some() {
+        return;
+    }
+    let (Some(key), Some(rtc_id), Some(token), Some(endpoint), Some(session_id), Some(user_id)) = (
+        voice.stream_key.clone(),
+        voice.stream_rtc_id,
+        voice.stream_token.clone(),
+        voice.stream_endpoint.clone(),
+        voice.session_id.clone(),
+        voice.self_user_id,
+    ) else {
+        return;
+    };
+    let Some(connection) = &voice.connection else {
+        return;
+    };
+    let channel_id = connection.channel_id;
+    let dave_channel_id = Snowflake::new(rtc_id.get().saturating_sub(1));
+    let params = VoiceParams {
+        server_id: rtc_id,
+        channel_id,
+        user_id,
+        session_id,
+        token,
+        endpoint,
+        video: true,
+        screen: true,
+        dave_channel_id,
+    };
+    voice.stream_pending = false;
+    voice.stream_generation = voice.stream_generation.wrapping_add(1);
+    let generation = voice.stream_generation;
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
+    match kc_voice::connect(params, event_tx).await {
+        Ok(handle) => {
+            debug!(%key, %rtc_id, "go live stream connecting");
+            voice.stream_connection = Some(StreamConnection {
+                handle: handle.clone(),
+                source: None,
+                key,
+            });
+
+            // Readiness enables the video track and tells the UI.
+            let ui_events = ui.clone();
+            let control = control_tx.clone();
+            let ready_handle = handle.clone();
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        VoiceEvent::Ready { .. } => {
+                            ready_handle.set_video(true);
+                            let _ = control.send(VoiceControl::StreamReady { generation });
+                        }
+                        VoiceEvent::Error(message) => {
+                            let _ = ui_events
+                                .send(UiEvent::StreamError { account, message })
+                                .await;
+                            let _ = control.send(VoiceControl::StreamClosed { generation });
+                            break;
+                        }
+                        VoiceEvent::Closed { .. } => {
+                            let _ = control.send(VoiceControl::StreamClosed { generation });
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            // The portal picker may block on user input; keep the account loop
+            // responsive while it runs.
+            let source_control = control_tx.clone();
+            let source_handle = handle.clone();
+            tokio::spawn(async move {
+                let result = match kc_media::portal::request().await {
+                    Ok(portal) => {
+                        VideoSource::screen(portal, VideoSettings::default(), move |frame| {
+                            source_handle.send_video(frame.data, frame.duration_ms);
+                        })
+                        .map_err(|error| error.to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = source_control.send(VoiceControl::StreamSource { generation, result });
+            });
+        }
+        Err(error) => {
+            let _ = ui
+                .send(UiEvent::StreamError {
+                    account,
+                    message: format!("screen share connect failed: {error}"),
+                })
+                .await;
+            stop_stream(voice, account, ui, false).await;
+        }
+    }
 }
 
 async fn maybe_connect(
@@ -665,9 +1007,10 @@ async fn maybe_connect(
                 audio: audio.clone(),
                 camera: None,
                 guild_id,
+                channel_id,
             };
             if voice.camera
-                && let Err(error) = start_camera(&mut connection)
+                && let Err(error) = start_camera(&mut connection).await
             {
                 voice.camera = false;
                 let _ = ui
@@ -742,9 +1085,14 @@ async fn maybe_connect(
     }
 }
 
-fn start_camera(connection: &mut VoiceConnection) -> Result<(), String> {
+async fn start_camera(connection: &mut VoiceConnection) -> Result<(), String> {
+    let camera = kc_media::portal::request_camera()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no camera available".to_owned())?;
+    debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
-    let source = VideoSource::camera(None, VideoSettings::default(), move |frame| {
+    let source = VideoSource::camera_portal(camera, VideoSettings::default(), move |frame| {
         handle.send_video(frame.data, frame.duration_ms);
     })
     .map_err(|error| error.to_string())?;
@@ -819,7 +1167,7 @@ async fn apply_voice_command(
                 Some(connection) => {
                     if enabled {
                         if connection.camera.is_none() {
-                            if let Err(error) = start_camera(connection) {
+                            if let Err(error) = start_camera(connection).await {
                                 voice.camera = false;
                                 let _ = ui
                                     .send(UiEvent::VoiceError {
@@ -850,7 +1198,102 @@ async fn apply_voice_command(
                 }
             }
         }
+        VoiceCommand::StartStream => {
+            let target = voice
+                .connection
+                .as_ref()
+                .map(|connection| (connection.guild_id, connection.channel_id));
+            let Some((guild_id, channel_id)) = target else {
+                let _ = ui
+                    .send(UiEvent::VoiceError {
+                        account,
+                        message: "join a voice channel first".to_owned(),
+                    })
+                    .await;
+                return;
+            };
+            if voice.streaming || voice.stream_pending || voice.stream_connection.is_some() {
+                return;
+            }
+            let Some(guild_id) = guild_id else {
+                let _ = ui
+                    .send(UiEvent::VoiceError {
+                        account,
+                        message: "screen sharing needs a guild voice channel".to_owned(),
+                    })
+                    .await;
+                return;
+            };
+            voice.stream_pending = true;
+            voice.stream_key = None;
+            voice.stream_rtc_id = None;
+            voice.stream_token = None;
+            voice.stream_endpoint = None;
+            voice.handle.stream_create(guild_id, channel_id);
+        }
+        VoiceCommand::StopStream => {
+            stop_stream(voice, account, ui, true).await;
+        }
     }
+}
+
+/// Ends a Go Live stream, deleting it on Discord when a key is known.
+async fn stop_stream(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    notify: bool,
+) {
+    let had_stream = clear_stream(voice).await;
+    if let Some(key) = had_stream.key {
+        voice.handle.stream_delete(&key);
+    }
+    if notify && had_stream.had_any {
+        let _ = ui.send(UiEvent::StreamStopped { account }).await;
+    }
+}
+
+/// Tears a stream down without asking Discord to delete it, for remote closes.
+async fn teardown_stream(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    notify: bool,
+) {
+    let had_stream = clear_stream(voice).await;
+    if notify && had_stream.had_any {
+        let _ = ui.send(UiEvent::StreamStopped { account }).await;
+    }
+}
+
+struct ClearedStream {
+    key: Option<String>,
+    had_any: bool,
+}
+
+/// Drops the source, disconnects the stream connection and resets all stream
+/// state. Returns the last known stream key so callers can delete it.
+async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
+    let key = voice
+        .stream_key
+        .clone()
+        .or_else(|| voice.stream_connection.as_ref().map(|c| c.key.clone()));
+    let had_any = voice.streaming
+        || voice.stream_pending
+        || voice.stream_connection.is_some()
+        || key.is_some();
+    voice.stream_pending = false;
+    voice.streaming = false;
+    if let Some(connection) = voice.stream_connection.take() {
+        drop(connection.source);
+        connection.handle.disconnect().await;
+    }
+    voice.stream_key = None;
+    voice.stream_rtc_id = None;
+    voice.stream_token = None;
+    voice.stream_endpoint = None;
+    voice.stream_generation = voice.stream_generation.wrapping_add(1);
+    ClearedStream { key, had_any }
 }
 
 async fn teardown_voice(
@@ -859,6 +1302,7 @@ async fn teardown_voice(
     ui: &async_channel::Sender<UiEvent>,
     notify: bool,
 ) {
+    stop_stream(voice, account, ui, notify).await;
     let had_connection = voice.connection.is_some() || voice.pending_join.is_some();
     if let Some(connection) = voice.connection.take() {
         connection.handle.disconnect().await;

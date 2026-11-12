@@ -59,3 +59,55 @@ pub async fn request() -> Result<ScreenCast> {
         _session: session,
     })
 }
+
+/// A camera selected through the XDG camera portal.
+pub struct CameraCast {
+    pub node_id: u32,
+    pub name: String,
+    fd: OwnedFd,
+}
+
+impl CameraCast {
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.fd.as_raw_fd()
+    }
+}
+
+/// Requests camera access. The portal may show a permission prompt; `None`
+/// means no camera is present.
+pub async fn request_camera() -> Result<Option<CameraCast>> {
+    let Some((fd, streams)) = ashpd::desktop::camera::request()
+        .await
+        .map_err(|error| Error::Message(format!("camera portal: {error}")))?
+    else {
+        return Ok(None);
+    };
+    let describe = |stream: &ashpd::desktop::camera::Stream| -> String {
+        let properties = stream.properties();
+        properties
+            .get("device.description")
+            .or_else(|| properties.get("node.description"))
+            .or_else(|| properties.get("node.name"))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let Some(stream) = streams
+        .iter()
+        .find(|stream| {
+            let description = describe(stream).to_ascii_lowercase();
+            // The UGREEN capture card on this machine is single-claimant; a
+            // camera client must never take it. Prefer any other camera.
+            !description.contains("ugreen") && !description.contains("macrosilicon")
+        })
+        .or_else(|| streams.first())
+    else {
+        return Ok(None);
+    };
+    let name = describe(stream);
+    Ok(Some(CameraCast {
+        node_id: stream.node_id(),
+        name,
+        fd,
+    }))
+}

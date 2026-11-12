@@ -127,6 +127,7 @@ struct AppState {
     voice_mute: gtk::ToggleButton,
     voice_deafen: gtk::ToggleButton,
     voice_camera: gtk::ToggleButton,
+    voice_screen: gtk::ToggleButton,
     composer: gtk::TextView,
     send_button: gtk::Button,
     status_bar: gtk::Label,
@@ -271,12 +272,14 @@ impl AppState {
         let voice_mute = gtk::ToggleButton::with_label("Mute");
         let voice_deafen = gtk::ToggleButton::with_label("Deafen");
         let voice_camera = gtk::ToggleButton::with_label("Camera");
+        let voice_screen = gtk::ToggleButton::with_label("Share screen");
         voice_bar.append(&voice_label);
         voice_bar.append(&voice_join);
         voice_bar.append(&voice_leave);
         voice_bar.append(&voice_mute);
         voice_bar.append(&voice_deafen);
         voice_bar.append(&voice_camera);
+        voice_bar.append(&voice_screen);
         voice_bar.set_visible(false);
 
         let composer = gtk::TextView::new();
@@ -365,6 +368,7 @@ impl AppState {
             voice_mute,
             voice_deafen,
             voice_camera,
+            voice_screen,
             composer,
             send_button,
             status_bar,
@@ -428,6 +432,9 @@ impl AppState {
         let app = self.clone();
         self.voice_camera
             .connect_toggled(move |_| app.on_camera_toggled());
+        let app = self.clone();
+        self.voice_screen
+            .connect_toggled(move |_| app.on_screen_toggled());
     }
 
     // -- account lifecycle -----------------------------------------------
@@ -739,6 +746,31 @@ impl AppState {
         }
     }
 
+    fn on_screen_toggled(self: &Rc<Self>) {
+        let desired = self.voice_screen.is_active();
+        let account = self.update_voice_flag(|voice| {
+            if voice.streaming == desired {
+                None
+            } else {
+                voice.streaming = desired;
+                Some(desired)
+            }
+        });
+        if let Some(account) = account {
+            let command = if desired {
+                Command::StartStream { account }
+            } else {
+                Command::StopStream { account }
+            };
+            let _ = self.cmd_tx.try_send(command);
+            self.set_status(if desired {
+                "Starting screen share…"
+            } else {
+                ""
+            });
+        }
+    }
+
     /// Applies a toggle change to the active session's voice state. Returns the
     /// account id only when the state actually changed, so programmatic
     /// `set_active` calls during rendering never echo commands back to Tokio.
@@ -800,14 +832,17 @@ impl AppState {
         self.voice_mute.set_visible(joined);
         self.voice_deafen.set_visible(joined);
         self.voice_camera.set_visible(joined);
+        self.voice_screen.set_visible(joined);
+        self.voice_screen.set_sensitive(joined);
 
-        let (muted, deafened, camera) = match (&voice, joined) {
-            (Some(voice), true) => (voice.muted, voice.deafened, voice.camera),
-            _ => (false, false, false),
+        let (muted, deafened, camera, streaming) = match (&voice, joined) {
+            (Some(voice), true) => (voice.muted, voice.deafened, voice.camera, voice.streaming),
+            _ => (false, false, false, false),
         };
         self.voice_mute.set_active(muted);
         self.voice_deafen.set_active(deafened);
         self.voice_camera.set_active(camera);
+        self.voice_screen.set_active(streaming);
     }
 
     fn record_speaking(self: &Rc<Self>, account: AccountId, user_id: Snowflake, speaking: bool) {
@@ -1617,17 +1652,20 @@ impl AppState {
                                 .get(&channel_id)
                                 .and_then(|channel| channel.guild_id)
                         });
-                        let (muted, deafened, camera) = session
+                        let (muted, deafened, camera, streaming) = session
                             .voice
                             .as_ref()
-                            .map(|voice| (voice.muted, voice.deafened, voice.camera))
-                            .unwrap_or((false, false, false));
+                            .map(|voice| {
+                                (voice.muted, voice.deafened, voice.camera, voice.streaming)
+                            })
+                            .unwrap_or((false, false, false, false));
                         session.voice = Some(VoiceUiState {
                             guild_id,
                             channel_id,
                             muted,
                             deafened,
                             camera,
+                            streaming,
                         });
                     }
                 }
@@ -1660,6 +1698,48 @@ impl AppState {
             UiEvent::VoiceError { account, message } => {
                 if self.model.borrow().active == Some(account) {
                     self.set_status(&message);
+                }
+            }
+            UiEvent::StreamStarted { account } => {
+                {
+                    let mut model = self.model.borrow_mut();
+                    if let Some(session) = model.sessions.get_mut(&account)
+                        && let Some(voice) = &mut session.voice
+                    {
+                        voice.streaming = true;
+                    }
+                }
+                if self.model.borrow().active == Some(account) {
+                    self.set_status("Sharing screen");
+                    self.render_voice_bar();
+                }
+            }
+            UiEvent::StreamStopped { account } => {
+                {
+                    let mut model = self.model.borrow_mut();
+                    if let Some(session) = model.sessions.get_mut(&account)
+                        && let Some(voice) = &mut session.voice
+                    {
+                        voice.streaming = false;
+                    }
+                }
+                if self.model.borrow().active == Some(account) {
+                    self.set_status("");
+                    self.render_voice_bar();
+                }
+            }
+            UiEvent::StreamError { account, message } => {
+                {
+                    let mut model = self.model.borrow_mut();
+                    if let Some(session) = model.sessions.get_mut(&account)
+                        && let Some(voice) = &mut session.voice
+                    {
+                        voice.streaming = false;
+                    }
+                }
+                if self.model.borrow().active == Some(account) {
+                    self.set_status(&message);
+                    self.render_voice_bar();
                 }
             }
             UiEvent::Error { account, message } => {
