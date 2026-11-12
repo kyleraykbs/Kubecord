@@ -1,0 +1,23 @@
+[package]
+name = "kc-voice"
+description = "Discord voice, camera and Go Live transport for kylecord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+bytes.workspace = true
+chacha20poly1305.workspace = true
+davey.workspace = true
+futures-util.workspace = true
+kc-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+uuid.workspace = true

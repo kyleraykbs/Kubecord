@@ -5,6 +5,9 @@ members = [
   "crates/kc-state",
   "crates/kc-http",
   "crates/kc-gateway",
+  "crates/kc-voice",
+  "crates/kc-media",
+  "crates/kc-ui",
   "crates/kc-probe",
   "crates/kylecord",
 ]
@@ -21,16 +24,27 @@ kc-core = { path = "crates/kc-core" }
 kc-state = { path = "crates/kc-state" }
 kc-http = { path = "crates/kc-http" }
 kc-gateway = { path = "crates/kc-gateway" }
+kc-voice = { path = "crates/kc-voice" }
+kc-media = { path = "crates/kc-media" }
+kc-ui = { path = "crates/kc-ui" }
 
+aes-gcm = "0.10"
+ashpd = { version = "0.14", features = ["screencast"] }
 anyhow = "1"
 base64 = "0.22"
 bytes = "1"
+chacha20poly1305 = "0.10"
+davey = "0.2"
 dirs = "6"
 flate2 = "1"
 futures-util = "0.3"
 glib = "0.22"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
 gtk = { package = "gtk4", version = "0.11" }
 libadwaita = "0.9"
+opus2 = "0.4"
 parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }

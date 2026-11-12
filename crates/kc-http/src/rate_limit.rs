@@ -28,11 +28,7 @@ impl RateLimiter {
             let global = *self.global_until.lock();
             let now = Instant::now();
             if let Some(until) = global {
-                if until > now {
-                    Some(until - now)
-                } else {
-                    None
-                }
+                if until > now { Some(until - now) } else { None }
             } else {
                 let buckets = self.buckets.lock();
                 buckets
@@ -60,7 +56,8 @@ impl RateLimiter {
             .and_then(|value| value.parse::<f64>().ok());
 
         if remaining.is_some() || reset_after.is_some() {
-            let reset_at = reset_after.map(|seconds| Instant::now() + Duration::from_secs_f64(seconds));
+            let reset_at =
+                reset_after.map(|seconds| Instant::now() + Duration::from_secs_f64(seconds));
             self.buckets.lock().insert(
                 route.to_owned(),
                 Bucket {
@@ -74,15 +71,12 @@ impl RateLimiter {
             .get("x-ratelimit-global")
             .and_then(|value| value.to_str().ok())
             == Some("true")
-        {
-            if let Some(retry_after) = headers
+            && let Some(retry_after) = headers
                 .get("retry-after")
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<f64>().ok())
-            {
-                *self.global_until.lock() =
-                    Some(Instant::now() + Duration::from_secs_f64(retry_after));
-            }
+        {
+            *self.global_until.lock() = Some(Instant::now() + Duration::from_secs_f64(retry_after));
         }
     }
 

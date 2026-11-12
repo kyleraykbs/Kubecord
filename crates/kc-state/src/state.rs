@@ -204,18 +204,18 @@ impl State {
                 }
             }
             "MESSAGE_DELETE_BULK" => {
-                if let Some(channel_id) = snowflake(data, "channel_id") {
-                    if let Some(ids) = data["ids"].as_array() {
-                        for value in ids {
-                            if let Some(id) = value.as_str().and_then(|s| s.parse().ok()) {
-                                if let Some(buffer) = self.messages.get_mut(&channel_id) {
-                                    buffer.remove(id);
-                                }
-                                events.push(StoreEvent::MessageDeleted {
-                                    channel_id,
-                                    message_id: id,
-                                });
+                if let Some(channel_id) = snowflake(data, "channel_id")
+                    && let Some(ids) = data["ids"].as_array()
+                {
+                    for value in ids {
+                        if let Some(id) = value.as_str().and_then(|s| s.parse().ok()) {
+                            if let Some(buffer) = self.messages.get_mut(&channel_id) {
+                                buffer.remove(id);
                             }
+                            events.push(StoreEvent::MessageDeleted {
+                                channel_id,
+                                message_id: id,
+                            });
                         }
                     }
                 }
@@ -235,19 +235,19 @@ impl State {
                 }
             }
             "PRESENCE_UPDATE" => {
-                if let Ok(presence) = serde_json::from_value::<Presence>(data.clone()) {
-                    if let Some(guild_id) = presence.guild_id {
-                        if let Some(user) = data.pointer("/user") {
-                            self.upsert_user_from_value(user);
-                        }
-                        let key = (Some(guild_id), presence.user_id);
-                        let event = StoreEvent::PresenceUpdated {
-                            guild_id: Some(guild_id),
-                            user_id: presence.user_id,
-                        };
-                        self.presences.insert(key, presence);
-                        events.push(event);
+                if let Ok(presence) = serde_json::from_value::<Presence>(data.clone())
+                    && let Some(guild_id) = presence.guild_id
+                {
+                    if let Some(user) = data.pointer("/user") {
+                        self.upsert_user_from_value(user);
                     }
+                    let key = (Some(guild_id), presence.user_id);
+                    let event = StoreEvent::PresenceUpdated {
+                        guild_id: Some(guild_id),
+                        user_id: presence.user_id,
+                    };
+                    self.presences.insert(key, presence);
+                    events.push(event);
                 }
             }
             "RELATIONSHIP_ADD" | "RELATIONSHIP_REMOVE" => {
@@ -334,17 +334,21 @@ impl State {
                 if let Ok(relationship) =
                     serde_json::from_value::<Relationship>(relationship.clone())
                 {
-                    self.relationships
-                        .insert(relationship.id, relationship);
+                    self.relationships.insert(relationship.id, relationship);
                 }
             }
         }
 
-        if let Some(entries) = data.pointer("/read_state/entries").and_then(Value::as_array) {
+        if let Some(entries) = data
+            .pointer("/read_state/entries")
+            .and_then(Value::as_array)
+        {
             for entry in entries {
                 if let (Some(channel_id), Some(last)) = (
                     snowflake(entry, "id"),
-                    entry["last_message_id"].as_str().and_then(|s| s.parse().ok()),
+                    entry["last_message_id"]
+                        .as_str()
+                        .and_then(|s| s.parse().ok()),
                 ) {
                     self.read_states.insert(channel_id, last);
                 }
@@ -395,9 +399,7 @@ impl State {
                     if let Some(user) = presence.get("user") {
                         self.upsert_user_from_value(user);
                     }
-                    if let Ok(presence) =
-                        serde_json::from_value::<Presence>(presence.clone())
-                    {
+                    if let Ok(presence) = serde_json::from_value::<Presence>(presence.clone()) {
                         self.presences.insert((Some(id), user_id), presence);
                     }
                 }
@@ -406,9 +408,7 @@ impl State {
 
         if let Some(voice_states) = data["voice_states"].as_array() {
             for voice_state in voice_states {
-                if let Ok(voice_state) =
-                    serde_json::from_value::<VoiceState>(voice_state.clone())
-                {
+                if let Ok(voice_state) = serde_json::from_value::<VoiceState>(voice_state.clone()) {
                     self.voice_states.insert(voice_state.key(), voice_state);
                 }
             }
@@ -422,16 +422,16 @@ impl State {
     }
 
     fn guild_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        if let Some(id) = snowflake(data, "id") {
-            if let Some(guild) = self.guilds.get_mut(&id) {
-                if let Some(name) = data["name"].as_str() {
-                    guild.name = name.to_owned();
-                }
-                if let Some(icon) = data.get("icon") {
-                    guild.icon = icon.as_str().map(str::to_owned);
-                }
-                events.push(StoreEvent::GuildUpdated(id));
+        if let Some(id) = snowflake(data, "id")
+            && let Some(guild) = self.guilds.get_mut(&id)
+        {
+            if let Some(name) = data["name"].as_str() {
+                guild.name = name.to_owned();
             }
+            if let Some(icon) = data.get("icon") {
+                guild.icon = icon.as_str().map(str::to_owned);
+            }
+            events.push(StoreEvent::GuildUpdated(id));
         }
     }
 
@@ -463,10 +463,7 @@ impl State {
         if data.get("author").is_some() {
             if let Ok(message) = serde_json::from_value::<Message>(data.clone()) {
                 self.upsert_user(message.author.clone());
-                self.messages
-                    .entry(channel_id)
-                    .or_default()
-                    .insert(message);
+                self.messages.entry(channel_id).or_default().insert(message);
             }
         } else {
             let Some(buffer) = self.messages.get_mut(&channel_id) else {
@@ -479,15 +476,15 @@ impl State {
                 if let Some(edited) = data.get("edited_timestamp") {
                     message.edited_timestamp = edited.as_str().map(str::to_owned);
                 }
-                if let Some(embeds) = data.get("embeds") {
-                    if let Ok(embeds) = serde_json::from_value(embeds.clone()) {
-                        message.embeds = embeds;
-                    }
+                if let Some(embeds) = data.get("embeds")
+                    && let Ok(embeds) = serde_json::from_value(embeds.clone())
+                {
+                    message.embeds = embeds;
                 }
-                if let Some(attachments) = data.get("attachments") {
-                    if let Ok(attachments) = serde_json::from_value(attachments.clone()) {
-                        message.attachments = attachments;
-                    }
+                if let Some(attachments) = data.get("attachments")
+                    && let Ok(attachments) = serde_json::from_value(attachments.clone())
+                {
+                    message.attachments = attachments;
                 }
             });
             if !updated {
@@ -509,9 +506,9 @@ impl State {
         ) else {
             return;
         };
-        let Ok(emoji) = serde_json::from_value::<crate::message::ReactionEmoji>(
-            data["emoji"].clone(),
-        ) else {
+        let Ok(emoji) =
+            serde_json::from_value::<crate::message::ReactionEmoji>(data["emoji"].clone())
+        else {
             return;
         };
         let me = self.me.as_ref().map(|me| me.id) == Some(user_id);
@@ -631,7 +628,8 @@ impl State {
                 )
             })
             .collect();
-        channels.sort_by_key(|channel| std::cmp::Reverse(channel.last_message_id.map(|id| id.get())));
+        channels
+            .sort_by_key(|channel| std::cmp::Reverse(channel.last_message_id.map(|id| id.get())));
         channels
     }
 
@@ -646,7 +644,11 @@ impl State {
         self.messages
             .get(&channel_id)
             .and_then(|buffer| buffer.messages().last().map(|message| message.id))
-            .or_else(|| self.channels.get(&channel_id).and_then(|channel| channel.last_message_id))
+            .or_else(|| {
+                self.channels
+                    .get(&channel_id)
+                    .and_then(|channel| channel.last_message_id)
+            })
     }
 
     pub fn unread(&self, channel_id: Snowflake) -> bool {
@@ -663,7 +665,9 @@ impl State {
     pub fn users_in_channel_voice(&self, guild_id: Snowflake, channel_id: Snowflake) -> Vec<User> {
         self.voice_states
             .values()
-            .filter(|state| state.guild_id == Some(guild_id) && state.channel_id == Some(channel_id))
+            .filter(|state| {
+                state.guild_id == Some(guild_id) && state.channel_id == Some(channel_id)
+            })
             .filter_map(|state| self.users.get(&state.user_id).cloned())
             .collect()
     }
@@ -776,7 +780,10 @@ mod tests {
             let messages = state.messages(Snowflake(10));
             assert_eq!(messages.len(), 2);
             assert_eq!(messages[1].content, "world");
-            assert_eq!(state.channels[&Snowflake(10)].last_message_id, Some(Snowflake(101)));
+            assert_eq!(
+                state.channels[&Snowflake(10)].last_message_id,
+                Some(Snowflake(101))
+            );
         });
     }
 

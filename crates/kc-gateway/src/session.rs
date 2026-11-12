@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use kc_core::super_properties::SuperProperties;
-use kc_core::Token;
+use kc_core::{Snowflake, Token};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -46,6 +46,64 @@ struct Session {
     seq: Option<u64>,
 }
 
+/// A handle for sending payloads (voice state, streams, presence) over the
+/// gateway connection owned by the run loop.
+#[derive(Clone)]
+pub struct GatewayHandle {
+    tx: mpsc::UnboundedSender<Value>,
+}
+
+impl GatewayHandle {
+    pub fn send(&self, payload: Value) {
+        let _ = self.tx.send(payload);
+    }
+
+    pub fn update_voice_state(
+        &self,
+        guild_id: Option<Snowflake>,
+        channel_id: Option<Snowflake>,
+        self_mute: bool,
+        self_deaf: bool,
+        self_video: bool,
+    ) {
+        self.send(json!({
+            "op": 4,
+            "d": {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "self_mute": self_mute,
+                "self_deaf": self_deaf,
+                "self_video": self_video,
+                "flags": 2,
+            }
+        }));
+    }
+
+    pub fn stream_create(&self, guild_id: Snowflake, channel_id: Snowflake) {
+        self.send(json!({
+            "op": 18,
+            "d": {
+                "type": "guild",
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "preferred_region": null,
+            }
+        }));
+    }
+
+    pub fn stream_delete(&self, stream_key: &str) {
+        self.send(json!({"op": 19, "d": {"stream_key": stream_key}}));
+    }
+
+    pub fn stream_watch(&self, stream_key: &str) {
+        self.send(json!({"op": 20, "d": {"stream_key": stream_key}}));
+    }
+
+    pub fn stream_pause(&self, stream_key: &str, paused: bool) {
+        self.send(json!({"op": 22, "d": {"stream_key": stream_key, "paused": paused}}));
+    }
+}
+
 impl Gateway {
     pub fn new(token: Token) -> Self {
         Self {
@@ -54,9 +112,33 @@ impl Gateway {
         }
     }
 
+    /// Starts the connection on a Tokio task and returns the command handle
+    /// plus the event stream.
+    pub fn start(
+        self,
+    ) -> (
+        GatewayHandle,
+        mpsc::UnboundedReceiver<GatewayEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(self.run_with(event_tx, command_rx));
+        (GatewayHandle { tx: command_tx }, event_rx, task)
+    }
+
     /// Connects and publishes events until the connection ends. Reconnects with
     /// backoff internally; returns only on a fatal close.
     pub async fn run(self, events: mpsc::UnboundedSender<GatewayEvent>) {
+        let (_command_tx, command_rx) = mpsc::unbounded_channel();
+        self.run_with(events, command_rx).await;
+    }
+
+    async fn run_with(
+        self,
+        events: mpsc::UnboundedSender<GatewayEvent>,
+        mut commands: mpsc::UnboundedReceiver<Value>,
+    ) {
         let mut session = Session {
             id: None,
             resume_url: None,
@@ -65,7 +147,9 @@ impl Gateway {
         let mut backoff_ms = 1_000u64;
 
         loop {
-            let outcome = self.connect_once(&mut session, &events).await;
+            let outcome = self
+                .connect_once(&mut session, &events, &mut commands)
+                .await;
             match outcome {
                 Outcome::Fatal => {
                     info!("gateway stopped after fatal close");
@@ -89,6 +173,7 @@ impl Gateway {
         &self,
         session: &mut Session,
         events: &mpsc::UnboundedSender<GatewayEvent>,
+        commands: &mut mpsc::UnboundedReceiver<Value>,
     ) -> Outcome {
         let url = match (&session.id, &session.resume_url) {
             (Some(_), Some(resume)) => format!(
@@ -112,12 +197,10 @@ impl Gateway {
         let hello = loop {
             match read.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                        if value["op"].as_i64() == Some(10) {
-                            break value["d"]["heartbeat_interval"]
-                                .as_u64()
-                                .unwrap_or(41_250);
-                        }
+                    if let Ok(value) = serde_json::from_str::<Value>(&text)
+                        && value["op"].as_i64() == Some(10)
+                    {
+                        break value["d"]["heartbeat_interval"].as_u64().unwrap_or(41_250);
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
@@ -166,6 +249,15 @@ impl Gateway {
 
         loop {
             tokio::select! {
+                command = commands.recv(), if !commands.is_closed() => {
+                    let Some(payload) = command else {
+                        continue;
+                    };
+                    if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
+                        warn!(%error, "gateway command send failed");
+                        return Outcome::Reconnect { resumable: true };
+                    }
+                }
                 _ = heartbeat.tick() => {
                     if awaiting_ack {
                         warn!("gateway heartbeat not acknowledged; reconnecting");
@@ -286,7 +378,9 @@ fn identify_payload(token: &Token, properties: &SuperProperties) -> Value {
     })
 }
 
-fn close_parts(frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> (Option<u16>, String) {
+fn close_parts(
+    frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> (Option<u16>, String) {
     match frame {
         Some(frame) => (Some(frame.code.into()), frame.reason.to_string()),
         None => (None, String::new()),
@@ -323,7 +417,10 @@ mod tests {
 
     #[test]
     fn fatal_close_codes() {
-        assert_eq!(fatal_or_reconnect(Some(4004), String::new()), Outcome::Fatal);
+        assert_eq!(
+            fatal_or_reconnect(Some(4004), String::new()),
+            Outcome::Fatal
+        );
         assert!(matches!(
             fatal_or_reconnect(Some(1000), String::new()),
             Outcome::Reconnect { resumable: true }

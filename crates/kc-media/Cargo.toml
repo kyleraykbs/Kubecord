@@ -1,0 +1,22 @@
+[package]
+name = "kc-media"
+description = "GStreamer capture, codecs and rendering for kylecord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ashpd.workspace = true
+glib.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
+kc-core.workspace = true
+kc-voice.workspace = true
+opus2.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

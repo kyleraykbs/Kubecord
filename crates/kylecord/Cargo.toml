@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 kc-core.workspace = true
+kc-ui.workspace = true
 glib.workspace = true
 gtk.workspace = true
 libadwaita.workspace = true

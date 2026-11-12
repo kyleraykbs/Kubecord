@@ -68,18 +68,27 @@ impl<'de> Deserialize<'de> for Snowflake {
                 f.write_str("a snowflake as a decimal string or an integer")
             }
 
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Self::Value, E> {
                 value
                     .parse::<u64>()
                     .map(Snowflake)
                     .map_err(|_| E::custom(format!("invalid snowflake {value:?}")))
             }
 
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> std::result::Result<Self::Value, E> {
+            fn visit_u64<E: serde::de::Error>(
+                self,
+                value: u64,
+            ) -> std::result::Result<Self::Value, E> {
                 Ok(Snowflake(value))
             }
 
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> std::result::Result<Self::Value, E> {
+            fn visit_i64<E: serde::de::Error>(
+                self,
+                value: i64,
+            ) -> std::result::Result<Self::Value, E> {
                 u64::try_from(value)
                     .map(Snowflake)
                     .map_err(|_| E::custom(format!("negative snowflake {value}")))
@@ -98,7 +107,10 @@ mod tests {
     fn parses_and_serialises_as_string() {
         let id: Snowflake = serde_json::from_str(r#""175928847299117063""#).unwrap();
         assert_eq!(id, Snowflake(175_928_847_299_117_063));
-        assert_eq!(serde_json::to_string(&id).unwrap(), r#""175928847299117063""#);
+        assert_eq!(
+            serde_json::to_string(&id).unwrap(),
+            r#""175928847299117063""#
+        );
     }
 
     #[test]

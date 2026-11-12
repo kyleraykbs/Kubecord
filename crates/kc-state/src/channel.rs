@@ -79,11 +79,17 @@ impl ChannelType {
 
     /// Channels that can be joined for voice/video.
     pub const fn is_voice(self) -> bool {
-        matches!(self, Self::GuildVoice | Self::Dm | Self::GroupDm | Self::GuildStageVoice)
+        matches!(
+            self,
+            Self::GuildVoice | Self::Dm | Self::GroupDm | Self::GuildStageVoice
+        )
     }
 
     pub const fn is_thread(self) -> bool {
-        matches!(self, Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread)
+        matches!(
+            self,
+            Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread
+        )
     }
 
     pub const fn is_category(self) -> bool {

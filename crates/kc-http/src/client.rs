@@ -7,7 +7,7 @@ use tracing::debug;
 
 use crate::API_BASE;
 use crate::error::{ApiErrorBody, Error, Result};
-use crate::rate_limit::{normalise_route, RateLimiter};
+use crate::rate_limit::{RateLimiter, normalise_route};
 
 const USER_AGENT: &str = kc_core::super_properties::USER_AGENT;
 const MAX_ATTEMPTS: usize = 5;
@@ -141,7 +141,8 @@ impl HttpClient {
             if bytes.is_empty() {
                 return Ok(Value::Null);
             }
-            return serde_json::from_slice(&bytes).map_err(|source| Error::Decode { status, source });
+            return serde_json::from_slice(&bytes)
+                .map_err(|source| Error::Decode { status, source });
         }
 
         unreachable!("rate-limit loop returns")
@@ -196,14 +197,14 @@ impl HttpClient {
     // -- guilds and channels --------------------------------------------
 
     pub async fn guild(&self, guild_id: Snowflake) -> Result<Guild> {
-        let value = self.get(&format!("/guilds/{guild_id}?with_counts=true")).await?;
+        let value = self
+            .get(&format!("/guilds/{guild_id}?with_counts=true"))
+            .await?;
         Self::parse(value, StatusCode::OK)
     }
 
     pub async fn guild_channels(&self, guild_id: Snowflake) -> Result<Vec<Channel>> {
-        let value = self
-            .get(&format!("/guilds/{guild_id}/channels"))
-            .await?;
+        let value = self.get(&format!("/guilds/{guild_id}/channels")).await?;
         Self::parse(value, StatusCode::OK)
     }
 
@@ -273,11 +274,7 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
-    pub async fn delete_message(
-        &self,
-        channel_id: Snowflake,
-        message_id: Snowflake,
-    ) -> Result<()> {
+    pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
         self.delete(&format!("/channels/{channel_id}/messages/{message_id}"))
             .await?;
         Ok(())
@@ -289,11 +286,7 @@ impl HttpClient {
         Ok(())
     }
 
-    pub async fn ack_message(
-        &self,
-        channel_id: Snowflake,
-        message_id: Snowflake,
-    ) -> Result<()> {
+    pub async fn ack_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
         self.post(
             &format!("/channels/{channel_id}/messages/{message_id}/ack"),
             json!({ "token": null }),
@@ -388,14 +381,12 @@ impl HttpClient {
                 retry_after: None,
             })?;
 
-        let upload_url = upload["upload_url"]
-            .as_str()
-            .ok_or_else(|| Error::Api {
-                status: StatusCode::OK,
-                code: None,
-                message: "attachment reservation has no upload_url".to_owned(),
-                retry_after: None,
-            })?;
+        let upload_url = upload["upload_url"].as_str().ok_or_else(|| Error::Api {
+            status: StatusCode::OK,
+            code: None,
+            message: "attachment reservation has no upload_url".to_owned(),
+            retry_after: None,
+        })?;
 
         let response = self
             .http
@@ -518,16 +509,16 @@ mod tests {
     #[test]
     fn emoji_encoding() {
         assert_eq!(encode_emoji("👍"), "%F0%9F%91%8D");
-        assert_eq!(encode_emoji("name:123456789012345678"), "name:123456789012345678");
+        assert_eq!(
+            encode_emoji("name:123456789012345678"),
+            "name:123456789012345678"
+        );
     }
 
     #[test]
     fn attachment_flow_builds() {
         let client = HttpClient::new(Token::new("test-token"));
-        let request = client.build_request(
-            Method::POST,
-            "/channels/10/attachments",
-        );
+        let request = client.build_request(Method::POST, "/channels/10/attachments");
         assert_eq!(request.method(), Method::POST);
     }
 }

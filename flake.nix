@@ -48,6 +48,7 @@
             gst-plugins-bad
             gst-plugins-ugly
             gst-libav
+            gst-plugins-rs
           ];
 
           nativeBuildInputs = with pkgs; [
@@ -58,12 +59,15 @@
           buildInputs = with pkgs; [
             gtk4
             libadwaita
+            opus
           ] ++ gstPlugins;
 
           commonArgs = {
             inherit src nativeBuildInputs buildInputs;
+            pname = "kylecord";
             strictDeps = true;
             GIT_HASH = inputs.self.shortRev or "dirty";
+            GST_PLUGIN_SYSTEM_PATH_1_0 = lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins;
           };
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -97,10 +101,13 @@
             packages = [
               rustToolchain
               pkgs.cargo-nextest
+              pkgs.grim
               pkgs.nixfmt
             ];
             shellHook = ''
               export RUST_BACKTRACE=1
+              export XDG_DATA_DIRS="${pkgs.libadwaita}/share:${pkgs.gtk4}/share:${pkgs.gsettings-desktop-schemas}/share:$XDG_DATA_DIRS"
+              export GST_PLUGIN_SYSTEM_PATH_1_0="${lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}:$GST_PLUGIN_SYSTEM_PATH_1_0"
             '';
           };
 
@@ -116,14 +123,7 @@
               }
             );
             fmt = craneLib.cargoFmt { inherit src; };
-            tests = craneLib.cargoNextest (
-              commonArgs
-              // {
-                inherit cargoArtifacts;
-                partitions = 1;
-                partitionType = "count";
-              }
-            );
+            tests = craneLib.cargoTest (commonArgs // { inherit cargoArtifacts; });
           };
         };
     };

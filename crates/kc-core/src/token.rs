@@ -72,7 +72,8 @@ mod tests {
 
     #[test]
     fn debug_is_redacted() {
-        let token = Token::new("MTA5ND_middle_part_stays_secret_and_hidden_TAIL");
+        let token =
+            Token::new("MTA5ND_middle_part_stays_secret_and_hidden_TAIL");
         let rendered = format!("{token:?}");
         assert!(!rendered.contains("Gabcdef"));
         assert!(!rendered.contains("0123456789"));

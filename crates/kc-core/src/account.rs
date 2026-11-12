@@ -70,11 +70,10 @@ impl AccountStore {
             path: path.clone(),
             source,
         })?;
-        let file: AccountsFile =
-            serde_json::from_slice(&bytes).map_err(|source| Error::Json {
-                path: path.clone(),
-                source,
-            })?;
+        let file: AccountsFile = serde_json::from_slice(&bytes).map_err(|source| Error::Json {
+            path: path.clone(),
+            source,
+        })?;
         Ok(Self {
             path,
             accounts: file.accounts,
