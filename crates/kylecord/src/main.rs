@@ -1,5 +1,6 @@
 use gtk::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()

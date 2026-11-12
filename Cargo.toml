@@ -2,18 +2,25 @@
 resolver = "3"
 members = [
   "crates/kc-core",
+  "crates/kc-state",
+  "crates/kc-http",
+  "crates/kc-gateway",
+  "crates/kc-probe",
   "crates/kylecord",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "GPL-3.0-only"
 repository = "https://github.com/kyleraykbs/kylecord"
 
 [workspace.dependencies]
 kc-core = { path = "crates/kc-core" }
+kc-state = { path = "crates/kc-state" }
+kc-http = { path = "crates/kc-http" }
+kc-gateway = { path = "crates/kc-gateway" }
 
 anyhow = "1"
 base64 = "0.22"
@@ -24,10 +31,13 @@ futures-util = "0.3"
 glib = "0.22"
 gtk = { package = "gtk4", version = "0.11" }
 libadwaita = "0.9"
+parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
