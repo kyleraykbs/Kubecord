@@ -570,7 +570,7 @@ impl AppState {
     }
 
     fn select_guild(self: &Rc<Self>, guild_id: Snowflake) {
-        {
+        let fetch = {
             let mut model = self.model.borrow_mut();
             let Some(active) = model.active else { return };
             let Some(session) = model.sessions.get_mut(&active) else {
@@ -579,10 +579,27 @@ impl AppState {
             session.dm_mode = false;
             session.selected_guild = Some(guild_id);
             session.selected_channel = None;
-        }
+
+            if !session.loaded_guild_channels.contains(&guild_id)
+                && session.loading_guild_channels.insert(guild_id)
+            {
+                Some((active, session.http.clone(), session.store.clone()))
+            } else {
+                None
+            }
+        };
         self.clear_typing();
         self.set_status("");
         self.render_all();
+        if let Some((account, http, store)) = fetch {
+            let _ = self.cmd_tx.try_send(Command::FetchGuildChannels {
+                account,
+                http,
+                store,
+                guild: guild_id,
+            });
+            self.set_status("Loading channels…");
+        }
     }
 
     fn open_channel(self: &Rc<Self>, channel: Channel) {
@@ -1614,6 +1631,18 @@ impl AppState {
                     self.update_title();
                 }
             }
+            UiEvent::GuildChannelsFailed {
+                account,
+                guild,
+                message,
+            } => {
+                if let Some(session) = self.model.borrow_mut().sessions.get_mut(&account) {
+                    session.loading_guild_channels.remove(&guild);
+                }
+                if self.model.borrow().active == Some(account) {
+                    self.set_status(&message);
+                }
+            }
             UiEvent::StoreEvent { account, event } => {
                 self.handle_store_event(account, event);
             }
@@ -1788,6 +1817,23 @@ impl AppState {
                 {
                     self.render_messages();
                     self.ack_newest(account, channel_id);
+                }
+            }
+            StoreEvent::GuildChannelsLoaded(guild) => {
+                if let Some(session) = self.model.borrow_mut().sessions.get_mut(&account) {
+                    session.loading_guild_channels.remove(&guild);
+                    session.loaded_guild_channels.insert(guild);
+                }
+                if active == Some(account)
+                    && self
+                        .model
+                        .borrow()
+                        .sessions
+                        .get(&account)
+                        .is_some_and(|session| session.selected_guild == Some(guild))
+                {
+                    self.set_status("");
+                    self.render_channels();
                 }
             }
             StoreEvent::Typing {

@@ -137,6 +137,7 @@ pub enum StoreEvent {
     },
     StreamUpdated(String),
     RelationshipsUpdated,
+    GuildChannelsLoaded(Snowflake),
     HistoryLoaded(Snowflake),
 }
 
@@ -729,6 +730,36 @@ impl Store {
         }
     }
 
+    /// Merges the channel list returned by `GET /guilds/{id}/channels` into the
+    /// gateway cache. Gateway READY guilds can be partial and omit channels.
+    pub fn load_guild_channels(&self, guild_id: Snowflake, channels: Vec<Channel>) {
+        let events = {
+            let mut state = self.inner.write();
+            let mut events = Vec::with_capacity(channels.len());
+            for mut channel in channels {
+                if channel.guild_id.is_none() {
+                    channel.guild_id = Some(guild_id);
+                }
+                let id = channel.id;
+                let is_new = state.channels.insert(id, channel.clone()).is_none();
+                if let Some(recipients) = &channel.recipients {
+                    for user in recipients {
+                        state.users.insert(user.id, user.clone());
+                    }
+                }
+                events.push(if is_new {
+                    StoreEvent::ChannelAdded(id)
+                } else {
+                    StoreEvent::ChannelUpdated(id)
+                });
+            }
+            events
+        };
+        for event in events {
+            let _ = self.tx.send(event);
+        }
+        let _ = self.tx.send(StoreEvent::GuildChannelsLoaded(guild_id));
+    }
     pub fn load_history(&self, channel_id: Snowflake, messages: Vec<Message>) {
         {
             let mut state = self.inner.write();
@@ -828,7 +859,6 @@ mod tests {
 
     #[test]
     fn history_merges_in_id_order_without_duplicates() {
-        let store = Store::new();
         let mut state = State::default();
         state.load_history(
             Snowflake(10),
@@ -849,7 +879,6 @@ mod tests {
             messages.iter().map(|m| m.id.0).collect::<Vec<_>>(),
             vec![100, 101, 102]
         );
-        let _ = store;
     }
 
     #[test]
@@ -859,5 +888,56 @@ mod tests {
         assert!(store.read(|state| state.unread(Snowflake(10))));
         store.mark_read(Snowflake(10), Snowflake(100));
         assert!(!store.read(|state| state.unread(Snowflake(10))));
+    }
+
+    #[test]
+    fn rest_channel_refresh_populates_partial_guild_and_updates_existing() {
+        let store = Store::new();
+        store.apply(
+            "READY",
+            &json!({
+                "user": {"id": "1", "username": "kyle"},
+                "guilds": [{"id": "5", "unavailable": false}]
+            }),
+        );
+        let channels = vec![
+            serde_json::from_value(
+                json!({"id":"10", "type":4, "name":"Text Channels", "position":0}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"id":"11", "type":0, "name":"general", "position":1}))
+                .unwrap(),
+            serde_json::from_value(json!({"id":"12", "type":2, "name":"General", "position":2}))
+                .unwrap(),
+        ];
+        store.load_guild_channels(Snowflake(5), channels);
+        store.read(|state| {
+            let channels = state.guild_channels(Snowflake(5));
+            assert_eq!(channels.len(), 3);
+            assert_eq!(channels[1].display_name(), "general");
+            assert_eq!(channels[2].display_name(), "General");
+            assert!(
+                channels
+                    .iter()
+                    .all(|channel| channel.guild_id == Some(Snowflake(5)))
+            );
+        });
+
+        store.load_guild_channels(
+            Snowflake(5),
+            vec![
+                serde_json::from_value(json!({
+                    "id":"11", "type":0, "name":"general-renamed", "position":1
+                }))
+                .unwrap(),
+            ],
+        );
+        store.read(|state| {
+            assert_eq!(state.guild_channels(Snowflake(5)).len(), 3);
+            assert_eq!(
+                state.channels[&Snowflake(11)].display_name(),
+                "general-renamed"
+            );
+        });
     }
 }

@@ -76,6 +76,9 @@ pub struct Session {
     pub last_typing: Option<Instant>,
     /// Channels whose history has already been requested this run.
     pub fetched: HashSet<Snowflake>,
+    /// Guilds whose channel lists were requested through REST.
+    pub loaded_guild_channels: HashSet<Snowflake>,
+    pub loading_guild_channels: HashSet<Snowflake>,
     pub connection: ConnState,
     pub voice: Option<VoiceUiState>,
 }
@@ -92,6 +95,8 @@ impl Session {
             dm_mode: false,
             last_typing: None,
             fetched: HashSet::new(),
+            loading_guild_channels: HashSet::new(),
+            loaded_guild_channels: HashSet::new(),
             connection: ConnState::Connecting,
             voice: None,
             account,
@@ -156,6 +161,12 @@ pub enum Command {
         account: AccountId,
         http: HttpClient,
     },
+    FetchGuildChannels {
+        account: AccountId,
+        http: HttpClient,
+        store: Store,
+        guild: Snowflake,
+    },
     JoinVoice {
         account: AccountId,
         guild_id: Option<Snowflake>,
@@ -207,6 +218,11 @@ pub enum UiEvent {
     Guilds {
         account: AccountId,
         guilds: Vec<Guild>,
+    },
+    GuildChannelsFailed {
+        account: AccountId,
+        guild: Snowflake,
+        message: String,
     },
     StoreEvent {
         account: AccountId,
@@ -331,6 +347,23 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                 let _ = ui.send(UiEvent::Guilds { account, guilds }).await;
             }
             Err(error) => send_http_error(&ui, Some(account), &error).await,
+        },
+        Command::FetchGuildChannels {
+            account,
+            http,
+            store,
+            guild,
+        } => match http.guild_channels(guild).await {
+            Ok(channels) => store.load_guild_channels(guild, channels),
+            Err(error) => {
+                let _ = ui
+                    .send(UiEvent::GuildChannelsFailed {
+                        account,
+                        guild,
+                        message: describe_http_error(&error),
+                    })
+                    .await;
+            }
         },
         Command::JoinVoice {
             account,
