@@ -20,6 +20,7 @@ pub struct VideoSource {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     _portal: Option<crate::portal::ScreenCast>,
+    _camera: Option<crate::portal::CameraCast>,
 }
 
 /// Settings shared by camera and screen capture.
@@ -119,6 +120,7 @@ impl VideoSource {
             stop,
             thread: Some(thread),
             _portal: None,
+            _camera: None,
         })
     }
 
@@ -170,7 +172,12 @@ impl VideoSource {
         settings: VideoSettings,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
-        Self::from_pipewire(camera.node_id, camera.fd(), &settings, on_frame)
+        let node_id = camera.node_id;
+        let fd = camera.fd();
+        let mut source = Self::from_pipewire(node_id, fd, &settings, on_frame)?;
+        // The portal owns the PipeWire fd; keep it alive with the pipeline.
+        source._camera = Some(camera);
+        Ok(source)
     }
 
     fn from_pipewire(
