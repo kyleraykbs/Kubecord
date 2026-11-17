@@ -92,15 +92,12 @@ pub async fn request_camera() -> Result<Option<CameraCast>> {
             .cloned()
             .unwrap_or_default()
     };
-    let Some(stream) = streams
-        .iter()
-        .find(|stream| {
-            let description = describe(stream).to_ascii_lowercase();
-            // The UGREEN capture card on this machine is single-claimant; a
-            // camera client must never take it. Prefer any other camera.
-            !description.contains("ugreen") && !description.contains("macrosilicon")
-        })
-    else {
+    let Some(stream) = streams.iter().find(|stream| {
+        let description = describe(stream).to_ascii_lowercase();
+        // The UGREEN capture card on this machine is single-claimant; a
+        // camera client must never take it. Prefer any other camera.
+        !description.contains("ugreen") && !description.contains("macrosilicon")
+    }) else {
         return Ok(None);
     };
     let name = describe(stream);

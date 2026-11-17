@@ -503,7 +503,7 @@ mod tests {
         assert!(headers.contains_key("x-super-properties"));
         assert_eq!(headers["x-discord-locale"], "en-US");
         assert_eq!(headers["origin"], "https://discord.com");
-        assert!(headers["user-agent"].to_str().unwrap().contains("discord/"));
+        assert!(headers["user-agent"].to_str().unwrap().contains("Chrome/"));
     }
 
     #[test]

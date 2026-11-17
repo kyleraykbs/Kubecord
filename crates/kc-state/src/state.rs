@@ -737,8 +737,7 @@ impl State {
                     continue;
                 };
                 for state in states {
-                    let Ok(mut voice_state) =
-                        serde_json::from_value::<VoiceState>(state.clone())
+                    let Ok(mut voice_state) = serde_json::from_value::<VoiceState>(state.clone())
                     else {
                         continue;
                     };

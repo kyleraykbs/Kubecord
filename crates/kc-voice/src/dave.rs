@@ -44,7 +44,11 @@ impl Dave {
             .session
             .create_key_package()
             .map_err(|error| Error::Message(format!("DAVE key package: {error}")))?;
-        tracing::info!(version = self.version, size = package.len(), "DAVE key package");
+        tracing::info!(
+            version = self.version,
+            size = package.len(),
+            "DAVE key package"
+        );
         Ok(package)
     }
 

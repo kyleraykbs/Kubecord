@@ -83,10 +83,12 @@ mod tests {
         assert_eq!(value["os"], "Windows");
         assert_eq!(value["browser"], "Chrome");
         assert_eq!(value["client_build_number"], CLIENT_BUILD_NUMBER);
-        assert!(value["browser_user_agent"]
-            .as_str()
-            .unwrap()
-            .contains("Chrome/"));
+        assert!(
+            value["browser_user_agent"]
+                .as_str()
+                .unwrap()
+                .contains("Chrome/")
+        );
         assert!(value.get("client_version").is_none());
     }
 }

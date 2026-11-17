@@ -114,20 +114,37 @@ struct AppState {
 
     // Guild rail and channel sidebar.
     guild_box: gtk::Box,
+    guild_name_label: gtk::Label,
+    guild_subtitle_label: gtk::Label,
     channel_box: gtk::Box,
+
+    // Channel header.
+    channel_glyph_label: gtk::Label,
+    channel_glyph_image: gtk::Image,
+    channel_title_label: gtk::Label,
+    channel_topic_label: gtk::Label,
+    search_entry: gtk::SearchEntry,
+    members_toggle: gtk::ToggleButton,
+    members_panel: gtk::Box,
+    members_box: gtk::Box,
+    members_count_label: gtk::Label,
 
     // Message area.
     messages_scroll: gtk::ScrolledWindow,
     messages_box: gtk::Box,
     typing_label: gtk::Label,
-    voice_bar: gtk::Box,
-    voice_label: gtk::Label,
+    voice_panel: gtk::Box,
+    voice_channel_label: gtk::Label,
     voice_join: gtk::Button,
     voice_leave: gtk::Button,
     voice_mute: gtk::ToggleButton,
     voice_deafen: gtk::ToggleButton,
     voice_camera: gtk::ToggleButton,
     voice_screen: gtk::ToggleButton,
+    emoji_button: gtk::MenuButton,
+    user_avatar: adw::Avatar,
+    user_name_label: gtk::Label,
+    user_status_label: gtk::Label,
     composer: gtk::TextView,
     send_button: gtk::Button,
     status_bar: gtk::Label,
@@ -136,6 +153,10 @@ struct AppState {
     cmd_tx: async_channel::Sender<Command>,
     typing_generation: Rc<Cell<u64>>,
     last_rendered_channel: Cell<Option<Snowflake>>,
+    message_filter: RefCell<String>,
+    search_guard: Cell<bool>,
+    show_members: Cell<bool>,
+    members_guard: Cell<bool>,
     speaking: RefCell<HashSet<Snowflake>>,
     speaking_generation: RefCell<HashMap<Snowflake, u64>>,
 }
@@ -191,19 +212,6 @@ impl AppState {
         // -- header ------------------------------------------------------
         let header = adw::HeaderBar::new();
 
-        let account_button = gtk::MenuButton::new();
-        account_button.set_label("Account");
-        let account_popover = gtk::Popover::new();
-        let account_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        account_popover_box.set_margin_top(6);
-        account_popover_box.set_margin_bottom(6);
-        account_popover_box.set_margin_start(6);
-        account_popover_box.set_margin_end(6);
-        account_popover_box.set_width_request(220);
-        account_popover.set_child(Some(&account_popover_box));
-        account_button.set_popover(Some(&account_popover));
-        header.pack_start(&account_button);
-
         let window_title = adw::WindowTitle::new("kylecord", "");
         header.set_title_widget(Some(&window_title));
 
@@ -218,6 +226,8 @@ impl AppState {
         let guild_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         guild_box.set_margin_top(8);
         guild_box.set_margin_bottom(8);
+        guild_box.set_margin_start(8);
+        guild_box.set_margin_end(8);
         guild_box.set_valign(gtk::Align::Start);
         let guild_scroll = gtk::ScrolledWindow::new();
         guild_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -225,16 +235,214 @@ impl AppState {
         guild_scroll.set_child(Some(&guild_box));
 
         // -- channel sidebar ---------------------------------------------
+        let guild_name_label = gtk::Label::new(None);
+        guild_name_label.set_xalign(0.0);
+        guild_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        guild_name_label.add_css_class("title-4");
+
+        let guild_subtitle_label = gtk::Label::new(None);
+        guild_subtitle_label.set_xalign(0.0);
+        guild_subtitle_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        guild_subtitle_label.add_css_class("dim-label");
+        guild_subtitle_label.add_css_class("caption");
+
+        let guild_header = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        guild_header.set_margin_start(10);
+        guild_header.set_margin_end(10);
+        guild_header.set_margin_top(10);
+        guild_header.set_margin_bottom(4);
+        guild_header.append(&guild_name_label);
+        guild_header.append(&guild_subtitle_label);
+
         let channel_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        channel_box.set_margin_top(8);
+        channel_box.set_margin_top(2);
         channel_box.set_margin_bottom(8);
         channel_box.set_margin_start(6);
         channel_box.set_margin_end(6);
         channel_box.set_valign(gtk::Align::Start);
         let channel_scroll = gtk::ScrolledWindow::new();
         channel_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        channel_scroll.set_width_request(220);
+        channel_scroll.set_vexpand(true);
         channel_scroll.set_child(Some(&channel_box));
+
+        // Shown while a voice channel is selected and the account is not
+        // connected to voice. The connected state uses the card below.
+        let voice_join = gtk::Button::new();
+        voice_join.add_css_class("suggested-action");
+        voice_join.set_margin_start(8);
+        voice_join.set_margin_end(8);
+        voice_join.set_margin_top(4);
+        voice_join.set_margin_bottom(4);
+        voice_join.set_child(Some(&icon_label_row(
+            "audio-input-microphone-symbolic",
+            "Join Voice",
+        )));
+        voice_join.set_visible(false);
+
+        // Voice connected card. It stays visible for as long as the account
+        // has a voice session, whichever channel is being browsed.
+        let voice_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        voice_panel.add_css_class("card");
+        voice_panel.set_margin_start(8);
+        voice_panel.set_margin_end(8);
+        voice_panel.set_margin_top(4);
+        voice_panel.set_margin_bottom(4);
+        let voice_panel_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        voice_panel_content.set_margin_top(8);
+        voice_panel_content.set_margin_bottom(8);
+        voice_panel_content.set_margin_start(8);
+        voice_panel_content.set_margin_end(8);
+
+        let voice_connected = gtk::Label::new(Some("Voice Connected"));
+        voice_connected.set_xalign(0.0);
+        voice_connected.add_css_class("caption");
+        voice_connected.add_css_class("success");
+
+        let voice_channel_label = gtk::Label::new(None);
+        voice_channel_label.set_xalign(0.0);
+        voice_channel_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        set_bold(&voice_channel_label, true);
+
+        // No latency sample is exposed by the voice layer yet, so the ping
+        // stays a placeholder rather than an invented number.
+        let voice_ping_label = gtk::Label::new(Some("-- ms"));
+        voice_ping_label.add_css_class("dim-label");
+        voice_ping_label.add_css_class("caption");
+
+        let voice_channel_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        voice_channel_row.append(&voice_channel_label);
+        voice_channel_row.append(&voice_ping_label);
+
+        let voice_camera = toggle_icon_button("camera-video-symbolic", "Camera");
+        voice_camera.set_tooltip_text(Some("Turn On Camera"));
+        let voice_screen = toggle_icon_button("video-display-symbolic", "Share");
+        voice_screen.set_tooltip_text(Some("Share Your Screen"));
+        let voice_leave = icon_button("phone-hangup-symbolic", "Disconnect");
+        voice_leave.set_tooltip_text(Some("Disconnect"));
+
+        let voice_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        voice_buttons.append(&voice_camera);
+        voice_buttons.append(&voice_screen);
+        voice_buttons.append(&voice_leave);
+
+        voice_panel_content.append(&voice_connected);
+        voice_panel_content.append(&voice_channel_row);
+        voice_panel_content.append(&voice_buttons);
+        voice_panel.append(&voice_panel_content);
+        voice_panel.set_visible(false);
+
+        // User panel, fixed at the bottom of the sidebar.
+        let user_avatar = adw::Avatar::new(32, None, true);
+
+        let user_name_label = gtk::Label::new(None);
+        user_name_label.set_xalign(0.0);
+        user_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        set_bold(&user_name_label, true);
+
+        let user_status_label = gtk::Label::new(Some("Offline"));
+        user_status_label.set_xalign(0.0);
+        user_status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        user_status_label.add_css_class("dim-label");
+        user_status_label.add_css_class("caption");
+
+        let user_text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        user_text.set_hexpand(true);
+        user_text.append(&user_name_label);
+        user_text.append(&user_status_label);
+
+        let voice_mute = toggle_icon_button("audio-input-microphone-symbolic", "Mute");
+        voice_mute.set_tooltip_text(Some("Mute Microphone"));
+        voice_mute.set_sensitive(false);
+        let voice_deafen = toggle_icon_button("audio-volume-high-symbolic", "Deafen");
+        voice_deafen.set_tooltip_text(Some("Deafen"));
+        voice_deafen.set_sensitive(false);
+
+        let account_button = gtk::MenuButton::new();
+        account_button.add_css_class("flat");
+        account_button.add_css_class("circular");
+        account_button.set_tooltip_text(Some("Account"));
+        if icon_available("emblem-system-symbolic") {
+            account_button.set_icon_name("emblem-system-symbolic");
+        } else {
+            account_button.set_label("Account");
+        }
+        let account_popover = gtk::Popover::new();
+        let account_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        account_popover_box.set_margin_top(6);
+        account_popover_box.set_margin_bottom(6);
+        account_popover_box.set_margin_start(6);
+        account_popover_box.set_margin_end(6);
+        account_popover_box.set_width_request(220);
+        account_popover.set_child(Some(&account_popover_box));
+        account_button.set_popover(Some(&account_popover));
+
+        let user_panel = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        user_panel.set_margin_start(8);
+        user_panel.set_margin_end(8);
+        user_panel.set_margin_top(6);
+        user_panel.set_margin_bottom(8);
+        user_panel.append(&user_avatar);
+        user_panel.append(&user_text);
+        user_panel.append(&voice_mute);
+        user_panel.append(&voice_deafen);
+        user_panel.append(&account_button);
+
+        let channel_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        channel_sidebar.set_width_request(240);
+        channel_sidebar.add_css_class("sidebar");
+        channel_sidebar.append(&guild_header);
+        channel_sidebar.append(&channel_scroll);
+        channel_sidebar.append(&voice_join);
+        channel_sidebar.append(&voice_panel);
+        channel_sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        channel_sidebar.append(&user_panel);
+
+        // -- channel header ----------------------------------------------
+        let channel_glyph_label = gtk::Label::new(Some("#"));
+        channel_glyph_label.set_xalign(0.5);
+        channel_glyph_label.add_css_class("dim-label");
+        channel_glyph_label.add_css_class("title-3");
+
+        let channel_glyph_image = gtk::Image::from_icon_name("audio-volume-high-symbolic");
+        channel_glyph_image.add_css_class("dim-label");
+        channel_glyph_image.set_visible(false);
+
+        let channel_glyph = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        channel_glyph.append(&channel_glyph_label);
+        channel_glyph.append(&channel_glyph_image);
+
+        let channel_title_label = gtk::Label::new(Some("kylecord"));
+        channel_title_label.set_xalign(0.0);
+        channel_title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        channel_title_label.add_css_class("title-3");
+
+        let channel_topic_label = gtk::Label::new(None);
+        channel_topic_label.set_xalign(0.0);
+        channel_topic_label.set_hexpand(true);
+        channel_topic_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        channel_topic_label.add_css_class("dim-label");
+        channel_topic_label.add_css_class("caption");
+
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_placeholder_text(Some("Search messages"));
+        search_entry.set_width_request(200);
+        search_entry.set_valign(gtk::Align::Center);
+
+        let members_toggle = toggle_icon_button("system-users-symbolic", "Members");
+        members_toggle.set_tooltip_text(Some("Member List"));
+        members_toggle.set_active(true);
+        members_toggle.set_sensitive(false);
+
+        let channel_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        channel_header.set_margin_start(16);
+        channel_header.set_margin_end(12);
+        channel_header.set_margin_top(8);
+        channel_header.set_margin_bottom(6);
+        channel_header.append(&channel_glyph);
+        channel_header.append(&channel_title_label);
+        channel_header.append(&channel_topic_label);
+        channel_header.append(&search_entry);
+        channel_header.append(&members_toggle);
 
         // -- messages and composer ----------------------------------------
         let messages_scroll = gtk::ScrolledWindow::new();
@@ -255,33 +463,6 @@ impl AppState {
         typing_label.add_css_class("dim-label");
         typing_label.set_visible(false);
 
-        // Fixed sibling of the message scroller and composer; shown only for
-        // voice channels so it survives message re-renders.
-        let voice_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        voice_bar.set_margin_start(12);
-        voice_bar.set_margin_end(12);
-        voice_bar.set_margin_top(4);
-        let voice_label = gtk::Label::new(None);
-        voice_label.set_xalign(0.0);
-        voice_label.set_hexpand(true);
-        voice_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        voice_label.add_css_class("title-4");
-        let voice_join = gtk::Button::with_label("Join");
-        voice_join.add_css_class("suggested-action");
-        let voice_leave = gtk::Button::with_label("Leave");
-        let voice_mute = gtk::ToggleButton::with_label("Mute");
-        let voice_deafen = gtk::ToggleButton::with_label("Deafen");
-        let voice_camera = gtk::ToggleButton::with_label("Camera");
-        let voice_screen = gtk::ToggleButton::with_label("Share screen");
-        voice_bar.append(&voice_label);
-        voice_bar.append(&voice_join);
-        voice_bar.append(&voice_leave);
-        voice_bar.append(&voice_mute);
-        voice_bar.append(&voice_deafen);
-        voice_bar.append(&voice_camera);
-        voice_bar.append(&voice_screen);
-        voice_bar.set_visible(false);
-
         let composer = gtk::TextView::new();
         composer.set_wrap_mode(gtk::WrapMode::WordChar);
         composer.set_accepts_tab(false);
@@ -298,8 +479,28 @@ impl AppState {
         composer_scroll.set_max_content_height(112);
         composer_scroll.set_propagate_natural_height(true);
         composer_scroll.set_hexpand(true);
-        composer_scroll.add_css_class("card");
         composer_scroll.set_child(Some(&composer));
+
+        // The picker is filled in `connect_signals`, where the shared state
+        // needed to insert into the buffer exists.
+        let emoji_button = gtk::MenuButton::new();
+        emoji_button.add_css_class("flat");
+        emoji_button.add_css_class("circular");
+        emoji_button.set_tooltip_text(Some("Emoji"));
+        emoji_button.set_valign(gtk::Align::End);
+        emoji_button.set_margin_end(4);
+        emoji_button.set_margin_bottom(4);
+        if icon_available("face-smile-symbolic") {
+            emoji_button.set_icon_name("face-smile-symbolic");
+        } else {
+            emoji_button.set_label("Emoji");
+        }
+
+        let composer_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        composer_box.add_css_class("card");
+        composer_box.set_hexpand(true);
+        composer_box.append(&composer_scroll);
+        composer_box.append(&emoji_button);
 
         let send_button = gtk::Button::with_label("Send");
         send_button.add_css_class("suggested-action");
@@ -310,15 +511,52 @@ impl AppState {
         composer_row.set_margin_end(12);
         composer_row.set_margin_top(6);
         composer_row.set_margin_bottom(12);
-        composer_row.append(&composer_scroll);
+        composer_row.append(&composer_box);
         composer_row.append(&send_button);
 
         let message_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
         message_area.set_hexpand(true);
+        message_area.append(&channel_header);
+        message_area.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         message_area.append(&messages_scroll);
         message_area.append(&typing_label);
-        message_area.append(&voice_bar);
         message_area.append(&composer_row);
+
+        // Optional right-hand member list, populated from cached guild members.
+        let members_title = gtk::Label::new(Some("Members"));
+        members_title.set_xalign(0.0);
+        members_title.add_css_class("title-4");
+
+        let members_count_label = gtk::Label::new(None);
+        members_count_label.set_xalign(0.0);
+        members_count_label.add_css_class("dim-label");
+        members_count_label.add_css_class("caption");
+
+        let members_header = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        members_header.set_margin_top(10);
+        members_header.set_margin_bottom(6);
+        members_header.set_margin_start(12);
+        members_header.set_margin_end(12);
+        members_header.append(&members_title);
+        members_header.append(&members_count_label);
+
+        let members_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        members_box.set_margin_bottom(8);
+        members_box.set_margin_start(6);
+        members_box.set_margin_end(6);
+        members_box.set_valign(gtk::Align::Start);
+        let members_scroll = gtk::ScrolledWindow::new();
+        members_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        members_scroll.set_vexpand(true);
+        members_scroll.set_child(Some(&members_box));
+
+        let members_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        members_panel.set_width_request(220);
+        members_panel.add_css_class("sidebar");
+        members_panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        members_panel.append(&members_header);
+        members_panel.append(&members_scroll);
+        members_panel.set_visible(false);
 
         let status_bar = gtk::Label::new(None);
         status_bar.set_xalign(0.0);
@@ -332,9 +570,10 @@ impl AppState {
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&guild_scroll);
         body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        body.append(&channel_scroll);
+        body.append(&channel_sidebar);
         body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         body.append(&message_area);
+        body.append(&members_panel);
 
         let chat_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat_page.append(&body);
@@ -357,18 +596,33 @@ impl AppState {
             window_title,
             connection_label,
             guild_box,
+            guild_name_label,
+            guild_subtitle_label,
             channel_box,
+            channel_glyph_label,
+            channel_glyph_image,
+            channel_title_label,
+            channel_topic_label,
+            search_entry,
+            members_toggle,
+            members_panel,
+            members_box,
+            members_count_label,
             messages_scroll,
             messages_box,
             typing_label,
-            voice_bar,
-            voice_label,
+            voice_panel,
+            voice_channel_label,
             voice_join,
             voice_leave,
             voice_mute,
             voice_deafen,
             voice_camera,
             voice_screen,
+            emoji_button,
+            user_avatar,
+            user_name_label,
+            user_status_label,
             composer,
             send_button,
             status_bar,
@@ -380,6 +634,10 @@ impl AppState {
             cmd_tx,
             typing_generation: Rc::new(Cell::new(0)),
             last_rendered_channel: Cell::new(None),
+            message_filter: RefCell::new(String::new()),
+            search_guard: Cell::new(false),
+            show_members: Cell::new(true),
+            members_guard: Cell::new(false),
             speaking: RefCell::new(HashSet::new()),
             speaking_generation: RefCell::new(HashMap::new()),
         })
@@ -418,6 +676,48 @@ impl AppState {
             glib::Propagation::Proceed
         });
         self.composer.add_controller(keys);
+
+        let app = self.clone();
+        self.search_entry.connect_search_changed(move |entry| {
+            if app.search_guard.get() {
+                return;
+            }
+            *app.message_filter.borrow_mut() = entry.text().trim().to_lowercase();
+            app.render_messages();
+        });
+
+        // A picker of common emoji; each button writes into the composer.
+        let emoji_popover = gtk::Popover::new();
+        let emoji_grid = gtk::Grid::new();
+        emoji_grid.set_row_spacing(2);
+        emoji_grid.set_column_spacing(2);
+        emoji_grid.set_margin_top(6);
+        emoji_grid.set_margin_bottom(6);
+        emoji_grid.set_margin_start(6);
+        emoji_grid.set_margin_end(6);
+        for (index, emoji) in COMPOSER_EMOJI.iter().enumerate() {
+            let button = gtk::Button::with_label(emoji);
+            button.add_css_class("flat");
+            let app = self.clone();
+            let popover = emoji_popover.clone();
+            let emoji = (*emoji).to_owned();
+            button.connect_clicked(move |_| {
+                app.insert_composer_text(&emoji);
+                popover.popdown();
+            });
+            emoji_grid.attach(&button, (index % 6) as i32, (index / 6) as i32, 1, 1);
+        }
+        emoji_popover.set_child(Some(&emoji_grid));
+        self.emoji_button.set_popover(Some(&emoji_popover));
+
+        let app = self.clone();
+        self.members_toggle.connect_toggled(move |button| {
+            if app.members_guard.get() {
+                return;
+            }
+            app.show_members.set(button.is_active());
+            app.render_members();
+        });
 
         let app = self.clone();
         self.voice_join.connect_clicked(move |_| app.join_voice());
@@ -488,6 +788,8 @@ impl AppState {
         }
         self.model.borrow_mut().active = Some(id);
         self.clear_typing();
+        self.clear_search();
+        self.last_rendered_channel.set(None);
         self.render_all();
     }
 
@@ -580,7 +882,11 @@ impl AppState {
             session.selected_guild = Some(guild_id);
             session.selected_channel = None;
 
-            if !session.loaded_guild_channels.contains(&guild_id)
+            let cached = !session
+                .store
+                .read(|state| state.guild_channels(guild_id).is_empty());
+            if !cached
+                && !session.loaded_guild_channels.contains(&guild_id)
                 && session.loading_guild_channels.insert(guild_id)
             {
                 Some((active, session.http.clone(), session.store.clone()))
@@ -803,63 +1109,93 @@ impl AppState {
         Some(active)
     }
 
-    fn render_voice_bar(self: &Rc<Self>) {
+    /// Renders the sidebar voice controls: the connected card whenever the
+    /// account holds a voice session, and the join prompt only for a selected
+    /// voice channel that has not been joined.
+    fn render_voice_panel(self: &Rc<Self>) {
         let snapshot = {
             let model = self.model.borrow();
             let Some(active) = model.active else {
-                self.voice_bar.set_visible(false);
+                self.voice_panel.set_visible(false);
+                self.voice_join.set_visible(false);
                 return;
             };
             let Some(session) = model.sessions.get(&active) else {
-                self.voice_bar.set_visible(false);
+                self.voice_panel.set_visible(false);
+                self.voice_join.set_visible(false);
                 return;
             };
-            let Some(channel_id) = session.selected_channel else {
-                self.voice_bar.set_visible(false);
-                return;
-            };
-            let channel = session
-                .store
-                .read(|state| state.channels.get(&channel_id).cloned());
-            let Some(channel) = channel else {
-                self.voice_bar.set_visible(false);
-                return;
-            };
-            if !(channel.kind.is_voice() && !channel.kind.is_text()) {
-                self.voice_bar.set_visible(false);
-                return;
-            }
-            (
-                channel.display_name(),
-                channel_id,
-                channel.guild_id,
-                session.voice.clone(),
-            )
+            let voice = session.voice.clone();
+            let selected_voice = session.selected_channel.is_some_and(|channel_id| {
+                session.store.read(|state| {
+                    state
+                        .channels
+                        .get(&channel_id)
+                        .is_some_and(|channel| channel.kind.is_voice() && !channel.kind.is_text())
+                })
+            });
+            let voice_channel = voice.as_ref().map(|voice| {
+                let name = session.store.read(|state| {
+                    state
+                        .channels
+                        .get(&voice.channel_id)
+                        .map(Channel::display_name)
+                });
+                let guild_name = voice.guild_id.and_then(|guild_id| {
+                    session
+                        .guilds
+                        .iter()
+                        .find(|guild| guild.id == guild_id)
+                        .map(|guild| guild.name.clone())
+                });
+                (name, guild_name)
+            });
+            (voice, selected_voice, voice_channel)
         };
 
-        let (name, channel_id, guild_id, voice) = snapshot;
-        self.voice_bar.set_visible(true);
-        self.voice_label.set_label(&name);
+        let (voice, selected_voice, voice_channel) = snapshot;
+        let joined = voice.is_some();
 
-        let joined = voice
+        self.voice_panel.set_visible(joined);
+        self.voice_join.set_visible(!joined && selected_voice);
+        self.voice_mute.set_sensitive(joined);
+        self.voice_deafen.set_sensitive(joined);
+
+        let (name, guild_name) = voice_channel.unwrap_or((None, None));
+        self.voice_channel_label
+            .set_label(&name.unwrap_or_else(|| "Voice channel".to_owned()));
+        match guild_name.filter(|name| !name.is_empty()) {
+            Some(guild) => self
+                .voice_channel_label
+                .set_tooltip_text(Some(&format!("Voice channel in {guild}"))),
+            None => self.voice_channel_label.set_tooltip_text(None),
+        }
+
+        let (muted, deafened, camera, streaming) = voice
             .as_ref()
-            .is_some_and(|voice| voice.channel_id == channel_id && voice.guild_id == guild_id);
-        self.voice_join.set_visible(!joined);
-        self.voice_leave.set_visible(joined);
-        self.voice_mute.set_visible(joined);
-        self.voice_deafen.set_visible(joined);
-        self.voice_camera.set_visible(joined);
-        self.voice_screen.set_visible(joined);
-        self.voice_screen.set_sensitive(joined);
+            .map(|voice| (voice.muted, voice.deafened, voice.camera, voice.streaming))
+            .unwrap_or((false, false, false, false));
 
-        let (muted, deafened, camera, streaming) = match (&voice, joined) {
-            (Some(voice), true) => (voice.muted, voice.deafened, voice.camera, voice.streaming),
-            _ => (false, false, false, false),
-        };
         self.voice_mute.set_active(muted);
         self.voice_deafen.set_active(deafened);
         self.voice_camera.set_active(camera);
         self.voice_screen.set_active(streaming);
+
+        self.voice_camera.set_tooltip_text(Some(if camera {
+            "Turn Off Camera"
+        } else {
+            "Turn On Camera"
+        }));
+        self.voice_screen.set_tooltip_text(Some(if streaming {
+            "Stop Sharing"
+        } else {
+            "Share Your Screen"
+        }));
+        if streaming {
+            self.voice_screen.add_css_class("suggested-action");
+        } else {
+            self.voice_screen.remove_css_class("suggested-action");
+        }
     }
 
     fn record_speaking(self: &Rc<Self>, account: AccountId, user_id: Snowflake, speaking: bool) {
@@ -903,7 +1239,9 @@ impl AppState {
         self.render_account_controls();
         self.render_guilds();
         self.render_channels();
-        self.render_voice_bar();
+        self.render_channel_header();
+        self.render_members();
+        self.render_voice_panel();
         self.render_messages();
         self.update_title();
         self.update_connection();
@@ -921,10 +1259,11 @@ impl AppState {
                 .iter()
                 .find(|account| session::account_id(&account.token) == id)
         });
-        let label = current
+        let name = current
             .map(|account| self.account_name(account))
-            .unwrap_or_else(|| "Account".to_owned());
-        self.account_button.set_label(&label);
+            .unwrap_or_else(|| "Not signed in".to_owned());
+        self.user_avatar.set_text(Some(&name));
+        self.user_name_label.set_label(&name);
 
         while let Some(child) = self.account_popover_box.first_child() {
             self.account_popover_box.remove(&child);
@@ -1047,7 +1386,7 @@ impl AppState {
                     .find(|guild| guild.id == id)
                     .map(|guild| guild.name.clone())
             });
-            let (channels, unread, voice_users) = session.store.read(|state| {
+            let (channels, unread, voice_users, member_count) = session.store.read(|state| {
                 let channels: Vec<Channel> = if dm_mode {
                     state.dm_channels().into_iter().cloned().collect()
                 } else if let Some(guild_id) = guild_id {
@@ -1080,7 +1419,10 @@ impl AppState {
                             .collect()
                     })
                     .unwrap_or_default();
-                (channels, unread, voice_users)
+                let member_count = guild_id
+                    .and_then(|guild_id| state.guild_members.get(&guild_id))
+                    .map_or(0, HashSet::len);
+                (channels, unread, voice_users, member_count)
             });
             Some((
                 dm_mode,
@@ -1089,11 +1431,20 @@ impl AppState {
                 channels,
                 unread,
                 voice_users,
+                member_count,
                 session.selected_channel,
             ))
         })();
-        let Some((dm_mode, guild_id, guild_name, channels, unread, voice_users, selected)) =
-            snapshot
+        let Some((
+            dm_mode,
+            guild_id,
+            guild_name,
+            channels,
+            unread,
+            voice_users,
+            member_count,
+            selected,
+        )) = snapshot
         else {
             return;
         };
@@ -1109,13 +1460,20 @@ impl AppState {
         } else {
             "Servers".to_owned()
         };
-        let header = gtk::Label::new(Some(&header_text));
-        header.set_xalign(0.0);
-        header.set_margin_start(8);
-        header.set_margin_top(6);
-        header.set_margin_bottom(6);
-        header.add_css_class("title-4");
-        self.channel_box.append(&header);
+        // Member counts come from the cached member sets; hide the subtitle
+        // when the guild has not delivered any members yet.
+        let subtitle = if dm_mode {
+            String::new()
+        } else {
+            match member_count {
+                0 => String::new(),
+                1 => "1 member".to_owned(),
+                count => format!("{count} members"),
+            }
+        };
+        self.guild_name_label.set_label(&header_text);
+        self.guild_subtitle_label.set_label(&subtitle);
+        self.guild_subtitle_label.set_visible(!subtitle.is_empty());
 
         if dm_mode {
             for channel in &channels {
@@ -1162,6 +1520,92 @@ impl AppState {
         }
         if channels.is_empty() {
             self.channel_box.append(&empty_state("No channels"));
+        }
+    }
+
+    /// Renders the optional member list from the cached guild members.
+    fn render_members(&self) {
+        while let Some(child) = self.members_box.first_child() {
+            self.members_box.remove(&child);
+        }
+
+        let members = {
+            let model = self.model.borrow();
+            let Some(active) = model.active else {
+                self.members_panel.set_visible(false);
+                self.members_toggle.set_sensitive(false);
+                return;
+            };
+            let Some(session) = model.sessions.get(&active) else {
+                self.members_panel.set_visible(false);
+                self.members_toggle.set_sensitive(false);
+                return;
+            };
+            if session.dm_mode {
+                None
+            } else {
+                session
+                    .selected_guild
+                    .map(|guild| session.store.read(|state| state.guild_member_users(guild)))
+            }
+        };
+
+        let members = members.unwrap_or_default();
+        let available = !members.is_empty();
+        self.members_toggle.set_sensitive(available);
+        self.members_guard.set(true);
+        self.members_toggle
+            .set_active(available && self.show_members.get());
+        self.members_guard.set(false);
+        self.members_panel
+            .set_visible(available && self.show_members.get());
+
+        if !available {
+            self.members_count_label.set_label("");
+            return;
+        }
+
+        let count = members.len();
+        self.members_count_label.set_label(&match count {
+            1 => "1 member".to_owned(),
+            count => format!("{count} members"),
+        });
+
+        if !self.show_members.get() {
+            return;
+        }
+
+        // Long guilds would build thousands of rows; cap the list and state
+        // the remainder instead.
+        const MAX_ROWS: usize = 200;
+        for user in members.iter().take(MAX_ROWS) {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_start(6);
+            row.set_margin_end(6);
+            row.set_margin_top(1);
+            row.set_margin_bottom(1);
+            let name = user.display_name();
+            row.append(&adw::Avatar::new(24, Some(name), true));
+            let label = gtk::Label::new(Some(name));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            row.append(&label);
+            if user.bot == Some(true) {
+                let bot = gtk::Label::new(Some("BOT"));
+                bot.add_css_class("dim-label");
+                bot.add_css_class("caption");
+                row.append(&bot);
+            }
+            self.members_box.append(&row);
+        }
+        if count > MAX_ROWS {
+            let more = gtk::Label::new(Some(&format!("and {} more", count - MAX_ROWS)));
+            more.set_xalign(0.0);
+            more.set_margin_start(6);
+            more.add_css_class("dim-label");
+            more.add_css_class("caption");
+            self.members_box.append(&more);
         }
     }
 
@@ -1247,6 +1691,59 @@ impl AppState {
         self.channel_box.append(&label);
     }
 
+    /// Fills the chat header from the selected channel, if any.
+    fn render_channel_header(&self) {
+        let channel = {
+            let model = self.model.borrow();
+            let Some(active) = model.active else {
+                self.set_channel_header(None);
+                return;
+            };
+            let Some(session) = model.sessions.get(&active) else {
+                self.set_channel_header(None);
+                return;
+            };
+            let Some(channel_id) = session.selected_channel else {
+                self.set_channel_header(None);
+                return;
+            };
+            session
+                .store
+                .read(|state| state.channels.get(&channel_id).cloned())
+        };
+        self.set_channel_header(channel.as_ref());
+    }
+
+    fn set_channel_header(&self, channel: Option<&Channel>) {
+        let Some(channel) = channel else {
+            self.channel_glyph_label.set_label("#");
+            self.channel_glyph_label.set_visible(true);
+            self.channel_glyph_image.set_visible(false);
+            self.channel_title_label.set_label("No channel selected");
+            self.channel_topic_label.set_visible(false);
+            return;
+        };
+
+        let voice = channel.kind.is_voice() && !channel.kind.is_text();
+        let dm = matches!(channel.kind, ChannelType::Dm | ChannelType::GroupDm);
+        let glyph_icon = voice && icon_available("audio-volume-high-symbolic");
+        self.channel_glyph_image.set_visible(glyph_icon);
+        self.channel_glyph_label.set_visible(!glyph_icon);
+        self.channel_glyph_label.set_label(if dm {
+            "@"
+        } else if voice {
+            "Voice"
+        } else {
+            "#"
+        });
+
+        self.channel_title_label.set_label(&channel.display_name());
+        let topic = channel.topic.clone().unwrap_or_default();
+        self.channel_topic_label.set_label(&topic);
+        self.channel_topic_label
+            .set_visible(!topic.trim().is_empty());
+    }
+
     fn render_messages(self: &Rc<Self>) {
         let adjustment = self.messages_scroll.vadjustment();
         let at_bottom = adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0;
@@ -1265,6 +1762,7 @@ impl AppState {
             };
             let Some(channel_id) = session.selected_channel else {
                 self.last_rendered_channel.set(None);
+                self.clear_search();
                 self.messages_box.append(&empty_state("Select a channel"));
                 return;
             };
@@ -1277,6 +1775,10 @@ impl AppState {
             (channel, messages, channel_changed)
         };
 
+        if channel_changed {
+            self.clear_search();
+        }
+
         let Some(channel) = channel else {
             self.messages_box.append(&empty_state("Select a channel"));
             return;
@@ -1285,8 +1787,23 @@ impl AppState {
             self.messages_box.append(&empty_state("Voice channel"));
             return;
         }
+
+        let filter = self.message_filter.borrow().clone();
+        let messages: Vec<Message> = if filter.is_empty() {
+            messages
+        } else {
+            messages
+                .into_iter()
+                .filter(|message| message.content.to_lowercase().contains(&filter))
+                .collect()
+        };
+
         if messages.is_empty() {
-            self.messages_box.append(&empty_state("No messages yet"));
+            self.messages_box.append(&empty_state(if filter.is_empty() {
+                "No messages yet"
+            } else {
+                "No matching messages"
+            }));
             return;
         }
 
@@ -1445,6 +1962,20 @@ impl AppState {
                 .unwrap_or_else(|| "Offline".to_owned())
         };
         self.connection_label.set_label(&label);
+
+        let status = {
+            let model = self.model.borrow();
+            model
+                .active
+                .and_then(|id| model.sessions.get(&id))
+                .map(|session| match session.connection {
+                    ConnState::Connecting => "Connecting…",
+                    ConnState::Connected | ConnState::Ready => "Online",
+                    ConnState::Disconnected => "Offline",
+                })
+                .unwrap_or("Offline")
+        };
+        self.user_status_label.set_label(status);
     }
 
     fn set_status(&self, text: &str) {
@@ -1458,7 +1989,23 @@ impl AppState {
             .set(self.typing_generation.get().wrapping_add(1));
     }
 
+    /// Empties the message search, guarding against the entry emitting a
+    /// change while the caller is already re-rendering.
+    fn clear_search(&self) {
+        self.message_filter.borrow_mut().clear();
+        if !self.search_entry.text().is_empty() {
+            self.search_guard.set(true);
+            self.search_entry.set_text("");
+            self.search_guard.set(false);
+        }
+    }
+
     // -- composer --------------------------------------------------------
+
+    fn insert_composer_text(&self, text: &str) {
+        self.composer.buffer().insert_at_cursor(text);
+        self.composer.grab_focus();
+    }
 
     fn send_current(self: &Rc<Self>) {
         let buffer = self.composer.buffer();
@@ -1628,6 +2175,7 @@ impl AppState {
                 if self.model.borrow().active == Some(account) {
                     self.render_guilds();
                     self.render_channels();
+                    self.render_channel_header();
                     self.update_title();
                 }
             }
@@ -1700,7 +2248,7 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("");
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                     self.render_channels();
                 }
             }
@@ -1713,7 +2261,7 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("");
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                     self.render_channels();
                 }
             }
@@ -1740,7 +2288,7 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("Sharing screen");
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                 }
             }
             UiEvent::StreamStopped { account } => {
@@ -1754,7 +2302,7 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("");
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                 }
             }
             UiEvent::StreamError { account, message } => {
@@ -1768,7 +2316,7 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status(&message);
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                 }
             }
             UiEvent::Error { account, message } => {
@@ -1790,6 +2338,7 @@ impl AppState {
                 if active == Some(account) {
                     self.render_guilds();
                     self.render_channels();
+                    self.render_channel_header();
                     self.update_title();
                 }
             }
@@ -1799,6 +2348,7 @@ impl AppState {
             | StoreEvent::RelationshipsUpdated => {
                 if active == Some(account) {
                     self.render_channels();
+                    self.render_channel_header();
                     self.update_title();
                 }
             }
@@ -1836,6 +2386,19 @@ impl AppState {
                     self.render_channels();
                 }
             }
+            StoreEvent::GuildMembersUpdated(guild) => {
+                if active == Some(account)
+                    && self
+                        .model
+                        .borrow()
+                        .sessions
+                        .get(&account)
+                        .is_some_and(|session| session.selected_guild == Some(guild))
+                {
+                    self.render_channels();
+                    self.render_members();
+                }
+            }
             StoreEvent::Typing {
                 channel_id,
                 user_id,
@@ -1847,12 +2410,14 @@ impl AppState {
             StoreEvent::VoiceStateUpdated { .. } => {
                 if active == Some(account) {
                     self.render_channels();
-                    self.render_voice_bar();
+                    self.render_voice_panel();
                 }
             }
             StoreEvent::Ready if active == Some(account) => {
                 self.render_guilds();
                 self.render_channels();
+                self.render_channel_header();
+                self.render_members();
                 self.update_title();
             }
             _ => {}
@@ -1942,6 +2507,66 @@ impl AppState {
 enum ChannelGroup {
     Header(String),
     Row(Channel),
+}
+
+/// Emoji offered by the composer picker. These are message content rather than
+/// UI labels and are inserted into the composer verbatim.
+const COMPOSER_EMOJI: [&str; 12] = [
+    "\u{1f44d}",
+    "\u{1f44e}",
+    "\u{1f604}",
+    "\u{1f622}",
+    "\u{1f62e}",
+    "\u{2764}\u{fe0f}",
+    "\u{1f525}",
+    "\u{1f389}",
+    "\u{2705}",
+    "\u{274c}",
+    "\u{1f440}",
+    "\u{1f64f}",
+];
+
+/// Whether the active icon theme provides `name`, so controls can fall back to
+/// a text label instead of rendering an empty button.
+fn icon_available(name: &str) -> bool {
+    gtk::gdk::Display::default()
+        .map(|display| gtk::IconTheme::for_display(&display).has_icon(name))
+        .unwrap_or(false)
+}
+
+fn icon_button(icon: &str, fallback: &str) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    if icon_available(icon) {
+        button.add_css_class("circular");
+        button.set_child(Some(&gtk::Image::from_icon_name(icon)));
+    } else {
+        button.set_label(fallback);
+    }
+    button
+}
+
+fn toggle_icon_button(icon: &str, fallback: &str) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::new();
+    button.add_css_class("flat");
+    if icon_available(icon) {
+        button.add_css_class("circular");
+        button.set_child(Some(&gtk::Image::from_icon_name(icon)));
+    } else {
+        button.set_label(fallback);
+    }
+    button
+}
+
+/// An icon followed by a text label, used for the Join Voice button.
+fn icon_label_row(icon: &str, text: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_halign(gtk::Align::Center);
+    if icon_available(icon) {
+        row.append(&gtk::Image::from_icon_name(icon));
+    }
+    row.append(&gtk::Label::new(Some(text)));
+    row
 }
 
 /// Splits a sorted guild channel list into uncategorised rows followed by each

@@ -98,7 +98,10 @@ enum Command {
         frame_ms: u32,
         speaking: u8,
     },
-    SendVideo { frame: Vec<u8>, frame_ms: u32 },
+    SendVideo {
+        frame: Vec<u8>,
+        frame_ms: u32,
+    },
     SetSpeaking(u8),
     SetVideo(bool),
     Disconnect,
@@ -331,10 +334,7 @@ async fn run(
     }
     let dave_version = d["dave_protocol_version"].as_u64().unwrap_or(0) as u16;
     // The server's op 4 mode is authoritative; READY only lists candidates.
-    let negotiated_mode = d["mode"]
-        .as_str()
-        .and_then(Mode::parse)
-        .unwrap_or(mode);
+    let negotiated_mode = d["mode"].as_str().and_then(Mode::parse).unwrap_or(mode);
     if negotiated_mode != mode {
         info!(
             selected = mode_name(mode),

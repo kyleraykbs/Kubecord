@@ -116,7 +116,7 @@ impl Capture {
     ) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
         let element = gst::parse::launch(source)
-        .map_err(|error| Error::Message(format!("capture pipeline: {error}")))?;
+            .map_err(|error| Error::Message(format!("capture pipeline: {error}")))?;
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| Error::Message("capture pipeline is not a pipeline".into()))?;
@@ -498,6 +498,24 @@ pub fn frame_channel() -> (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_pipeline_delivers_20ms_frames() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _capture = Capture::start_with_source(
+            "audiotestsrc num-buffers=200 ! audioconvert ! audioresample \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
+             ! appsink name=sink sync=false",
+            move |frame| {
+                let _ = tx.send(frame.len());
+            },
+        )
+        .unwrap();
+        let first = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("capture produced no frames");
+        assert_eq!(first, FRAME_INTERLEAVED);
+    }
 
     #[test]
     fn opus_roundtrip_keeps_frame_size() {

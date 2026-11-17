@@ -45,8 +45,7 @@ impl RtpHeader {
                 return None;
             }
             // Extension header: 2-byte profile, 2-byte length in 32-bit words.
-            let words =
-                u16::from_be_bytes([packet[base_len + 2], packet[base_len + 3]]) as usize;
+            let words = u16::from_be_bytes([packet[base_len + 2], packet[base_len + 3]]) as usize;
             payload_offset = base_len + 4 + words * 4;
             header_len = base_len + 4;
             if packet.len() < payload_offset {

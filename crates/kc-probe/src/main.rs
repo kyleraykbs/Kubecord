@@ -122,7 +122,10 @@ async fn main() -> Result<()> {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             let mut frames = 0;
             while std::time::Instant::now() < deadline {
-                if rx.recv_timeout(std::time::Duration::from_millis(250)).is_ok() {
+                if rx
+                    .recv_timeout(std::time::Duration::from_millis(250))
+                    .is_ok()
+                {
                     frames += 1;
                 }
             }
@@ -464,7 +467,6 @@ fn stream_key_owner(key: &str) -> Option<Snowflake> {
     key.rsplit(':').next().and_then(|id| id.parse().ok())
 }
 
-
 async fn cache(token: Token, guild_id: Snowflake) -> Result<()> {
     let store = Store::new();
     let (gateway, mut events, _task) = Gateway::new(token).start();
@@ -506,7 +508,12 @@ async fn cache(token: Token, guild_id: Snowflake) -> Result<()> {
         let channels = state.guild_channels(guild_id);
         println!("channels: {}", channels.len());
         for channel in channels {
-            println!("  {:<24} {} {:?}", channel.display_name(), channel.id, channel.kind);
+            println!(
+                "  {:<24} {} {:?}",
+                channel.display_name(),
+                channel.id,
+                channel.kind
+            );
         }
     });
     Ok(())
