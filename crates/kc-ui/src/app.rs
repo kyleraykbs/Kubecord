@@ -135,6 +135,7 @@ struct AppState {
     typing_label: gtk::Label,
     voice_panel: gtk::Box,
     voice_channel_label: gtk::Label,
+    voice_status_label: gtk::Label,
     voice_join: gtk::Button,
     voice_leave: gtk::Button,
     voice_mute: gtk::ToggleButton,
@@ -313,6 +314,13 @@ impl AppState {
         voice_channel_row.append(&voice_channel_label);
         voice_channel_row.append(&voice_ping_label);
 
+        let voice_status_label = gtk::Label::new(None);
+        voice_status_label.set_xalign(0.0);
+        voice_status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        voice_status_label.add_css_class("dim-label");
+        voice_status_label.add_css_class("caption");
+        voice_status_label.set_visible(false);
+
         let voice_camera = toggle_icon_button("camera-video-symbolic", "Camera");
         voice_camera.set_tooltip_text(Some("Turn On Camera"));
         let voice_screen = toggle_icon_button("video-display-symbolic", "Share");
@@ -327,6 +335,7 @@ impl AppState {
 
         voice_panel_content.append(&voice_connected);
         voice_panel_content.append(&voice_channel_row);
+        voice_panel_content.append(&voice_status_label);
         voice_panel_content.append(&voice_buttons);
         voice_panel.append(&voice_panel_content);
         voice_panel.set_visible(false);
@@ -613,6 +622,7 @@ impl AppState {
             typing_label,
             voice_panel,
             voice_channel_label,
+            voice_status_label,
             voice_join,
             voice_leave,
             voice_mute,
@@ -1195,6 +1205,20 @@ impl AppState {
             self.voice_screen.add_css_class("suggested-action");
         } else {
             self.voice_screen.remove_css_class("suggested-action");
+        }
+
+        let mut state = Vec::new();
+        if camera {
+            state.push("Camera on");
+        }
+        if streaming {
+            state.push("Sharing screen with desktop audio");
+        }
+        if state.is_empty() {
+            self.voice_status_label.set_visible(false);
+        } else {
+            self.voice_status_label.set_label(&state.join(" · "));
+            self.voice_status_label.set_visible(true);
         }
     }
 

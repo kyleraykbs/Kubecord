@@ -165,6 +165,30 @@ mod tests {
     }
 
     #[test]
+    fn rtpsize_extension_bytes_are_inside_the_encrypted_region() {
+        // Header: 12 bytes + ext preamble with two 32-bit words. The ext data
+        // is encrypted along with the payload; the RTP payload starts after it.
+        let mut aad = crate::rtp::RtpHeader::write(false, 120, 1, 0, 99).to_vec();
+        aad[0] |= 0x10;
+        aad.extend_from_slice(&[0xBE, 0xDE, 0x00, 0x02]);
+        let extension = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut plaintext = extension.to_vec();
+        plaintext.extend_from_slice(b"opus");
+
+        let mut srtp = Srtp::new(Mode::XChaCha20Poly1305Rtpsize, &[3u8; 32]).unwrap();
+        let packet = srtp.encrypt(&aad, &plaintext).unwrap();
+        let (header, _) = crate::rtp::RtpHeader::parse(&packet).unwrap();
+        assert_eq!(header.header_len, 16);
+        assert_eq!(header.payload_offset, 24);
+
+        let decrypted = srtp.decrypt(&packet).unwrap();
+        assert_eq!(
+            &decrypted[header.payload_offset - header.header_len..],
+            b"opus"
+        );
+    }
+
+    #[test]
     fn tampering_fails() {
         let mut srtp = Srtp::new(Mode::XChaCha20Poly1305Rtpsize, &[9u8; 32]).unwrap();
         let header = crate::rtp::RtpHeader::write(false, 120, 1, 0, 1);
