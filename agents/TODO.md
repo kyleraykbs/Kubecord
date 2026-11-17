@@ -19,21 +19,24 @@
 - [x] libadwaita shell, account switcher, guild rail, channel list
 - [x] message list/composer, live events, attachments, reactions, replies, typing
 - [x] unread state, presence
-- [ ] live verification with a real token
+- [x] live gateway verification with Lambda Ignition (channels visible)
+- [x] Discord-style layout: voice panel with camera/share-screen/disconnect, user panel, member list, search
 
 ## Phase 3 — voice audio
 
 - [x] voice gateway v9, UDP discovery, SRTP, DAVE
 - [x] receive/decode/mix/playback, mic encode/send, speaking
 - [x] mute/deafen, voice panel
-- [ ] live verification with a real token and a second participant
+- [ ] voice receive/DAVE with a second participant (handshake already live-verified)
 
 ## Phase 4 — video
 
 - [x] H264 encode/decode, RTP packetization, DAVE video
 - [x] camera send through the XDG camera portal
 - [x] Go Live create/screen share through the XDG screen-cast portal
+- [x] Go Live desktop audio via the default sink monitor (SOUNDSHARE)
 - [ ] receive/render camera and Go Live video
+- [x] camera portal fd lifetime fix
 - [ ] stream watching (`STREAM_WATCH`, sink wants)
 - [ ] RTCP NACK/PLI handling beyond logging keyframe requests
 - [ ] live verification
