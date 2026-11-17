@@ -75,3 +75,12 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   connection keeps flag `1`.
 - Abaddon itself does not send camera or Go Live video (voiceclient only handles
   Opus); its value is the gateway/REST/voice state machine, not video.
+
+## Verified against Lambda Ignition (2026-11-17)
+
+- Gateway `cache` on the test guild: 4 channels in READY, including text
+  `general` and voice `General`.
+- REST history for text `general`: returns messages.
+- Voice handshake for voice `General`: full endpoint, DAVE v1, key package and
+  external sender; connection stayed up. Audio receive needs a second
+  participant.
