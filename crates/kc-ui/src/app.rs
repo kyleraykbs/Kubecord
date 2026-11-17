@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gtk::gdk::prelude::*;
 use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -79,6 +80,18 @@ pub fn run() -> glib::ExitCode {
 
         state.start_existing();
         state.window.present();
+
+        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+            let window = state.window.clone();
+            let app = app.clone();
+            glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                if let Err(error) = save_window_png(&window, std::path::Path::new(&path)) {
+                    eprintln!("could not save screenshot: {error}");
+                }
+                app.quit();
+            });
+        }
+
         *state_slot.borrow_mut() = Some(state);
     });
 
@@ -87,6 +100,23 @@ pub fn run() -> glib::ExitCode {
         runtime.shutdown_timeout(Duration::from_millis(250));
     }
     code
+}
+
+/// Renders a widget to a PNG without relying on a compositor. Used by
+/// `KYLECORD_SCREENSHOT` for visual checks of the GTK layout.
+fn save_window_png(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<(), String> {
+    let width = window.width() as f64;
+    let height = window.height() as f64;
+    if width <= 0.0 || height <= 0.0 {
+        return Err("window has no size".into());
+    }
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, width, height);
+    let node = snapshot.to_node().ok_or("empty render node")?;
+    let renderer = window.renderer().ok_or("no renderer")?;
+    let texture = renderer.render_texture(&node, None);
+    texture.save_to_png(path).map_err(|error| error.to_string())
 }
 
 struct Model {
@@ -2201,6 +2231,20 @@ impl AppState {
                     self.render_channels();
                     self.render_channel_header();
                     self.update_title();
+                    // Discord selects a guild on launch; without this the
+                    // sidebar shows "Select a server" and no channels appear
+                    // until the user clicks a server.
+                    let first = {
+                        let model = self.model.borrow();
+                        model.sessions.get(&account).and_then(|session| {
+                            (session.selected_guild.is_none() && !session.dm_mode)
+                                .then(|| session.guilds.first().map(|guild| guild.id))
+                                .flatten()
+                        })
+                    };
+                    if let Some(guild_id) = first {
+                        self.select_guild(guild_id);
+                    }
                 }
             }
             UiEvent::GuildChannelsFailed {
