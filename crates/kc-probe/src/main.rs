@@ -114,13 +114,32 @@ async fn main() -> Result<()> {
         "watch" => {
             watch(token, false).await?;
         }
+        "monitor" => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _capture = kc_media::audio::Capture::start_monitor(move |frame| {
+                let _ = tx.send(frame.len());
+            })?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut frames = 0;
+            while std::time::Instant::now() < deadline {
+                if rx.recv_timeout(std::time::Duration::from_millis(250)).is_ok() {
+                    frames += 1;
+                }
+            }
+            println!("monitor frames in 2s: {frames}");
+        }
+        "cache" => {
+            let guild_id = parse_id(filtered.get(1))?;
+            cache(token, guild_id).await?;
+        }
         "voice" => {
             let guild_id = parse_id(filtered.get(1))?;
             let channel_id = parse_id(filtered.get(2))?;
             let camera = filtered.iter().any(|arg| arg == "--camera");
             let stream = filtered.iter().any(|arg| arg == "--stream");
             let screen = filtered.iter().any(|arg| arg == "--screen");
-            voice(token, guild_id, channel_id, camera, stream, screen).await?;
+            let audio = !filtered.iter().any(|arg| arg == "--no-audio");
+            voice(token, guild_id, channel_id, camera, stream, screen, audio).await?;
         }
         other => bail!(
             "unknown command {other:?}; try user|guilds|channels|dms|messages|send|watch|voice"
@@ -193,6 +212,7 @@ async fn voice(
     camera: bool,
     stream: bool,
     screen: bool,
+    with_audio: bool,
 ) -> Result<()> {
     use kc_voice::{VoiceEvent, VoiceParams};
 
@@ -284,9 +304,11 @@ async fn voice(
                 match event {
                     Some(VoiceEvent::Ready { ssrc, video_ssrc, rtx_ssrc, mode, dave_version }) => {
                         println!("voice ready: ssrc={ssrc} video={video_ssrc:?} rtx={rtx_ssrc:?} mode={mode} dave={dave_version}");
-                        match kc_media::audio::VoiceAudio::start(handle.clone()) {
-                            Ok(engine) => audio = Some(engine),
-                            Err(error) => eprintln!("audio unavailable: {error}"),
+                        if with_audio {
+                            match kc_media::audio::VoiceAudio::start(handle.clone()) {
+                                Ok(engine) => audio = Some(engine),
+                                Err(error) => eprintln!("audio unavailable: {error}"),
+                            }
                         }
                         if stream {
                             println!("creating go-live stream");
@@ -440,4 +462,52 @@ async fn voice(
 
 fn stream_key_owner(key: &str) -> Option<Snowflake> {
     key.rsplit(':').next().and_then(|id| id.parse().ok())
+}
+
+
+async fn cache(token: Token, guild_id: Snowflake) -> Result<()> {
+    let store = Store::new();
+    let (gateway, mut events, _task) = Gateway::new(token).start();
+    let _ = gateway;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+    loop {
+        if store.read(|state| !state.guild_channels(guild_id).is_empty()) {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Some(GatewayEvent::Dispatch { name, data })) => {
+                store.apply(&name, &data);
+                if name == "READY" || name == "GUILD_CREATE" {
+                    let (guilds, channels) = store.read(|state| {
+                        (
+                            state.ordered_guilds().len(),
+                            state.guild_channels(guild_id).len(),
+                        )
+                    });
+                    eprintln!("{name}: guilds={guilds} target_channels={channels}");
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    store.read(|state| {
+        let guild = state.guild(guild_id);
+        println!(
+            "guild: {} ({})",
+            guild.map(|guild| guild.name.as_str()).unwrap_or("?"),
+            guild_id
+        );
+        let channels = state.guild_channels(guild_id);
+        println!("channels: {}", channels.len());
+        for channel in channels {
+            println!("  {:<24} {} {:?}", channel.display_name(), channel.id, channel.kind);
+        }
+    });
+    Ok(())
 }

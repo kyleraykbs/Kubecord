@@ -31,3 +31,15 @@ Format: `## [date] title`, then Decision / Why / Reversible.
 - Decision: `$XDG_CONFIG_HOME/kylecord/accounts.json`, mode 0600, no keyring dependency.
 - Why: single-user local client; a keyring adds a daemon requirement to a GTK app.
 - Reversible: yes.
+
+## [2026-11-17] Abaddon is the API/voice reference
+
+- Decision: use uowuo/abaddon's web-client identity, READY/GUILD_CREATE channel scoping, voice arming sequence and RTCP/RTP handling as the reference; keep our Rust/GStreamer implementation.
+- Why: our desktop-identity `client_state` shape caused READY to omit channels, and the voice endpoint/arming differences caused a 4006 close; Abaddon has these solved.
+- Reversible: yes.
+
+## [2026-11-17] Go Live audio uses the default sink monitor
+
+- Decision: capture desktop audio with `pulsesrc device=@DEFAULT_MONITOR@`, overridable with `KYLECORD_MONITOR_DEVICE`, encode Opus and send on the stream connection with the SOUNDSHARE flag.
+- Why: the ScreenCast portal carries no audio; this is the smallest working Linux path. Capturing the default monitor includes Discord's own output, so a virtual sink is the clean setup.
+- Reversible: yes.

@@ -40,3 +40,38 @@
   the build needs `clang` and `LIBCLANG_PATH`.
 - GStreamer plugin paths are not implicit in `nix develop`; the flake shell
   exports `GST_PLUGIN_SYSTEM_PATH_1_0`, and the packaged binary wraps it.
+
+## Abaddon parity findings (2026-11-17)
+
+Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
+
+- **READY guilds carry channels.** Abaddon calls `ProcessNewGuild` for every
+  guild in READY, not only GUILD_CREATE, and attaches the enclosing guild id to
+  each embedded channel. Our reducer previously inserted them with
+  `guild_id: None`, so `guild_channels()` returned nothing and the sidebar
+  said "No channels". Fixed in `State::merge_guild_channels`; GUILD_CREATE is
+  now also covered. Regression tests are in `kc-state`.
+- **Web identity, not desktop.** Abaddon sends `browser: "Chrome"`, no
+  `client_version`, capabilities `4605`, and `client_state` with
+  `guild_hashes` / `highest_last_message_id` / read-state versions. Our old
+  `client_state: {guild_versions:{}}` and `capabilities: 0` were the wrong
+  shape. Live Lambda test: READY now returns the test guild with four channels.
+- **Voice endpoint includes a port.** Use the full `VOICE_SERVER_UPDATE`
+  endpoint (`host:port`) in `wss://.../?v=9`; stripping the port caused a 4006
+  "Session is no longer valid".
+- **Arm media after the session description.** Abaddon sends a speaking payload
+  with `speaking: 1` (microphone) and one encrypted Opus silence frame
+  `F8 FF FE`, then starts the UDP reader. Sending only `speaking: 0` is not
+  equivalent.
+- **RTCP is not RTP.** The RTCP packet type is the full second byte
+  (200–206); masking the RTP marker bit turns 201 into 73 and tries to SRTP
+  decrypt receiver reports every second. Classify RTCP before RTP parsing.
+- **RTP header extensions.** SRTP `rtpsize` authenticates only the header and
+  extension preamble, but the extension block itself is inside the encrypted
+  region. The codec payload starts after the full extension block
+  (Abaddon's `GetPayloadOffset`); `RtpHeader::payload_offset` now carries that.
+- **SOUNDSHARE vs microphone.** Stream audio must be sent with speaking flag
+  `2`; `VoiceHandle::send_soundshare_audio` does that, while the parent voice
+  connection keeps flag `1`.
+- Abaddon itself does not send camera or Go Live video (voiceclient only handles
+  Opus); its value is the gateway/REST/voice state machine, not video.

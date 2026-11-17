@@ -362,11 +362,15 @@ fn identify_payload(token: &Token, properties: &SuperProperties) -> Value {
         "op": 2,
         "d": {
             "token": token.expose(),
-            "capabilities": 0,
+            "capabilities": kc_core::super_properties::CAPABILITIES,
             "properties": properties,
             "compress": false,
             "client_state": {
-                "guild_versions": {}
+                "guild_hashes": {},
+                "highest_last_message_id": "0",
+                "read_state_version": 0,
+                "user_guild_settings_version": -1,
+                "user_settings_version": -1
             },
             "presence": {
                 "status": "online",
@@ -410,9 +414,12 @@ mod tests {
         assert_eq!(payload["op"], 2);
         assert_eq!(payload["d"]["token"], "abc");
         assert_eq!(payload["d"]["compress"], false);
-        assert_eq!(payload["d"]["properties"]["browser"], "Discord Client");
+        assert_eq!(payload["d"]["properties"]["browser"], "Chrome");
         assert!(payload["d"].get("intents").is_none());
-        assert_eq!(payload["d"]["client_state"]["guild_versions"], json!({}));
+        assert_eq!(payload["d"]["capabilities"], 4605);
+        assert_eq!(payload["d"]["client_state"]["guild_hashes"], json!({}));
+        assert_eq!(payload["d"]["client_state"]["highest_last_message_id"], "0");
+        assert_eq!(payload["d"]["client_state"]["user_settings_version"], -1);
     }
 
     #[test]

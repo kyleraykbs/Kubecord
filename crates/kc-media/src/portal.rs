@@ -100,7 +100,6 @@ pub async fn request_camera() -> Result<Option<CameraCast>> {
             // camera client must never take it. Prefer any other camera.
             !description.contains("ugreen") && !description.contains("macrosilicon")
         })
-        .or_else(|| streams.first())
     else {
         return Ok(None);
     };

@@ -93,7 +93,11 @@ pub enum VoiceEvent {
 }
 
 enum Command {
-    SendAudio { opus: Vec<u8>, frame_ms: u32 },
+    SendAudio {
+        opus: Vec<u8>,
+        frame_ms: u32,
+        speaking: u8,
+    },
     SendVideo { frame: Vec<u8>, frame_ms: u32 },
     SetSpeaking(u8),
     SetVideo(bool),
@@ -108,7 +112,20 @@ pub struct VoiceHandle {
 
 impl VoiceHandle {
     pub fn send_audio(&self, opus: Vec<u8>, frame_ms: u32) {
-        let _ = self.tx.send(Command::SendAudio { opus, frame_ms });
+        let _ = self.tx.send(Command::SendAudio {
+            opus,
+            frame_ms,
+            speaking: 1, // microphone
+        });
+    }
+
+    /// Audio for a Go Live stream, marked SOUNDSHARE rather than microphone.
+    pub fn send_soundshare_audio(&self, opus: Vec<u8>, frame_ms: u32) {
+        let _ = self.tx.send(Command::SendAudio {
+            opus,
+            frame_ms,
+            speaking: 2,
+        });
     }
 
     pub fn send_video(&self, frame: Vec<u8>, frame_ms: u32) {
@@ -178,13 +195,13 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<VoiceEvent>,
 ) -> Result<()> {
-    let host = params
+    // Abaddon connects to the endpoint exactly as Discord supplies it; the
+    // modern endpoint often carries an explicit port.
+    let endpoint = params
         .endpoint
-        .split(':')
-        .next()
-        .unwrap_or(&params.endpoint)
-        .to_owned();
-    let url = format!("wss://{host}/?v={VOICE_VERSION}&encoding=json");
+        .trim_start_matches("wss://")
+        .trim_end_matches('/');
+    let url = format!("wss://{endpoint}/?v={VOICE_VERSION}&encoding=json");
     info!(%url, "voice connecting");
 
     let (stream, _) = tokio::time::timeout(
@@ -313,7 +330,19 @@ async fn run(
         )));
     }
     let dave_version = d["dave_protocol_version"].as_u64().unwrap_or(0) as u16;
-    let srtp = Srtp::new(mode, &secret_key)?;
+    // The server's op 4 mode is authoritative; READY only lists candidates.
+    let negotiated_mode = d["mode"]
+        .as_str()
+        .and_then(Mode::parse)
+        .unwrap_or(mode);
+    if negotiated_mode != mode {
+        info!(
+            selected = mode_name(mode),
+            negotiated = mode_name(negotiated_mode),
+            "voice encryption mode differs from READY"
+        );
+    }
+    let srtp = Srtp::new(negotiated_mode, &secret_key)?;
 
     let dave = if dave_version > 0 {
         let mut session = Dave::new(
@@ -327,24 +356,13 @@ async fn run(
         None
     };
 
-    // Announce that this client is present in the session. Discord requires at
-    // least one speaking payload before media flows.
-    send_json(
-        &mut write,
-        json!({
-            "op": 5,
-            "d": {"speaking": 0, "delay": 0, "ssrc": audio_ssrc}
-        }),
-    )
-    .await?;
-
-    let _ = events.send(VoiceEvent::Ready {
+    let ready_event = VoiceEvent::Ready {
         ssrc: audio_ssrc,
         video_ssrc,
         rtx_ssrc,
-        mode: mode_name(mode).to_owned(),
+        mode: mode_name(negotiated_mode).to_owned(),
         dave_version,
-    });
+    };
 
     let mut state = SessionState {
         params,
@@ -380,9 +398,20 @@ async fn run(
         state.handle_binary(&bytes).await?;
     }
 
+    // Abaddon arms media the same way after the session description: one
+    // speaking payload and one encrypted Opus silence frame. Sending only
+    // `speaking: 0` leaves the server without a media source for this SSRC.
+    state.set_speaking(1).await?;
+    state.send_rtp_audio(&[0xF8, 0xFF, 0xFE]).await?;
+    let _ = state.events.send(ready_event);
+
     let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
+
+    let mut keepalive = tokio::time::interval(Duration::from_secs(10));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
 
     let mut buffer = vec![0u8; 2048];
     loop {
@@ -392,6 +421,11 @@ async fn run(
                 if send_json(&mut state.write, payload).await.is_err() {
                     break;
                 }
+            }
+            _ = keepalive.tick() => {
+                // Abaddon sends this two-byte UDP keepalive every 10 seconds so
+                // the NAT mapping and the SFU's SSRC state stay alive.
+                let _ = state.socket.send_to(&[0x13, 0x37], state.remote).await;
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
@@ -445,7 +479,11 @@ async fn run(
 impl SessionState {
     async fn handle_command(&mut self, command: Command) -> Result<bool> {
         match command {
-            Command::SendAudio { opus, frame_ms } => {
+            Command::SendAudio {
+                opus,
+                frame_ms,
+                speaking,
+            } => {
                 if let Some(dave) = &mut self.dave {
                     let encrypted = dave.encrypt_audio(&opus)?;
                     self.send_rtp_audio(&encrypted).await?;
@@ -453,8 +491,8 @@ impl SessionState {
                     self.send_rtp_audio(&opus).await?;
                 }
                 self.ts_audio = self.ts_audio.wrapping_add(frame_ms * 48);
-                if self.speaking & 1 == 0 {
-                    self.set_speaking(1).await?;
+                if self.speaking != speaking {
+                    self.set_speaking(speaking).await?;
                 }
             }
             Command::SendVideo { frame, frame_ms } => {
@@ -578,6 +616,9 @@ impl SessionState {
                 let ssrc = d["ssrc"].as_u64().unwrap_or(0) as u32;
                 let speaking = d["speaking"].as_u64().unwrap_or(0) != 0;
                 self.audio_ssrc_to_user.insert(ssrc, user_id);
+                if ssrc != 0 {
+                    self.users.insert(user_id.get());
+                }
                 let _ = self.events.send(VoiceEvent::Speaking {
                     user_id,
                     ssrc,
@@ -624,6 +665,19 @@ impl SessionState {
                 {
                     self.users.remove(&user_id.get());
                     let _ = self.events.send(VoiceEvent::ClientDisconnect { user_id });
+                }
+            }
+            14 => {
+                // Session update: Abaddon refreshes the SSRC mapping here; the
+                // speaking event is not guaranteed for every participant.
+                if let Some(user_id) = d["user_id"]
+                    .as_str()
+                    .and_then(|id| id.parse::<Snowflake>().ok())
+                {
+                    self.users.insert(user_id.get());
+                    if let Some(ssrc) = d["audio_ssrc"].as_u64() {
+                        self.audio_ssrc_to_user.insert(ssrc as u32, user_id);
+                    }
                 }
             }
             21 => {
@@ -763,33 +817,62 @@ impl SessionState {
     }
 
     fn handle_udp(&mut self, packet: &[u8]) {
+        // RTCP uses the full second byte as its packet type (200..=206); the
+        // RTP marker bit is not part of it. Check the raw byte before parsing.
+        if packet.len() >= 8 && packet[0] >> 6 == 2 && packet[1] >= 200 {
+            self.handle_rtcp(packet);
+            return;
+        }
         let Some((header, _)) = RtpHeader::parse(packet) else {
             return;
         };
-        if header.payload_type >= 200 {
-            self.handle_rtcp(&packet[header.header_len..], header.ssrc);
+        if header.ssrc == self.audio_ssrc || self.video_ssrc == Some(header.ssrc) {
             return;
         }
 
-        let payload = match self.srtp.decrypt(packet) {
+        let mut payload = match self.srtp.decrypt(packet) {
             Ok(payload) => payload,
             Err(error) => {
-                debug!(%error, "SRTP decrypt failed");
+                debug!(
+                    %error,
+                    ssrc = header.ssrc,
+                    pt = header.payload_type,
+                    sequence = header.sequence,
+                    len = packet.len(),
+                    header_len = header.header_len,
+                    payload_offset = header.payload_offset,
+                    head = %packet.iter().take(24).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(""),
+                    "SRTP decrypt failed"
+                );
                 return;
             }
         };
+
+        // The encrypted region includes the RTP extension block; the codec
+        // payload starts after it. Abaddon strips this in GetPayloadOffset.
+        let skip = header.payload_offset.saturating_sub(header.header_len);
+        if payload.len() < skip {
+            return;
+        }
+        payload.drain(..skip);
 
         match header.payload_type {
             PT_OPUS => {
                 let Some(user_id) = self.audio_ssrc_to_user.get(&header.ssrc).copied() else {
                     return;
                 };
-                let Some(opus) = self
-                    .dave
-                    .as_mut()
-                    .and_then(|dave| dave.decrypt_audio(user_id.get(), &payload))
-                else {
-                    return;
+                // Silence packets bypass DAVE per the protocol.
+                let opus = if payload == [0xF8, 0xFF, 0xFE] {
+                    payload
+                } else {
+                    let Some(opus) = self
+                        .dave
+                        .as_mut()
+                        .and_then(|dave| dave.decrypt_audio(user_id.get(), &payload))
+                    else {
+                        return;
+                    };
+                    opus
                 };
                 let _ = self.events.send(VoiceEvent::Audio {
                     user_id,
@@ -834,14 +917,16 @@ impl SessionState {
         }
     }
 
-    fn handle_rtcp(&mut self, payload: &[u8], ssrc: u32) {
-        if payload.len() < 8 {
+    fn handle_rtcp(&mut self, packet: &[u8]) {
+        if packet.len() < 16 {
             return;
         }
         // RTCP header: V/P/RC, PT, length. PT 206 = PSFB (PLI is FMT 1).
-        let packet_type = payload[1];
-        let fmt = payload[0] & 0x1F;
+        let packet_type = packet[1];
+        let fmt = packet[0] & 0x1F;
         if packet_type == 206 && fmt == 1 {
+            // PSFB: header (8) + sender SSRC (4) + media source SSRC (4).
+            let ssrc = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
             let Some(user_id) = self.video_ssrc_to_user.get(&ssrc).copied() else {
                 return;
             };

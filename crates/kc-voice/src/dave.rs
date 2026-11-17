@@ -40,15 +40,20 @@ impl Dave {
     }
 
     pub fn key_package(&mut self) -> Result<Vec<u8>> {
-        self.session
+        let package = self
+            .session
             .create_key_package()
-            .map_err(|error| Error::Message(format!("DAVE key package: {error}")))
+            .map_err(|error| Error::Message(format!("DAVE key package: {error}")))?;
+        tracing::info!(version = self.version, size = package.len(), "DAVE key package");
+        Ok(package)
     }
 
     pub fn set_external_sender(&mut self, data: &[u8]) -> Result<()> {
         self.session
             .set_external_sender(data)
-            .map_err(|error| Error::Message(format!("DAVE external sender: {error}")))
+            .map_err(|error| Error::Message(format!("DAVE external sender: {error}")))?;
+        tracing::info!(size = data.len(), "DAVE external sender set");
+        Ok(())
     }
 
     /// Processes proposals; returns the serialized commit (+ welcome when one
@@ -78,9 +83,11 @@ impl Dave {
         };
 
         let mut out = result.commit;
+        let welcome = result.welcome.is_some();
         if let Some(welcome) = result.welcome {
             out.extend_from_slice(&welcome);
         }
+        tracing::info!(?op_type, welcome, size = out.len(), "DAVE commit+welcome");
         Ok(Some(out))
     }
 
@@ -88,6 +95,7 @@ impl Dave {
         self.session
             .process_commit(commit)
             .map_err(|error| Error::Message(format!("DAVE commit: {error}")))?;
+        tracing::info!(transition_id, "DAVE commit processed");
         self.prepare(transition_id, self.version)
     }
 
@@ -95,6 +103,7 @@ impl Dave {
         self.session
             .process_welcome(welcome, None)
             .map_err(|error| Error::Message(format!("DAVE welcome: {error}")))?;
+        tracing::info!(transition_id, "DAVE welcome processed");
         self.prepare(transition_id, self.version)
     }
 

@@ -45,7 +45,14 @@ KYLECORD_TOKEN=<token> cargo run -p kc-probe -- voice <guild-id> <channel-id> --
 ```
 
 `kc-probe voice` joins a channel, speaks/receives, and with `--stream --screen`
-starts a Go Live screen share through the XDG desktop portal.
+starts a Go Live screen share through the XDG desktop portal. Add `--no-audio`
+to test the voice handshake without opening the microphone or speaker.
+
+Go Live includes desktop audio. It is captured from the default sink monitor
+(`pulsesrc device=@DEFAULT_MONITOR@`); set `KYLECORD_MONITOR_DEVICE` to a
+specific monitor source if you route application audio through a virtual sink.
+Capturing the default monitor also captures the Discord client's own output, so
+use a virtual sink for a clean stream.
 
 ## Warning
 

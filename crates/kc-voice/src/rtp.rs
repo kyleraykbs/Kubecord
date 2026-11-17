@@ -16,10 +16,14 @@ pub struct RtpHeader {
     pub sequence: u16,
     pub timestamp: u32,
     pub ssrc: u32,
-    /// Bytes of the packet that stay unencrypted: the fixed header plus the
-    /// extension preamble when the X bit is set. Matches Discord's `rtpsize`
-    /// modes and the reference clients.
+    /// Bytes of the packet that stay unencrypted: the fixed header, CSRCs and
+    /// the extension preamble when the X bit is set. Matches Discord's
+    /// `rtpsize` modes and Abaddon's AAD length.
     pub header_len: usize,
+    /// Start of the codec payload after SRTP decryption: the full header,
+    /// including the whole extension block. Abaddon's GetPayloadOffset does
+    /// the same; using `header_len` here feeds extension bytes to Opus/H.264.
+    pub payload_offset: usize,
 }
 
 impl RtpHeader {
@@ -33,12 +37,21 @@ impl RtpHeader {
         }
         let has_extension = first & 0x10 != 0;
         let csrc_count = (first & 0x0F) as usize;
-        let mut header_len = HEADER_LEN + csrc_count * 4;
+        let base_len = HEADER_LEN + csrc_count * 4;
+        let mut header_len = base_len;
+        let mut payload_offset = base_len;
         if has_extension {
-            header_len += 4;
-        }
-        if packet.len() < header_len {
-            return None;
+            if packet.len() < base_len + 4 {
+                return None;
+            }
+            // Extension header: 2-byte profile, 2-byte length in 32-bit words.
+            let words =
+                u16::from_be_bytes([packet[base_len + 2], packet[base_len + 3]]) as usize;
+            payload_offset = base_len + 4 + words * 4;
+            header_len = base_len + 4;
+            if packet.len() < payload_offset {
+                return None;
+            }
         }
 
         Some((
@@ -49,8 +62,9 @@ impl RtpHeader {
                 timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
                 ssrc: u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]),
                 header_len,
+                payload_offset,
             },
-            &packet[header_len..],
+            &packet[payload_offset..],
         ))
     }
 
@@ -244,6 +258,20 @@ mod tests {
         assert_eq!(parsed.ssrc, 1234);
         assert_eq!(parsed.header_len, 12);
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn parses_extension_length_and_payload_offset() {
+        let mut packet = RtpHeader::write(false, PT_OPUS, 1, 960, 42).to_vec();
+        packet[0] |= 0x10; // X bit
+        packet.extend_from_slice(&[0xBE, 0xDE, 0x00, 0x02]); // two 32-bit words
+        packet.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        packet.extend_from_slice(b"opus");
+
+        let (header, payload) = RtpHeader::parse(&packet).unwrap();
+        assert_eq!(header.header_len, 16);
+        assert_eq!(header.payload_offset, 24);
+        assert_eq!(payload, b"opus");
     }
 
     #[test]

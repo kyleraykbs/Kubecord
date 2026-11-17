@@ -86,13 +86,36 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(mut on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
-        gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
-        let element = gst::parse::launch(
+    pub fn start(on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
+        Self::start_with_source(
             "autoaudiosrc ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
              ! appsink name=sink sync=false max-buffers=8 drop=true",
+            on_frame,
         )
+    }
+
+    /// Captures the default output's monitor, for Go Live system audio. The
+    /// ScreenCast portal does not carry audio; this is the Linux equivalent of
+    /// sharing desktop audio. It intentionally uses the PulseAudio/PipeWire
+    /// monitor device rather than the default input.
+    pub fn start_monitor(on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
+        let device =
+            std::env::var("KYLECORD_MONITOR_DEVICE").unwrap_or_else(|_| "@DEFAULT_MONITOR@".into());
+        let pipeline = format!(
+            "pulsesrc device=\"{device}\" ! audioconvert ! audioresample \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
+             ! appsink name=sink sync=false max-buffers=8 drop=true"
+        );
+        Self::start_with_source(&pipeline, on_frame)
+    }
+
+    fn start_with_source(
+        source: &str,
+        mut on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Result<Self> {
+        gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
+        let element = gst::parse::launch(source)
         .map_err(|error| Error::Message(format!("capture pipeline: {error}")))?;
         let pipeline = element
             .downcast::<gst::Pipeline>()
@@ -262,6 +285,54 @@ impl Mixer {
                 scaled as i16
             })
             .collect()
+    }
+}
+
+/// System-audio capture for a Go Live stream connection. The stream's audio
+/// SSRC is separate from the parent voice connection; Discord expects this on
+/// the stream connection with the SOUNDSHARE speaking flag.
+pub struct ScreenAudio {
+    _capture: Capture,
+    voice: VoiceHandle,
+}
+
+impl ScreenAudio {
+    pub fn start(voice: VoiceHandle, bitrate: u32) -> Result<Self> {
+        let encoder = Arc::new(Mutex::new(
+            Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
+                .map_err(|error| Error::Message(format!("opus encoder: {error}")))?,
+        ));
+        if let Some(mut encoder) = encoder.try_lock() {
+            let _ = encoder.set_bitrate(opus2::Bitrate::Bits(bitrate as i32));
+            let _ = encoder.set_inband_fec(false);
+        }
+
+        voice.set_speaking(2); // SOUNDSHARE
+        let send_voice = voice.clone();
+        let capture = match Capture::start_monitor(move |frame| {
+            let mut encoder = encoder.lock();
+            match encoder.encode_vec(&frame, 4000) {
+                Ok(packet) => send_voice.send_soundshare_audio(packet, 20),
+                Err(error) => debug!(%error, "screen audio encode failed"),
+            }
+        }) {
+            Ok(capture) => capture,
+            Err(error) => {
+                voice.set_speaking(0);
+                return Err(error);
+            }
+        };
+
+        Ok(Self {
+            _capture: capture,
+            voice,
+        })
+    }
+}
+
+impl Drop for ScreenAudio {
+    fn drop(&mut self) {
+        self.voice.set_speaking(0);
     }
 }
 

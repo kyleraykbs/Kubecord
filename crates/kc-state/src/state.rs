@@ -138,6 +138,7 @@ pub enum StoreEvent {
     StreamUpdated(String),
     RelationshipsUpdated,
     GuildChannelsLoaded(Snowflake),
+    GuildMembersUpdated(Snowflake),
     HistoryLoaded(Snowflake),
 }
 
@@ -154,6 +155,9 @@ pub struct State {
     pub presences: HashMap<(Option<Snowflake>, Snowflake), Presence>,
     pub relationships: HashMap<Snowflake, Relationship>,
     pub streams: HashMap<String, Stream>,
+    /// Guild id -> member user ids, seeded by READY/GUILD_CREATE and refreshed
+    /// by GUILD_MEMBER_LIST_UPDATE.
+    pub guild_members: HashMap<Snowflake, HashSet<Snowflake>>,
 }
 
 impl State {
@@ -161,6 +165,7 @@ impl State {
         let mut events = Vec::new();
         match name {
             "READY" => self.ready(data, &mut events),
+            "READY_SUPPLEMENTAL" => self.ready_supplemental(data, &mut events),
             "GUILD_CREATE" => self.guild_create(data, &mut events),
             "GUILD_UPDATE" => self.guild_update(data, &mut events),
             "GUILD_DELETE" => {
@@ -235,6 +240,22 @@ impl State {
                     });
                 }
             }
+            "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => {
+                self.member_add(data, &mut events);
+            }
+            "GUILD_MEMBER_REMOVE" => {
+                if let (Some(guild_id), Some(user_id)) =
+                    (snowflake(data, "guild_id"), snowflake(data, "user_id"))
+                {
+                    if let Some(members) = self.guild_members.get_mut(&guild_id) {
+                        members.remove(&user_id);
+                    }
+                    events.push(StoreEvent::GuildMembersUpdated(guild_id));
+                }
+            }
+            "GUILD_MEMBER_LIST_UPDATE" => {
+                self.member_list_update(data, &mut events);
+            }
             "PRESENCE_UPDATE" => {
                 if let Ok(presence) = serde_json::from_value::<Presence>(data.clone())
                     && let Some(guild_id) = presence.guild_id
@@ -308,15 +329,59 @@ impl State {
 
         if let Some(guilds) = data["guilds"].as_array() {
             for guild in guilds {
-                if let Some(id) = snowflake(guild, "id") {
-                    if !self.guild_order.contains(&id) {
-                        self.guild_order.push(id);
-                    }
+                let Some(id) = snowflake(guild, "id") else {
+                    continue;
+                };
+                if !self.guild_order.contains(&id) {
+                    self.guild_order.push(id);
+                }
+
+                if guild["unavailable"].as_bool().unwrap_or(false) {
+                    self.guilds.entry(id).or_insert_with(|| Guild {
+                        id,
+                        name: String::new(),
+                        unavailable: true,
+                        ..Guild::default()
+                    });
+                    continue;
+                }
+
+                let Ok(parsed) = serde_json::from_value::<Guild>(guild.clone()) else {
                     self.guilds.entry(id).or_insert_with(|| Guild {
                         id,
                         name: String::new(),
                         ..Guild::default()
                     });
+                    continue;
+                };
+                if let Some(channels) = parsed.channels.clone() {
+                    self.merge_guild_channels(id, channels);
+                }
+                self.guilds.insert(id, parsed);
+            }
+        }
+
+        if let Some(merged) = data["merged_members"].as_array() {
+            for (index, members) in merged.iter().enumerate() {
+                let Some(guild_id) = data["guilds"]
+                    .get(index)
+                    .and_then(|guild| snowflake(guild, "id"))
+                else {
+                    continue;
+                };
+                let Some(members) = members.as_array() else {
+                    continue;
+                };
+                for member in members {
+                    if let Some(user) = member.get("user") {
+                        self.upsert_user_from_value(user);
+                        if let Some(user_id) = snowflake(user, "id") {
+                            self.guild_members
+                                .entry(guild_id)
+                                .or_default()
+                                .insert(user_id);
+                        }
+                    }
                 }
             }
         }
@@ -381,15 +446,15 @@ impl State {
             })
             .or_insert(guild);
 
-        for channel in channels {
-            self.index_recipients(&channel);
-            self.channels.insert(channel.id, channel);
-        }
+        self.merge_guild_channels(id, channels);
 
         if let Some(members) = data["members"].as_array() {
             for member in members {
                 if let Some(user) = member.get("user") {
                     self.upsert_user_from_value(user);
+                    if let Some(user_id) = snowflake(user, "id") {
+                        self.guild_members.entry(id).or_default().insert(user_id);
+                    }
                 }
             }
         }
@@ -575,6 +640,122 @@ impl State {
         self.read_states.insert(channel_id, message_id);
     }
 
+    /// Guild channel objects from `READY`/`GUILD_CREATE` are scoped by the
+    /// enclosing guild, not by a `guild_id` on each channel. Abaddon does the
+    /// same assignment in ProcessNewGuild; without it `guild_channels()` finds
+    /// nothing and the sidebar says "No channels".
+    fn member_add(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        let (Some(guild_id), Some(user)) = (snowflake(data, "guild_id"), data.get("user")) else {
+            return;
+        };
+        self.upsert_user_from_value(user);
+        if let Some(user_id) = snowflake(user, "id") {
+            self.guild_members
+                .entry(guild_id)
+                .or_default()
+                .insert(user_id);
+            events.push(StoreEvent::GuildMembersUpdated(guild_id));
+        }
+    }
+
+    /// Handles the common `SYNC`/`INSERT`/`UPDATE` ops. `DELETE` only carries
+    /// indexes, so it is left to the next SYNC rather than removing the wrong
+    /// member.
+    fn member_list_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        let Some(guild_id) = snowflake(data, "guild_id") else {
+            return;
+        };
+        let mut changed = false;
+        if let Some(ops) = data["ops"].as_array() {
+            for op in ops {
+                let Some(items) = op["items"].as_array() else {
+                    continue;
+                };
+                for item in items {
+                    let Some(user) = item.pointer("/member/user") else {
+                        continue;
+                    };
+                    self.upsert_user_from_value(user);
+                    if let Some(user_id) = snowflake(user, "id") {
+                        self.guild_members
+                            .entry(guild_id)
+                            .or_default()
+                            .insert(user_id);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            events.push(StoreEvent::GuildMembersUpdated(guild_id));
+        }
+    }
+
+    fn merge_guild_channels(&mut self, guild_id: Snowflake, channels: Vec<Channel>) {
+        for mut channel in channels {
+            channel.guild_id = Some(guild_id);
+            self.index_recipients(&channel);
+            self.channels.insert(channel.id, channel);
+        }
+    }
+
+    /// READY_SUPPLEMENTAL carries live voice states and friend presences that
+    /// READY itself omits.
+    fn ready_supplemental(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        if let Some(friends) = data
+            .pointer("/merged_presences/friends")
+            .and_then(Value::as_array)
+        {
+            for entry in friends {
+                let Some(user_id) = snowflake(entry, "user_id") else {
+                    continue;
+                };
+                let status = entry
+                    .pointer("/presence/status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.presences.insert(
+                    (None, user_id),
+                    Presence {
+                        guild_id: None,
+                        user_id,
+                        status,
+                        activities: Vec::new(),
+                    },
+                );
+                events.push(StoreEvent::PresenceUpdated {
+                    guild_id: None,
+                    user_id,
+                });
+            }
+        }
+
+        if let Some(guilds) = data["guilds"].as_array() {
+            for guild in guilds {
+                let guild_id = snowflake(guild, "id");
+                let Some(states) = guild["voice_states"].as_array() else {
+                    continue;
+                };
+                for state in states {
+                    let Ok(mut voice_state) =
+                        serde_json::from_value::<VoiceState>(state.clone())
+                    else {
+                        continue;
+                    };
+                    if voice_state.guild_id.is_none() {
+                        voice_state.guild_id = guild_id;
+                    }
+                    let event = StoreEvent::VoiceStateUpdated {
+                        guild_id: voice_state.guild_id,
+                        user_id: voice_state.user_id,
+                    };
+                    self.voice_states.insert(voice_state.key(), voice_state);
+                    events.push(event);
+                }
+            }
+        }
+    }
+
     fn index_recipients(&mut self, channel: &Channel) {
         if let Some(recipients) = &channel.recipients {
             for user in recipients {
@@ -678,6 +859,18 @@ impl State {
             .values()
             .filter(|state| state.guild_id == Some(guild_id))
             .collect()
+    }
+
+    pub fn guild_member_users(&self, guild_id: Snowflake) -> Vec<User> {
+        let mut users: Vec<User> = self
+            .guild_members
+            .get(&guild_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|user_id| self.users.get(user_id).cloned())
+            .collect();
+        users.sort_by_key(|user| user.display_name().to_lowercase());
+        users
     }
 
     pub fn all_user_ids(&self) -> HashSet<Snowflake> {
@@ -938,6 +1131,122 @@ mod tests {
                 state.channels[&Snowflake(11)].display_name(),
                 "general-renamed"
             );
+        });
+    }
+
+    #[test]
+    fn guild_create_channels_are_scoped_to_the_parent_guild() {
+        let store = Store::new();
+        // Embedded guild channels normally have no guild_id; Abaddon attaches
+        // the enclosing guild id in ProcessNewGuild.
+        store.apply(
+            "GUILD_CREATE",
+            &json!({
+                "id": "5",
+                "name": "Lambda Ignition",
+                "channels": [
+                    {"id": "10", "type": 4, "name": "Text Channels", "position": 0},
+                    {"id": "11", "type": 0, "name": "general", "position": 1},
+                    {"id": "12", "type": 2, "name": "General", "position": 2}
+                ]
+            }),
+        );
+
+        store.read(|state| {
+            let channels = state.guild_channels(Snowflake(5));
+            assert_eq!(channels.len(), 3);
+            assert_eq!(channels[1].display_name(), "general");
+            assert_eq!(channels[2].display_name(), "General");
+            assert!(
+                channels
+                    .iter()
+                    .all(|channel| channel.guild_id == Some(Snowflake(5)))
+            );
+        });
+    }
+
+    #[test]
+    fn ready_with_full_guilds_keeps_channels() {
+        let store = Store::new();
+        store.apply(
+            "READY",
+            &json!({
+                "user": {"id": "1", "username": "lambda"},
+                "guilds": [{
+                    "id": "5",
+                    "name": "Lambda Ignition",
+                    "channels": [
+                        {"id": "11", "type": 0, "name": "general", "position": 1}
+                    ]
+                }]
+            }),
+        );
+
+        store.read(|state| {
+            let channels = state.guild_channels(Snowflake(5));
+            assert_eq!(channels.len(), 1);
+            assert_eq!(channels[0].display_name(), "general");
+            assert_eq!(channels[0].guild_id, Some(Snowflake(5)));
+        });
+    }
+
+    #[test]
+    fn guild_create_seeds_members_and_member_list_updates_adds() {
+        let store = Store::new();
+        store.apply(
+            "GUILD_CREATE",
+            &json!({
+                "id": "5",
+                "name": "Lambda Ignition",
+                "channels": [],
+                "members": [
+                    {"user": {"id": "1", "username": "lambda"}},
+                    {"user": {"id": "2", "username": "friend"}}
+                ]
+            }),
+        );
+        store.apply(
+            "GUILD_MEMBER_LIST_UPDATE",
+            &json!({
+                "guild_id": "5",
+                "ops": [{
+                    "op": "INSERT",
+                    "items": [{"member": {"user": {"id": "3", "username": "third"}}}]
+                }]
+            }),
+        );
+        store.read(|state| {
+            let names: Vec<String> = state
+                .guild_member_users(Snowflake(5))
+                .into_iter()
+                .map(|user| user.username)
+                .collect();
+            assert_eq!(names, vec!["friend", "lambda", "third"]);
+        });
+    }
+
+    #[test]
+    fn ready_supplemental_seeds_voice_states() {
+        let store = Store::new();
+        store.apply(
+            "READY_SUPPLEMENTAL",
+            &json!({
+                "merged_presences": {"friends": []},
+                "guilds": [{
+                    "id": "5",
+                    "voice_states": [{
+                        "user_id": "1",
+                        "channel_id": "12",
+                        "session_id": "abc"
+                    }]
+                }]
+            }),
+        );
+
+        store.read(|state| {
+            let states = state.guild_voice_states(Snowflake(5));
+            assert_eq!(states.len(), 1);
+            assert_eq!(states[0].channel_id, Some(Snowflake(12)));
         });
     }
 }
