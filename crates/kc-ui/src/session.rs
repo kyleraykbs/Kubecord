@@ -14,7 +14,7 @@ use kc_core::{Account, Snowflake, Token};
 use kc_gateway::session::GatewayHandle;
 use kc_gateway::{Gateway, GatewayEvent};
 use kc_http::HttpClient;
-use kc_media::audio::VoiceAudio;
+use kc_media::audio::{ScreenAudio, VoiceAudio};
 use kc_media::video::{VideoSettings, VideoSource};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
@@ -677,6 +677,7 @@ struct VoiceConnection {
 struct StreamConnection {
     handle: VoiceHandle,
     source: Option<VideoSource>,
+    audio: Option<ScreenAudio>,
     key: String,
 }
 
@@ -912,9 +913,22 @@ async fn maybe_start_stream(
     match kc_voice::connect(params, event_tx).await {
         Ok(handle) => {
             debug!(%key, %rtc_id, "go live stream connecting");
+            let audio = match ScreenAudio::start(handle.clone(), 128_000) {
+                Ok(audio) => Some(audio),
+                Err(error) => {
+                    let _ = ui
+                        .send(UiEvent::Error {
+                            account: Some(account),
+                            message: format!("screen audio unavailable: {error}"),
+                        })
+                        .await;
+                    None
+                }
+            };
             voice.stream_connection = Some(StreamConnection {
                 handle: handle.clone(),
                 source: None,
+                audio,
                 key,
             });
 
@@ -1319,6 +1333,7 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
     voice.streaming = false;
     if let Some(connection) = voice.stream_connection.take() {
         drop(connection.source);
+        drop(connection.audio);
         connection.handle.disconnect().await;
     }
     voice.stream_key = None;
