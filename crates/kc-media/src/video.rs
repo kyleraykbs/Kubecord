@@ -1,7 +1,8 @@
 //! Camera and screen capture to H.264 Annex-B access units.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer_app::prelude::*;
@@ -21,6 +22,7 @@ pub struct VideoSource {
     thread: Option<std::thread::JoinHandle<()>>,
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
+    last_force_keyframe: Mutex<Option<Instant>>,
 }
 
 /// Encoder choice for a capture pipeline.
@@ -78,7 +80,7 @@ fn hardware_available() -> bool {
 fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     if hardware {
         format!(
-            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=4",
+            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
             bitrate = settings.bitrate_kbps,
             keyint = settings.fps * 2,
         )
@@ -239,6 +241,7 @@ impl VideoSource {
             thread: Some(thread),
             _portal: None,
             _camera: None,
+            last_force_keyframe: Mutex::new(None),
         })
     }
 
@@ -270,6 +273,15 @@ impl VideoSource {
 
     /// Asks the encoder for an immediate keyframe in response to PLI/FIR.
     pub fn force_keyframe(&self) {
+        // Viewers can send PLI/FIR repeatedly when they are starved. Re-encoding
+        // a keyframe for every request creates larger periodic freezes, so cap
+        // forced keyframes to one every two seconds.
+        if let Ok(mut last) = self.last_force_keyframe.lock() {
+            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
         let Some(sink) = self.pipeline.by_name("sink") else {
             return;
         };
@@ -280,7 +292,9 @@ impl VideoSource {
             .all_headers(true)
             .count(1)
             .build();
-        if !pad.send_event(event) {
+        if pad.send_event(event) {
+            tracing::info!("forced encoder keyframe from viewer request");
+        } else {
             tracing::warn!("could not send force-key-unit event upstream");
         }
     }
