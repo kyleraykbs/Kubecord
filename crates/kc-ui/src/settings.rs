@@ -89,3 +89,33 @@ impl CapturePreferences {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_bitrate_is_derived_from_resolution_and_fps() {
+        let prefs = CapturePreferences::default();
+        let settings = prefs.video_settings();
+        assert_eq!(settings.width, 1280);
+        assert_eq!(settings.height, 720);
+        assert_eq!(settings.fps, 30);
+        assert_eq!(
+            settings.bitrate_kbps,
+            VideoSettings::automatic_bitrate_kbps(1280, 720, 30)
+        );
+    }
+
+    #[test]
+    fn explicit_bitrate_is_preserved() {
+        let prefs = CapturePreferences {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: Some(6000),
+        };
+        let settings = prefs.video_settings();
+        assert_eq!(settings.bitrate_kbps, 6000);
+    }
+}
