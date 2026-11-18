@@ -277,7 +277,7 @@ impl VideoSource {
         // a keyframe for every request creates larger periodic freezes, so cap
         // forced keyframes to one every two seconds.
         if let Ok(mut last) = self.last_force_keyframe.lock() {
-            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
+            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(30)) {
                 return;
             }
             *last = Some(Instant::now());
