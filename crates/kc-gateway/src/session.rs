@@ -103,6 +103,60 @@ impl GatewayHandle {
         self.send(json!({"op": 22, "d": {"stream_key": stream_key, "paused": paused}}));
     }
 
+    /// Announces the account's status for this session. `status` is
+    /// `online`, `idle`, `dnd` or `invisible`; `custom` is the custom status
+    /// text and optional unicode emoji. Limited to 5 updates per 20 seconds.
+    pub fn update_presence(&self, status: &str, custom: Option<(&str, Option<&str>)>, afk: bool) {
+        let activities = match custom {
+            Some((text, emoji)) => {
+                let mut activity = json!({
+                    "type": 4,
+                    "name": "Custom Status",
+                    "state": text,
+                });
+                if let Some(emoji) = emoji {
+                    activity["emoji"] = json!({ "name": emoji });
+                }
+                vec![activity]
+            }
+            None => Vec::new(),
+        };
+        self.send(json!({
+            "op": 3,
+            "d": { "since": 0, "activities": activities, "status": status, "afk": afk }
+        }));
+    }
+
+    /// Asks for specific guild members (answered by GUILD_MEMBERS_CHUNK).
+    /// The REST member endpoints are not safe for user accounts.
+    pub fn request_members(&self, guild_id: Snowflake, user_ids: &[Snowflake]) {
+        if user_ids.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = user_ids
+            .iter()
+            .take(100)
+            .map(Snowflake::to_string)
+            .collect();
+        self.send(json!({
+            "op": 8,
+            "d": { "guild_id": [guild_id.to_string()], "user_ids": ids, "presences": true }
+        }));
+    }
+
+    /// Searches guild members by name prefix, for @mention autocomplete.
+    pub fn search_members(&self, guild_id: Snowflake, query: &str, limit: u8) {
+        self.send(json!({
+            "op": 8,
+            "d": {
+                "guild_id": [guild_id.to_string()],
+                "query": query,
+                "limit": limit.clamp(1, 100),
+                "presences": true,
+            }
+        }));
+    }
+
     /// Subscribes to a guild channel's member list. Discord user clients use
     /// lazy guild subscriptions; without this, existing members (and their
     /// voice states) in a channel are not delivered.
@@ -323,6 +377,7 @@ impl Gateway {
                                             "gateway ready"
                                         );
                                     }
+                                    dump_dispatch(&name, &data);
                                     let _ = events.send(GatewayEvent::Dispatch {
                                         name,
                                         data,
@@ -372,6 +427,20 @@ impl Gateway {
                 }
             }
         }
+    }
+}
+
+/// Development aid: with `KYLECORD_DUMP_DISPATCH=<dir>` every dispatch is
+/// written to `<dir>/<EVENT>.json` (the latest payload per event name), so
+/// reducers can be written against real payload shapes. The files contain
+/// account data; the directory is the caller's responsibility.
+fn dump_dispatch(name: &str, data: &Value) {
+    let Some(directory) = std::env::var_os("KYLECORD_DUMP_DISPATCH") else {
+        return;
+    };
+    let path = std::path::Path::new(&directory).join(format!("{name}.json"));
+    if let Ok(bytes) = serde_json::to_vec_pretty(data) {
+        let _ = std::fs::write(path, bytes);
     }
 }
 

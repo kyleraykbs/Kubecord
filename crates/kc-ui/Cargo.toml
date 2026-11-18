@@ -12,14 +12,17 @@ ashpd.workspace = true
 anyhow.workspace = true
 async-channel = "2"
 glib.workspace = true
-gtk.workspace = true
+gstreamer.workspace = true
+gtk = { workspace = true, features = ["v4_14"] }
+# WebP has no GdkPixbuf loader on most systems; decode it in-process.
+image-webp = "0.2"
 kc-core.workspace = true
 kc-gateway.workspace = true
 kc-http.workspace = true
 kc-media.workspace = true
 kc-state.workspace = true
 kc-voice.workspace = true
-libadwaita = { workspace = true, features = ["v1_4"] }
+libadwaita = { workspace = true, features = ["v1_7"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

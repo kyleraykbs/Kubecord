@@ -28,6 +28,18 @@ pub fn data_dir() -> Result<PathBuf> {
         .ok_or(Error::NoConfigDir)
 }
 
+/// `$XDG_CACHE_HOME/kylecord`, falling back to `~/.cache/kylecord`.
+pub fn cache_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME")
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir).join(APP));
+    }
+    dirs::cache_dir()
+        .map(|dir| dir.join(APP))
+        .ok_or(Error::NoConfigDir)
+}
+
 pub fn accounts_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("accounts.json"))
 }

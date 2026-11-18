@@ -114,6 +114,32 @@ impl<'de> Deserialize<'de> for ChannelType {
     }
 }
 
+/// One permission overwrite of a guild channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overwrite {
+    pub id: Snowflake,
+    /// 0 for a role, 1 for a member.
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    #[serde(default, deserialize_with = "crate::serde_util::u64_string")]
+    pub allow: u64,
+    #[serde(default, deserialize_with = "crate::serde_util::u64_string")]
+    pub deny: u64,
+}
+
+impl Overwrite {
+    pub const ROLE: u8 = 0;
+    pub const MEMBER: u8 = 1;
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ThreadMetadata {
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub locked: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Snowflake,
@@ -135,6 +161,26 @@ pub struct Channel {
     pub last_message_id: Option<Snowflake>,
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// DMs under the `DEDUPE_USER_OBJECTS` capability list recipient ids
+    /// here; the reducer resolves them into `recipients`.
+    #[serde(default)]
+    pub recipient_ids: Option<Vec<Snowflake>>,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub permission_overwrites: Vec<Overwrite>,
+    /// Group DM icon hash.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Group DM owner, or the creator of a thread.
+    #[serde(default)]
+    pub owner_id: Option<Snowflake>,
+    /// Slowmode, in seconds.
+    #[serde(default)]
+    pub rate_limit_per_user: Option<u32>,
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+    /// Present on a thread the current user has joined.
+    #[serde(default, skip_serializing)]
+    pub member: Option<serde_json::Value>,
 }
 
 impl Channel {
@@ -150,6 +196,18 @@ impl Channel {
                 .collect::<Vec<_>>()
                 .join(", "),
             (None, None) => self.id.to_string(),
+        }
+    }
+
+    pub fn is_private(&self) -> bool {
+        matches!(self.kind, ChannelType::Dm | ChannelType::GroupDm)
+    }
+
+    /// The other party of a one-to-one DM.
+    pub fn dm_recipient(&self) -> Option<&User> {
+        match (self.kind, self.recipients.as_deref()) {
+            (ChannelType::Dm, Some([user])) => Some(user),
+            _ => None,
         }
     }
 

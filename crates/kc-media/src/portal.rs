@@ -4,9 +4,7 @@ use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use ashpd::desktop::Session;
-use ashpd::desktop::screencast::{
-    CursorMode, Screencast, SelectSourcesOptions, SourceType,
-};
+use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 
 use crate::error::{Error, Result};
 
@@ -97,7 +95,10 @@ pub struct CameraAccess {
 
 impl CameraAccess {
     pub fn select(&self, node_id: u32) -> Option<CameraCast> {
-        let camera = self.cameras.iter().find(|camera| camera.node_id == node_id)?;
+        let camera = self
+            .cameras
+            .iter()
+            .find(|camera| camera.node_id == node_id)?;
         Some(CameraCast {
             node_id: camera.node_id,
             name: camera.name.clone(),
@@ -110,7 +111,9 @@ impl CameraAccess {
 
     /// The first camera in the portal's order.
     pub fn preferred(&self) -> Option<CameraCast> {
-        self.cameras.first().and_then(|camera| self.select(camera.node_id))
+        self.cameras
+            .first()
+            .and_then(|camera| self.select(camera.node_id))
     }
 }
 
@@ -150,7 +153,7 @@ pub async fn request_cameras() -> Result<Option<CameraAccess>> {
     let clean_name = |raw: &str| -> String {
         let words: Vec<&str> = raw.split_whitespace().collect();
         let half = words.len() / 2;
-        if words.len() > 2 && words.len() % 2 == 0 && words[..half] == words[half..] {
+        if words.len() > 2 && words.len().is_multiple_of(2) && words[..half] == words[half..] {
             words[..half].join(" ")
         } else {
             words.join(" ")
@@ -216,7 +219,11 @@ pub async fn request_cameras() -> Result<Option<CameraAccess>> {
     let mut cameras: Vec<CameraChoice> = raws
         .into_iter()
         .filter(|camera| {
-            if camera.choice.node_name.starts_with("v4l2_input._sys_devices_virtual_video4linux") {
+            if camera
+                .choice
+                .node_name
+                .starts_with("v4l2_input._sys_devices_virtual_video4linux")
+            {
                 // Direct V4L2 below handles virtual cameras; the portal's
                 // loopback nodes can block forever without a producer.
                 return false;

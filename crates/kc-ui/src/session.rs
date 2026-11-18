@@ -16,6 +16,7 @@ use kc_gateway::session::GatewayHandle;
 use kc_gateway::{Gateway, GatewayEvent};
 use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
+use kc_media::decode::VideoFeed;
 use kc_media::delay::DelayedSender;
 use kc_media::portal::CameraAccess;
 use kc_media::video::{VideoSettings, VideoSource, is_keyframe};
@@ -64,6 +65,8 @@ pub struct VoiceUiState {
     pub deafened: bool,
     pub camera: bool,
     pub streaming: bool,
+    /// Whose stream is being watched, if any.
+    pub watching: Option<Snowflake>,
 }
 
 /// Everything one account owns on the GTK side.
@@ -84,6 +87,49 @@ pub struct Session {
     pub loading_guild_channels: HashSet<Snowflake>,
     pub connection: ConnState,
     pub voice: Option<VoiceUiState>,
+    /// The channel last viewed in each guild, restored when returning to it.
+    pub last_channel: HashMap<Snowflake, Snowflake>,
+    /// Collapsed categories.
+    pub collapsed: HashSet<Snowflake>,
+    /// Expanded server folders.
+    pub open_folders: HashSet<i64>,
+    /// Message being replied to in the composer.
+    pub reply_to: Option<Snowflake>,
+    /// Message being edited in the composer.
+    pub editing: Option<Snowflake>,
+    /// Files queued for the next message.
+    pub uploads: Vec<Upload>,
+    /// Scroll-back state per channel.
+    pub history: HashMap<Snowflake, History>,
+    /// Who is typing in each channel, and when they were last seen typing.
+    pub typing: HashMap<Snowflake, Vec<(Snowflake, Instant)>>,
+    pub friends_tab: FriendsTab,
+    /// Channels whose member list has been requested this run.
+    pub subscribed: HashSet<Snowflake>,
+}
+
+/// A file waiting in the composer's upload tray.
+#[derive(Clone)]
+pub struct Upload {
+    pub name: String,
+    pub bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct History {
+    /// A page of older messages is being fetched.
+    pub loading: bool,
+    /// The first message of the channel has been loaded.
+    pub reached_top: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FriendsTab {
+    #[default]
+    Online,
+    All,
+    Pending,
+    Blocked,
 }
 
 impl Session {
@@ -102,6 +148,16 @@ impl Session {
             loaded_guild_channels: HashSet::new(),
             connection: ConnState::Connecting,
             voice: None,
+            last_channel: HashMap::new(),
+            collapsed: HashSet::new(),
+            open_folders: HashSet::new(),
+            reply_to: None,
+            editing: None,
+            uploads: Vec::new(),
+            history: HashMap::new(),
+            typing: HashMap::new(),
+            friends_tab: FriendsTab::default(),
+            subscribed: HashSet::new(),
             account,
         }
     }
@@ -141,6 +197,11 @@ pub enum VoiceCommand {
         delay_ms: u64,
     },
     StopStream,
+    /// Tune into the stream of someone in the current voice channel.
+    WatchStream {
+        user_id: Snowflake,
+    },
+    StopWatching,
     Subscribe {
         guild_id: Snowflake,
         channel_id: Snowflake,
@@ -151,6 +212,16 @@ pub enum VoiceCommand {
 pub static VOICE_COMMANDS: LazyLock<
     Mutex<HashMap<AccountId, mpsc::UnboundedSender<VoiceCommand>>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Gateway handles for running accounts, so the interface can send gateway
+/// commands (member list ranges, member requests, presence) directly.
+pub static GATEWAYS: LazyLock<Mutex<HashMap<AccountId, kc_gateway::session::GatewayHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The gateway handle of an account, when it is connected.
+pub fn gateway(account: AccountId) -> Option<kc_gateway::session::GatewayHandle> {
+    GATEWAYS.lock().ok()?.get(&account).cloned()
+}
 
 /// GTK-thread work queue.
 pub enum Command {
@@ -169,13 +240,6 @@ pub enum Command {
         store: Store,
         channel: Snowflake,
     },
-    SendMessage {
-        account: AccountId,
-        http: HttpClient,
-        channel: Snowflake,
-        content: String,
-        reply_to: Option<Snowflake>,
-    },
     SendTyping {
         account: AccountId,
         http: HttpClient,
@@ -185,16 +249,6 @@ pub enum Command {
         http: HttpClient,
         channel: Snowflake,
         message_id: Snowflake,
-    },
-    RefreshGuilds {
-        account: AccountId,
-        http: HttpClient,
-    },
-    FetchGuildChannels {
-        account: AccountId,
-        http: HttpClient,
-        store: Store,
-        guild: Snowflake,
     },
     JoinVoice {
         account: AccountId,
@@ -238,6 +292,13 @@ pub enum Command {
     StopStream {
         account: AccountId,
     },
+    WatchStream {
+        account: AccountId,
+        user_id: Snowflake,
+    },
+    StopWatching {
+        account: AccountId,
+    },
     SubscribeChannel {
         account: AccountId,
         guild_id: Snowflake,
@@ -246,7 +307,12 @@ pub enum Command {
 }
 
 /// Tokio-to-GTK notifications.
+/// A closure run on the GTK thread with the application state.
+pub type UiTask = Box<dyn FnOnce(&std::rc::Rc<crate::shell::AppState>) + Send>;
+
 pub enum UiEvent {
+    /// Work to finish on the GTK thread after an asynchronous task.
+    Run(UiTask),
     LoginSuccess {
         user: User,
         token: Token,
@@ -264,15 +330,6 @@ pub enum UiEvent {
     },
     Resumed {
         account: AccountId,
-    },
-    Guilds {
-        account: AccountId,
-        guilds: Vec<Guild>,
-    },
-    GuildChannelsFailed {
-        account: AccountId,
-        guild: Snowflake,
-        message: String,
     },
     StoreEvent {
         account: AccountId,
@@ -308,6 +365,25 @@ pub enum UiEvent {
     StreamError {
         account: AccountId,
         message: String,
+    },
+    /// Video from someone's camera (`stream: false`) or from the stream
+    /// being watched started arriving; `feed` carries its frames.
+    VideoStarted {
+        account: AccountId,
+        user_id: Snowflake,
+        stream: bool,
+        feed: Arc<VideoFeed>,
+    },
+    VideoStopped {
+        account: AccountId,
+        user_id: Snowflake,
+        stream: bool,
+        feed: Arc<VideoFeed>,
+    },
+    /// Whose stream is being watched changed (`None`: no longer watching).
+    StreamWatch {
+        account: AccountId,
+        user_id: Option<Snowflake>,
     },
     CameraChoices {
         account: AccountId,
@@ -379,17 +455,6 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             Ok(messages) => store.load_history(channel, messages),
             Err(error) => send_http_error(&ui, Some(account), &error).await,
         },
-        Command::SendMessage {
-            account,
-            http,
-            channel,
-            content,
-            reply_to,
-        } => {
-            if let Err(error) = http.send_message(channel, &content, reply_to).await {
-                send_http_error(&ui, Some(account), &error).await;
-            }
-        }
         Command::SendTyping {
             account,
             http,
@@ -412,29 +477,6 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                 debug!(%error, "ack failed");
             }
         }
-        Command::RefreshGuilds { account, http } => match http.current_user_guilds().await {
-            Ok(guilds) => {
-                let _ = ui.send(UiEvent::Guilds { account, guilds }).await;
-            }
-            Err(error) => send_http_error(&ui, Some(account), &error).await,
-        },
-        Command::FetchGuildChannels {
-            account,
-            http,
-            store,
-            guild,
-        } => match http.guild_channels(guild).await {
-            Ok(channels) => store.load_guild_channels(guild, channels),
-            Err(error) => {
-                let _ = ui
-                    .send(UiEvent::GuildChannelsFailed {
-                        account,
-                        guild,
-                        message: describe_http_error(&error),
-                    })
-                    .await;
-            }
-        },
         Command::JoinVoice {
             account,
             guild_id,
@@ -517,6 +559,12 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         }
         Command::StopStream { account } => {
             forward_voice(account, VoiceCommand::StopStream, ui).await;
+        }
+        Command::WatchStream { account, user_id } => {
+            forward_voice(account, VoiceCommand::WatchStream { user_id }, ui).await;
+        }
+        Command::StopWatching { account } => {
+            forward_voice(account, VoiceCommand::StopWatching, ui).await;
         }
         Command::SubscribeChannel {
             account,
@@ -602,6 +650,9 @@ fn spawn_account(
 
     tokio::spawn(async move {
         let (handle, mut gateway_rx, _gateway_task) = Gateway::new(token).start();
+        if let Ok(mut registry) = GATEWAYS.lock() {
+            registry.insert(account, handle.clone());
+        }
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<VoiceControl>();
         let mut voice = VoiceRuntime {
             handle,
@@ -627,6 +678,8 @@ fn spawn_account(
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
+            watch: None,
+            watch_generation: 0,
         };
 
         loop {
@@ -754,6 +807,15 @@ fn spawn_account(
                                 let _ = ui.send(UiEvent::StreamStarted { account }).await;
                             }
                         }
+                        VoiceControl::WatchClosed { generation } => {
+                            if voice
+                                .watch
+                                .as_ref()
+                                .is_some_and(|watch| watch.generation == generation)
+                            {
+                                stop_watching(&mut voice, account, &ui, true).await;
+                            }
+                        }
                         VoiceControl::StreamClosed { generation } => {
                             if generation == voice.stream_generation
                                 && voice.stream_connection.is_some()
@@ -818,6 +880,9 @@ fn spawn_account(
         if let Ok(mut registry) = VOICE_COMMANDS.lock() {
             registry.remove(&account);
         }
+        if let Ok(mut registry) = GATEWAYS.lock() {
+            registry.remove(&account);
+        }
     });
 }
 
@@ -846,6 +911,80 @@ struct VoiceRuntime {
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
+    /// Someone else's stream being watched.
+    watch: Option<Watch>,
+    watch_generation: u64,
+}
+
+/// Watching another participant's stream: its own connection, set up from
+/// the gateway's answer to a watch request.
+struct Watch {
+    key: String,
+    owner: Snowflake,
+    rtc_id: Option<Snowflake>,
+    token: Option<String>,
+    endpoint: Option<String>,
+    handle: Option<VoiceHandle>,
+    generation: u64,
+}
+
+/// The feeds for video arriving on one connection. Tells the interface when
+/// a person's video starts and stops.
+struct VideoFeeds {
+    account: AccountId,
+    stream: bool,
+    ui: async_channel::Sender<UiEvent>,
+    feeds: HashMap<Snowflake, Arc<VideoFeed>>,
+}
+
+impl VideoFeeds {
+    fn new(account: AccountId, stream: bool, ui: async_channel::Sender<UiEvent>) -> Self {
+        Self {
+            account,
+            stream,
+            ui,
+            feeds: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, user_id: Snowflake, frame: Vec<u8>, keyframe: bool) {
+        let feed = self.feeds.entry(user_id).or_insert_with(|| {
+            let feed = Arc::new(VideoFeed::default());
+            tracing::info!(%user_id, stream = self.stream, bytes = frame.len(), "first video frame");
+            let _ = self.ui.try_send(UiEvent::VideoStarted {
+                account: self.account,
+                user_id,
+                stream: self.stream,
+                feed: feed.clone(),
+            });
+            feed
+        });
+        feed.push(frame, keyframe);
+    }
+
+    fn end(&mut self, user_id: Snowflake) {
+        if let Some(feed) = self.feeds.remove(&user_id) {
+            let _ = self.ui.try_send(UiEvent::VideoStopped {
+                account: self.account,
+                user_id,
+                stream: self.stream,
+                feed,
+            });
+        }
+    }
+
+    fn end_all(&mut self) {
+        let users: Vec<Snowflake> = self.feeds.keys().copied().collect();
+        for user_id in users {
+            self.end(user_id);
+        }
+    }
+}
+
+/// The playback mixer's key for the sound of a stream, kept apart from the
+/// same person's voice.
+fn stream_audio_key(user_id: Snowflake) -> u64 {
+    user_id.get() | 1 << 63
 }
 
 struct VoiceConnection {
@@ -882,6 +1021,9 @@ enum VoiceControl {
         generation: u64,
     },
     ForceCameraKeyframe {
+        generation: u64,
+    },
+    WatchClosed {
         generation: u64,
     },
 }
@@ -986,6 +1128,17 @@ async fn handle_stream_create(
     ui: &async_channel::Sender<UiEvent>,
     control_tx: &mpsc::UnboundedSender<VoiceControl>,
 ) {
+    if let Some(watch) = &mut voice.watch
+        && data["stream_key"].as_str() == Some(watch.key.as_str())
+    {
+        watch.rtc_id = data["rtc_server_id"]
+            .as_str()
+            .and_then(|id| id.parse().ok())
+            .or_else(|| data["rtc_server_id"].as_u64().map(Snowflake::new));
+        tracing::info!(key = %watch.key, rtc = ?watch.rtc_id, "watched stream created");
+        maybe_start_watch(voice, account, ui, control_tx).await;
+        return;
+    }
     if !voice.stream_pending {
         return;
     }
@@ -1023,6 +1176,18 @@ async fn handle_stream_server_update(
     ui: &async_channel::Sender<UiEvent>,
     control_tx: &mpsc::UnboundedSender<VoiceControl>,
 ) {
+    if let Some(watch) = &mut voice.watch
+        && data["stream_key"].as_str() == Some(watch.key.as_str())
+    {
+        if let Some(token) = data["token"].as_str() {
+            watch.token = Some(token.to_owned());
+        }
+        if let Some(endpoint) = data["endpoint"].as_str() {
+            watch.endpoint = Some(endpoint.to_owned());
+        }
+        maybe_start_watch(voice, account, ui, control_tx).await;
+        return;
+    }
     if let Some(key) = data["stream_key"].as_str() {
         match voice.stream_key.as_deref() {
             Some(ours) if ours != key => return,
@@ -1057,6 +1222,27 @@ async fn handle_stream_delete(
     let Some(key) = data["stream_key"].as_str() else {
         return;
     };
+    if voice.watch.as_ref().is_some_and(|watch| watch.key == key) {
+        let reason = data["reason"].as_str().unwrap_or("");
+        tracing::info!(key, reason, "watched stream ended");
+        // The server already dropped us; there is nothing to tell it.
+        stop_watching(voice, account, ui, false).await;
+        let message = match reason {
+            "" | "user_requested" | "stream_ended" => None,
+            "stream_full" => Some("That stream is full".to_owned()),
+            "unauthorized" => Some("You are not allowed to watch that stream".to_owned()),
+            other => Some(format!("Could not watch the stream ({other})")),
+        };
+        if let Some(message) = message {
+            let _ = ui
+                .send(UiEvent::Error {
+                    account: Some(account),
+                    message,
+                })
+                .await;
+        }
+        return;
+    }
     let ours = voice.stream_key.as_deref() == Some(key)
         || voice
             .stream_connection
@@ -1101,6 +1287,7 @@ async fn maybe_start_stream(
         video: true,
         screen: true,
         dave_channel_id,
+        receive_only: false,
     };
     tracing::info!(%rtc_id, %key, endpoint = %params.endpoint, "stream connecting");
     voice.stream_pending = false;
@@ -1175,9 +1362,12 @@ async fn maybe_start_stream(
             let camera_source = voice.stream_camera.clone();
             let screen_parent = voice.stream_parent.clone();
             let video_settings = voice.stream_settings.clone();
+            handle
+                .set_retransmit_window(Duration::from_millis(video_settings.retransmit_ms as u64));
             let stream_delay_ms = voice.stream_delay_ms;
             let drop_after_ms = video_settings.drop_frames_after_ms;
-            let drop_after = (drop_after_ms > 0).then(|| Duration::from_millis(drop_after_ms as u64));
+            let drop_after =
+                (drop_after_ms > 0).then(|| Duration::from_millis(drop_after_ms as u64));
             let video_send = source_handle.clone();
             let video_delay = DelayedSender::start_with_limit_and_keep(
                 Duration::from_millis(stream_delay_ms),
@@ -1226,10 +1416,8 @@ async fn maybe_start_stream(
                             let watchdog_frames = frame_count.clone();
                             let video_delay = video_delay.clone();
                             let last_frame = last_frame.clone();
-                            let result = VideoSource::screen(
-                                portal,
-                                video_settings.clone(),
-                                move |frame| {
+                            let result =
+                                VideoSource::screen(portal, video_settings.clone(), move |frame| {
                                     if let Ok(mut last) = last_frame.lock() {
                                         let gap = last.elapsed();
                                         if gap > Duration::from_millis(500) {
@@ -1248,9 +1436,8 @@ async fn maybe_start_stream(
                                         );
                                     }
                                     video_delay.send(frame.data, frame.duration_ms);
-                                },
-                            )
-                            .map_err(|error| error.to_string());
+                                })
+                                .map_err(|error| error.to_string());
                             if result.is_ok() {
                                 let ui_events = source_ui.clone();
                                 let control = source_control.clone();
@@ -1264,8 +1451,8 @@ async fn maybe_start_stream(
                                                     .to_owned(),
                                             })
                                             .await;
-                                        let _ = control
-                                            .send(VoiceControl::StreamClosed { generation });
+                                        let _ =
+                                            control.send(VoiceControl::StreamClosed { generation });
                                     }
                                 });
                             }
@@ -1327,6 +1514,7 @@ async fn maybe_connect(
         video: true,
         screen: false,
         dave_channel_id: channel_id,
+        receive_only: false,
     };
     voice.pending_join = None;
     voice.generation = voice.generation.wrapping_add(1);
@@ -1336,7 +1524,16 @@ async fn maybe_connect(
     match kc_voice::connect(params, event_tx).await {
         Ok(handle) => {
             tracing::info!(%channel_id, "voice connection started");
-            let audio = match VoiceAudio::start(handle.clone()) {
+            // The microphone's own speech detection lights the local ring.
+            let speaking_ui = ui.clone();
+            let on_speaking = move |speaking: bool| {
+                let _ = speaking_ui.try_send(UiEvent::VoiceSpeaking {
+                    account,
+                    user_id,
+                    speaking,
+                });
+            };
+            let audio = match VoiceAudio::start(handle.clone(), on_speaking) {
                 Ok(audio) => Some(Arc::new(audio)),
                 Err(error) => {
                     let _ = ui
@@ -1374,18 +1571,49 @@ async fn maybe_connect(
             let ui = ui.clone();
             let control = control_tx.clone();
             tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
+                let mut report = tokio::time::interval(Duration::from_secs(5));
+                let mut reported = kc_media::receive::ReceiveStats::default();
+                let mut videos = VideoFeeds::new(account, false, ui.clone());
+                loop {
+                    let event = tokio::select! {
+                        event = event_rx.recv() => event,
+                        _ = report.tick() => {
+                            // How playback coped with what the network delivered.
+                            if let Some(audio) = &audio {
+                                let stats = audio.receive_stats();
+                                if stats != reported {
+                                    debug!(?stats, "voice playback");
+                                    reported = stats;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    let Some(event) = event else { break };
                     match event {
                         VoiceEvent::Audio {
                             user_id,
                             opus,
-                            timestamp,
+                            sequence,
                             ..
                         } => {
                             if let Some(audio) = &audio {
-                                audio.push_remote(user_id.get(), &opus, timestamp);
+                                audio.push_remote(user_id.get(), sequence, &opus);
                             }
                         }
+                        VoiceEvent::ClientDisconnect { user_id } => {
+                            if let Some(audio) = &audio {
+                                audio.remove_remote(user_id.get());
+                            }
+                            videos.end(user_id);
+                        }
+                        VoiceEvent::Video {
+                            user_id,
+                            frame,
+                            keyframe,
+                            ..
+                        } => videos.push(user_id, frame, keyframe),
+                        VoiceEvent::VideoEnded { user_id } => videos.end(user_id),
                         VoiceEvent::Speaking {
                             user_id, speaking, ..
                         } => {
@@ -1418,6 +1646,7 @@ async fn maybe_connect(
                         _ => {}
                     }
                 }
+                videos.end_all();
             });
         }
         Err(error) => {
@@ -1443,6 +1672,7 @@ async fn start_camera(
         .ok_or_else(|| "selected camera is no longer available".to_owned())?;
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
+    handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
     let source = VideoSource::camera_portal(camera, settings, move |frame| {
         handle.send_video(frame.data, frame.duration_ms);
     })
@@ -1532,42 +1762,43 @@ async fn apply_voice_command(
                 None => (None, Snowflake::default()),
             };
             match &mut voice.connection {
-                Some(connection) => match start_camera(connection, &access, node_id, settings).await {
-                    Ok(()) => {
-                        gateway.update_voice_state(
-                            guild_id,
-                            Some(channel_id),
-                            voice.muted,
-                            voice.deafened,
-                            true,
-                        );
-                        let _ = ui.send(UiEvent::CameraStarted { account }).await;
+                Some(connection) => {
+                    match start_camera(connection, &access, node_id, settings).await {
+                        Ok(()) => {
+                            gateway.update_voice_state(
+                                guild_id,
+                                Some(channel_id),
+                                voice.muted,
+                                voice.deafened,
+                                true,
+                            );
+                            let _ = ui.send(UiEvent::CameraStarted { account }).await;
+                        }
+                        Err(error) => {
+                            voice.camera = false;
+                            let _ = ui
+                                .send(UiEvent::VoiceError {
+                                    account,
+                                    message: format!("camera: {error}"),
+                                })
+                                .await;
+                            let _ = ui.send(UiEvent::CameraFailed { account }).await;
+                            gateway.update_voice_state(
+                                guild_id,
+                                Some(channel_id),
+                                voice.muted,
+                                voice.deafened,
+                                false,
+                            );
+                        }
                     }
-                    Err(error) => {
-                        voice.camera = false;
-                        let _ = ui
-                            .send(UiEvent::VoiceError {
-                                account,
-                                message: format!("camera: {error}"),
-                            })
-                            .await;
-                        let _ = ui.send(UiEvent::CameraFailed { account }).await;
-                        gateway.update_voice_state(
-                            guild_id,
-                            Some(channel_id),
-                            voice.muted,
-                            voice.deafened,
-                            false,
-                        );
-                    }
-                },
+                }
                 None => {
                     voice.camera = false;
                     let _ = ui
                         .send(UiEvent::VoiceError {
                             account,
-                            message: "join a voice channel before enabling the camera"
-                                .to_owned(),
+                            message: "join a voice channel before enabling the camera".to_owned(),
                         })
                         .await;
                     let _ = ui.send(UiEvent::CameraFailed { account }).await;
@@ -1722,6 +1953,40 @@ async fn apply_voice_command(
         VoiceCommand::StopStream => {
             stop_stream(voice, account, ui, true).await;
         }
+        VoiceCommand::WatchStream { user_id } => {
+            let Some(connection) = &voice.connection else {
+                return;
+            };
+            let key = match connection.guild_id {
+                Some(guild_id) => format!("guild:{guild_id}:{}:{user_id}", connection.channel_id),
+                None => format!("call:{}:{user_id}", connection.channel_id),
+            };
+            if voice.watch.as_ref().is_some_and(|watch| watch.key == key) {
+                return;
+            }
+            stop_watching(voice, account, ui, true).await;
+            voice.watch_generation = voice.watch_generation.wrapping_add(1);
+            tracing::info!(%key, "asking to watch stream");
+            voice.handle.stream_watch(&key);
+            voice.watch = Some(Watch {
+                key,
+                owner: user_id,
+                rtc_id: None,
+                token: None,
+                endpoint: None,
+                handle: None,
+                generation: voice.watch_generation,
+            });
+            let _ = ui
+                .send(UiEvent::StreamWatch {
+                    account,
+                    user_id: Some(user_id),
+                })
+                .await;
+        }
+        VoiceCommand::StopWatching => {
+            stop_watching(voice, account, ui, true).await;
+        }
         VoiceCommand::Subscribe {
             guild_id,
             channel_id,
@@ -1732,6 +1997,137 @@ async fn apply_voice_command(
 }
 
 /// Ends a Go Live stream, deleting it on Discord when a key is known.
+/// Connects to the watched stream once the gateway has sent everything
+/// needed (its server id, token and endpoint).
+async fn maybe_start_watch(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    let Some(watch) = &voice.watch else {
+        return;
+    };
+    if watch.handle.is_some() {
+        return;
+    }
+    let (Some(rtc_id), Some(token), Some(endpoint), Some(session_id), Some(user_id)) = (
+        watch.rtc_id,
+        watch.token.clone(),
+        watch.endpoint.clone(),
+        voice.session_id.clone(),
+        voice.self_user_id,
+    ) else {
+        return;
+    };
+    let Some(connection) = &voice.connection else {
+        return;
+    };
+    let audio = connection.audio.clone();
+    let owner = watch.owner;
+    let generation = watch.generation;
+    let params = VoiceParams {
+        server_id: rtc_id,
+        channel_id: connection.channel_id,
+        user_id,
+        session_id,
+        token,
+        endpoint,
+        video: true,
+        screen: true,
+        dave_channel_id: Snowflake::new(rtc_id.get().saturating_sub(1)),
+        receive_only: true,
+    };
+    tracing::info!(%rtc_id, key = %watch.key, endpoint = %params.endpoint, "connecting to watched stream");
+
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
+    match kc_voice::connect(params, event_tx).await {
+        Ok(handle) => {
+            if let Some(watch) = &mut voice.watch {
+                watch.handle = Some(handle);
+            }
+            let ui = ui.clone();
+            let control = control_tx.clone();
+            tokio::spawn(async move {
+                let mut videos = VideoFeeds::new(account, true, ui.clone());
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        VoiceEvent::Video {
+                            user_id,
+                            frame,
+                            keyframe,
+                            ..
+                        } => videos.push(user_id, frame, keyframe),
+                        VoiceEvent::VideoEnded { user_id } => videos.end(user_id),
+                        // The stream's own sound (a shared application).
+                        VoiceEvent::Audio {
+                            user_id,
+                            opus,
+                            sequence,
+                            ..
+                        } => {
+                            if let Some(audio) = &audio {
+                                audio.push_remote(stream_audio_key(user_id), sequence, &opus);
+                            }
+                        }
+                        VoiceEvent::Ready { .. } => tracing::info!("watched stream connected"),
+                        VoiceEvent::DaveReady => tracing::info!("watched stream DAVE ready"),
+                        VoiceEvent::Error(message) => {
+                            tracing::warn!(%message, "watched stream error");
+                            break;
+                        }
+                        VoiceEvent::Closed { code, reason } => {
+                            tracing::info!(?code, %reason, "watched stream closed");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                videos.end_all();
+                if let Some(audio) = &audio {
+                    audio.remove_remote(stream_audio_key(owner));
+                }
+                let _ = control.send(VoiceControl::WatchClosed { generation });
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%error, "connecting to watched stream failed");
+            let _ = ui
+                .send(UiEvent::Error {
+                    account: Some(account),
+                    message: format!("Could not connect to the stream: {error}"),
+                })
+                .await;
+            stop_watching(voice, account, ui, true).await;
+        }
+    }
+}
+
+/// Stops watching. `tell_server` is false when the server ended it.
+async fn stop_watching(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    tell_server: bool,
+) {
+    let Some(watch) = voice.watch.take() else {
+        return;
+    };
+    if let Some(handle) = watch.handle {
+        handle.disconnect().await;
+    }
+    if tell_server {
+        // For a viewer this leaves the stream; it only ends the owner's.
+        voice.handle.stream_delete(&watch.key);
+    }
+    let _ = ui
+        .send(UiEvent::StreamWatch {
+            account,
+            user_id: None,
+        })
+        .await;
+}
+
 async fn stop_stream(
     voice: &mut VoiceRuntime,
     account: AccountId,
@@ -1799,6 +2195,7 @@ async fn teardown_voice(
     ui: &async_channel::Sender<UiEvent>,
     notify: bool,
 ) {
+    stop_watching(voice, account, ui, true).await;
     stop_stream(voice, account, ui, notify).await;
     let had_connection = voice.connection.is_some() || voice.pending_join.is_some();
     if let Some(connection) = voice.connection.take() {
@@ -1870,6 +2267,8 @@ mod tests {
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
+            watch: None,
+            watch_generation: 0,
         }
     }
 

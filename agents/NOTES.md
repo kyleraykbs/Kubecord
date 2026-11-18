@@ -169,3 +169,152 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   `path=<node>` and `target-object=<node>`; fd-only is camera-only.
 - Screen path probe: `variant=Path`, 2 frames in 3s on a static desktop; camera
   probe: `variant=FdOnly`, 90 frames in 3s.
+
+## Streaming hitches (2026-11-18)
+
+- `Srtp::decrypt_rtcp` treated the top bit of the trailing nonce counter as an
+  RFC 3711 E-flag and returned feedback packets undecrypted. Every field past
+  the 8-byte RTCP header was ciphertext, so NACK retransmission, PLI and RR
+  stats were all dead. Discord's SRTCP is always AEAD with the counter nonce.
+- RTCP datagrams are compound (RR + NACK, NACK video + NACK audio); walk them
+  by length field.
+- x264enc's default 600 ms VBV made every IDR ~150 KB at 2.5 Mbit/s; the pacer
+  sent it at ~38 Mbit/s and the SFU dropped runs of packets out of the burst.
+  `vbv-buf-capacity=150` plus a rate-based pacer (2.5x measured bitrate, 5
+  Mbit/s floor) fixed it.
+- `force_keyframe`: send the upstream force-key-unit event through the
+  pipeline; the appsink's static sink pad returned false.
+- Video RTP step must be `90000 / fps`, not `frame_ms * 90` (33 ms truncation
+  ran the clock 1% slow).
+- REMB (PSFB fmt 15) reported a constant 4.2 Mbit/s for a 720p30 stream.
+
+## READY payload with capabilities 4605 (2026-11-18)
+
+Captured with `KYLECORD_DUMP_DISPATCH=<dir>` (writes `<EVENT>.json` per
+dispatch; contains account data).
+
+- User objects are deduplicated: `users` holds them; `private_channels` carry
+  `recipient_ids`, `relationships` carry `user_id`, `merged_members[i]` (aligned
+  with `guilds[i]`) carry `user_id`.
+- `read_state` and `user_guild_settings` are `{entries, partial, version}`.
+- Legacy `user_settings` (with `guild_folders`, `status`, `custom_status`) is
+  still present because capability bit 9 is not set. Keep it that way: the
+  protobuf form has no parser here.
+- Presences are in READY_SUPPLEMENTAL `merged_presences.{friends,guilds}` with
+  `user_id` and a flat `status`; PRESENCE_UPDATE uses `user.id` and may carry a
+  partial user that must not overwrite the cached one.
+- GUILD_MEMBER_LIST_UPDATE group rows inside `items` have no count; counts are
+  in the top-level `groups` array.
+
+## UI development aids
+
+- `KYLECORD_SCREENSHOT=<png>` renders the window to a PNG after 7 s and quits.
+- `KYLECORD_OPEN=<channel id>` opens that channel once the account is ready.
+- GtkLabel cannot embed images, so text with custom emoji uses a read-only
+  GtkTextView with child anchors; text buffers reject `<a>` markup, so links
+  in such messages are underlined but not clickable yet.
+- Ellipsised labels report their full text as natural width; the sidebar is
+  wrapped in an `AdwClamp` to keep a fixed width.
+
+## Media display (2026-11-18)
+
+- "Own GIFs don't show" was really WebP: Discord's GIF picker now returns
+  Klipy links (`/gifs/*` still accepts `provider=tenor`). A Klipy link
+  unfurls as a `gifv` embed whose thumbnail is WebP and whose `video` is
+  an MP4. GTK reads only PNG/JPEG/TIFF itself and the rest through
+  GdkPixbuf, which has no WebP loader here (`GDK_PIXBUF_MODULE_FILE` points
+  at librsvg's cache). `images.rs` decodes WebP with `image-webp`. The
+  media proxy's `format=webp` video posters needed the same fix.
+- `gifv` embeds are short MP4s that Discord plays muted and looping. They
+  play inline via `player.rs`: the file is downloaded by the image cache
+  (no GStreamer TLS needed), and the still stays up until `AsyncDone`.
+- Discord's media proxy keeps GIFs as GIFs when given `width`/`height`.
+  Animated GIF attachments and animated custom emoji still show their
+  first frame.
+- `kc-probe raw /api/path` prints any GET as raw JSON; use it to check real
+  payload shapes before guessing.
+
+## GTK/libadwaita layout gotchas (2026-11-18)
+
+- `AdwClamp` centres its child, and between its tightening threshold
+  (default 400) and its maximum it eases the child narrower than its
+  allocation while asking for more natural width. A left-aligned card
+  therefore drifts right. Use `widgets::max_width`, which sets threshold =
+  maximum.
+- Negative margins are not supported in GTK4: they log "adjusted size …
+  must not decrease below min" on every measure. The hover toolbar is one
+  overlay child placed with `Overlay::connect_get_child_position`.
+- Don't change a widget's visibility from a scroll adjustment's
+  `value-changed`/`changed` handler: those fire during size allocation
+  ("Allocation height too small"). Defer to an idle.
+- `GtkFlowBox` asks for room for `max_children_per_line` children, so with
+  `halign: center` one child still sits at the start. Set the maximum to
+  the child count.
+- The sidebar is rebuilt after each click, so a widget-level double-click
+  gesture never sees the second press. Voice channels time double-clicks
+  in `AppState::voice_channel_clicked`.
+- The app is single-instance: a second launch activates the first and
+  exits. `KYLECORD_SCREENSHOT` runs are `NON_UNIQUE` so they work while the
+  app is open.
+- New source files must be tracked (`git add -N`) or the flake build,
+  which only sees git-tracked files, fails with "file not found for
+  module".
+- The flake checks `cargo fmt` and clippy with `-D warnings`; both pass
+  as of this date.
+
+## Voice receive (2026-11-18)
+
+- Right after READY the voice gateway describes everyone already in the
+  channel: op 11 (user ids), op 5 (user id + audio SSRC), ops 18/20. They
+  arrive while the handshake is still waiting for op 4. The handshake used
+  to keep only the DAVE opcodes, so people present before we joined never
+  got an SSRC mapping and all their audio was dropped. Everything except
+  heartbeat acks and HELLO is now replayed after the handshake.
+- Op 5 is an SSRC announcement, not a per-utterance signal. Speaking is
+  derived from voice packets arriving (`SPEAKING_HOLD` after the last one);
+  clients stop sending when their user stops talking, after a few
+  `F8 FF FE` silence frames that bypass DAVE.
+- RTP and RTCP share the socket. RTCP is second byte 192..=223 (RFC 5761);
+  `>= 200` misreads marker-bit RTP (Opus 248, H.264 229).
+- Playback is pulled by the sound device (`appsrc need-data` into
+  `pulsesink buffer-time=60000`), not pushed by a timer, and each speaker
+  has a jitter buffer in `kc-media/src/receive.rs`.
+- `kc-probe --token x playback-test` plays a synthetic speaker through the
+  receive path; point `KYLECORD_PLAYBACK_DEVICE` / `KYLECORD_MONITOR_DEVICE`
+  at a `module-null-sink` to run it silently.
+- The microphone still transmits continuously while unmuted (no voice
+  activity gating); the local ring comes from a level detector only.
+
+## Video receive: cameras and watching streams (2026-11-18)
+
+- The server sends no video until the client has sent its own video state
+  (voice op 12, even "off") and media sink wants (op 15, `{"any": 100}`).
+  Both go out right after the session description.
+- Op 12 from the server maps a user to video SSRCs: each `streams[]` entry
+  has `ssrc` and `rtx_ssrc`. `video_ssrc: 0` or no active stream means the
+  video stopped. Retransmissions arrive on `rtx_ssrc` (payload type 102)
+  with the original sequence number in the first two bytes.
+- Receive path: `kc-voice/src/video_rx.rs` reorders packets, asks for
+  missing ones (NACK, `rtcp.rs`), waits up to 250 ms for a retransmission,
+  then drops the frame and holds everything until a keyframe (requested
+  with PLI). Whole frames are DAVE-decrypted, then decoded by
+  `kc-media/src/decode.rs` (`avdec_h264`), shown through
+  `gtk4paintablesink` in `kc-ui/src/live.rs`.
+- RTCP we send is a compound packet (empty receiver report + feedback),
+  encrypted like RTP: first 8 bytes clear and authenticated, 4-byte nonce
+  counter appended. Verified live: PLI and NACK are honoured.
+- A frame is several NAL units (SPS, PPS, fragmented IDR). Only the marker
+  bit or a new timestamp ends it; DAVE decrypts the frame as a whole.
+- Watching a stream: gateway op 20 with `guild:{guild}:{channel}:{user}`
+  (or `call:{channel}:{user}`), then STREAM_CREATE (`rtc_server_id`) and
+  STREAM_SERVER_UPDATE (token, endpoint), then a second voice connection
+  with `server_id = rtc_server_id`, DAVE group `rtc_server_id - 1`, and
+  nothing transmitted (`VoiceParams::receive_only`). Op 19 leaves it.
+- Checks without a second person: `kc-probe --token x video-test [N]`
+  (offline, loses every Nth packet), `KYLECORD_VIDEO_DEMO=1` (test pattern
+  in the stream view), and `kc-probe watch-stream <guild> <channel> <user>`
+  (headless, against a real stream).
+- Not done: stream sound is routed to playback but has not been heard
+  live; video is shown as it arrives (no clock smoothing); software decode
+  only; no fullscreen or pop-out; own camera has no local preview.
+

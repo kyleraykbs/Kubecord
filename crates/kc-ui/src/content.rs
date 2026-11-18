@@ -1,0 +1,787 @@
+//! Widgets for what a message contains: formatted text with mentions and
+//! custom emoji, attachments, embeds and stickers.
+
+use std::rc::Rc;
+
+use gtk::prelude::*;
+use libadwaita as adw;
+
+use kc_core::Snowflake;
+use kc_http::cdn;
+use kc_state::message::{Embed, EmbedMedia};
+use kc_state::{Attachment, State, StickerItem};
+
+use crate::markdown::format_size;
+use crate::player::LoopingVideo;
+use crate::rich::{self, Piece};
+use crate::shell::AppState;
+use crate::widgets::{hex_color, icon_button, label, max_width, open_uri};
+
+/// What a media preview shows, and what clicking it does.
+pub(crate) enum MediaKind {
+    /// A still image; clicking opens the viewer.
+    Image,
+    /// A video with a poster frame; clicking opens it externally.
+    Video,
+    /// A GIF delivered as a short video, played inline, muted and looping.
+    Gif { video_url: String },
+}
+
+pub(crate) struct Media<'a> {
+    /// The image shown, normally the proxy URL.
+    pub still: &'a str,
+    /// What clicking opens: the original image or the video's page.
+    pub target: &'a str,
+    pub width: u32,
+    pub height: u32,
+    pub kind: MediaKind,
+    pub spoiler: bool,
+    pub description: Option<&'a str>,
+}
+
+const EMBED_MAX_WIDTH: i32 = 520;
+
+/// Largest inline media preview, in logical pixels.
+const MEDIA_MAX_WIDTH: f64 = 420.0;
+const MEDIA_MAX_HEIGHT: f64 = 300.0;
+const INLINE_EMOJI: i32 = 22;
+const JUMBO_EMOJI: i32 = 48;
+
+/// Resolves mention ids against the store while text is rendered.
+pub(crate) struct StateResolver<'a> {
+    pub state: &'a State,
+    pub guild: Option<Snowflake>,
+}
+
+impl rich::Resolver for StateResolver<'_> {
+    fn user(&self, id: Snowflake) -> Option<String> {
+        let user = self.state.users.get(&id)?;
+        Some(self.state.display_name(self.guild, user))
+    }
+
+    fn role(&self, id: Snowflake) -> Option<(String, u32)> {
+        let role = self.state.role(self.guild?, id)?;
+        Some((role.name.clone(), role.color))
+    }
+
+    fn channel(&self, id: Snowflake) -> Option<String> {
+        Some(self.state.channels.get(&id)?.display_name())
+    }
+
+    fn timestamp(&self, unix: i64, format: char) -> String {
+        let Ok(time) = glib::DateTime::from_unix_local(unix) else {
+            return unix.to_string();
+        };
+        let pattern = match format {
+            't' => "%H:%M",
+            'T' => "%H:%M:%S",
+            'd' => "%x",
+            'D' => "%e %B %Y",
+            'F' => "%A, %e %B %Y %H:%M",
+            's' => "%x %H:%M",
+            'S' => "%x %H:%M:%S",
+            'R' => return relative_time(unix),
+            _ => "%e %B %Y %H:%M",
+        };
+        time.format(pattern)
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_else(|_| unix.to_string())
+    }
+}
+
+fn relative_time(unix: i64) -> String {
+    let now = glib::DateTime::now_local().map_or(unix, |now| now.to_unix());
+    let delta = unix - now;
+    let (amount, unit) = match delta.abs() {
+        seconds if seconds < 60 => (seconds, "second"),
+        seconds if seconds < 3600 => (seconds / 60, "minute"),
+        seconds if seconds < 86_400 => (seconds / 3600, "hour"),
+        seconds if seconds < 2_592_000 => (seconds / 86_400, "day"),
+        seconds if seconds < 31_536_000 => (seconds / 2_592_000, "month"),
+        seconds => (seconds / 31_536_000, "year"),
+    };
+    let plural = if amount == 1 { "" } else { "s" };
+    if delta < 0 {
+        format!("{amount} {unit}{plural} ago")
+    } else {
+        format!("in {amount} {unit}{plural}")
+    }
+}
+
+/// A message timestamp in local time: `14:03` today, `Yesterday at 14:03`,
+/// otherwise the date and time.
+pub(crate) fn format_time(iso: &str) -> String {
+    let Some(time) = local_time(iso) else {
+        return String::new();
+    };
+    let clock = time.format("%H:%M").map(String::from).unwrap_or_default();
+    let Ok(now) = glib::DateTime::now_local() else {
+        return clock;
+    };
+    let day = |time: &glib::DateTime| (time.year(), time.day_of_year());
+    if day(&time) == day(&now) {
+        clock
+    } else if now
+        .add_days(-1)
+        .is_ok_and(|yesterday| day(&yesterday) == day(&time))
+    {
+        format!("Yesterday at {clock}")
+    } else {
+        let date = time.format("%x").map(String::from).unwrap_or_default();
+        format!("{date} {clock}")
+    }
+}
+
+pub(crate) fn clock_time(iso: &str) -> String {
+    local_time(iso)
+        .and_then(|time| time.format("%H:%M").ok())
+        .map(String::from)
+        .unwrap_or_default()
+}
+
+/// `18 November 2026`, for the divider between days.
+pub(crate) fn long_date(iso: &str) -> String {
+    local_time(iso)
+        .and_then(|time| time.format("%e %B %Y").ok())
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// A value that changes when the local calendar day does.
+pub(crate) fn day_key(iso: &str) -> i32 {
+    local_time(iso).map_or(0, |time| time.year() * 1000 + time.day_of_year())
+}
+
+fn local_time(iso: &str) -> Option<glib::DateTime> {
+    glib::DateTime::from_iso8601(iso, None)
+        .ok()?
+        .to_local()
+        .ok()
+}
+
+/// Display size for media of the given pixel dimensions.
+fn fit(width: u32, height: u32) -> (i32, i32) {
+    let (width, height) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let scale = (MEDIA_MAX_WIDTH / width)
+        .min(MEDIA_MAX_HEIGHT / height)
+        .min(1.0);
+    (
+        (width * scale).round().max(16.0) as i32,
+        (height * scale).round().max(16.0) as i32,
+    )
+}
+
+/// Replaces `<a href="…">` with an underlined span: text buffers reject the
+/// anchor tag that labels accept.
+fn without_anchors(markup: &str) -> String {
+    let mut out = String::with_capacity(markup.len());
+    let mut rest = markup;
+    while let Some(start) = rest.find("<a href=\"") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        match after.find("\">") {
+            Some(end) => {
+                out.push_str("<span underline=\"single\">");
+                rest = &after[end + 2..];
+            }
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("</a>", "</span>")
+}
+
+impl AppState {
+    /// Formatted message text. Returns `None` for empty content.
+    pub(crate) fn text_widget(
+        self: &Rc<Self>,
+        content: &str,
+        guild: Option<Snowflake>,
+        state: &State,
+    ) -> Option<gtk::Widget> {
+        if content.trim().is_empty() {
+            return None;
+        }
+        let pieces = rich::parse(content);
+        let resolver = StateResolver { state, guild };
+
+        if rich::is_emoji_only(&pieces) {
+            return Some(self.jumbo_emoji(&pieces));
+        }
+        if rich::has_custom_emoji(&pieces) {
+            return Some(self.emoji_text(&pieces, &resolver));
+        }
+
+        let text = gtk::Label::new(None);
+        text.set_xalign(0.0);
+        text.set_wrap(true);
+        text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        text.set_selectable(true);
+        text.set_markup(&rich::to_markup(&pieces, &resolver, false));
+        let app = self.clone();
+        text.connect_activate_link(move |text, uri| {
+            if uri == "kylecord://spoiler" {
+                // Reveal: render again with spoilers shown.
+                if let Some(markup) = app.with_session(|session| {
+                    session.store.read(|state| {
+                        rich::to_markup(&pieces, &StateResolver { state, guild }, true)
+                    })
+                }) {
+                    text.set_markup(&markup);
+                }
+            } else {
+                app.activate_link(uri, text.upcast_ref());
+            }
+            glib::Propagation::Stop
+        });
+        Some(text.upcast())
+    }
+
+    /// Handles a link clicked in message text.
+    pub(crate) fn activate_link(self: &Rc<Self>, uri: &str, anchor: &gtk::Widget) {
+        if let Some(id) = uri
+            .strip_prefix("kylecord://user/")
+            .and_then(|id| id.parse::<Snowflake>().ok())
+        {
+            self.show_profile(id, anchor);
+        } else if let Some(id) = uri
+            .strip_prefix("kylecord://channel/")
+            .and_then(|id| id.parse::<Snowflake>().ok())
+        {
+            let channel = self.with_session(|session| {
+                session.store.read(|state| state.channels.get(&id).cloned())
+            });
+            if let Some(channel) = channel.flatten() {
+                self.open_channel(channel);
+            }
+        } else if uri.starts_with("http://") || uri.starts_with("https://") {
+            open_uri(Some(self.window.upcast_ref()), uri);
+        }
+    }
+
+    /// A message made only of emoji is shown large.
+    fn jumbo_emoji(self: &Rc<Self>, pieces: &[Piece]) -> gtk::Widget {
+        let wrap = adw::WrapBox::new();
+        wrap.set_child_spacing(4);
+        wrap.set_line_spacing(4);
+        for piece in pieces {
+            match piece {
+                Piece::Emoji { id, name, .. } => {
+                    let image = gtk::Image::new();
+                    image.set_pixel_size(JUMBO_EMOJI);
+                    image.set_tooltip_text(Some(&format!(":{name}:")));
+                    self.images
+                        .set_image(&image, &cdn::emoji(*id, false, JUMBO_EMOJI as u32 * 2));
+                    wrap.append(&image);
+                }
+                Piece::Text { text, .. } => {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        let emoji = gtk::Label::new(Some(text));
+                        emoji.add_css_class("kc-jumbo");
+                        emoji.set_selectable(true);
+                        wrap.append(&emoji);
+                    }
+                }
+                _ => {}
+            }
+        }
+        wrap.upcast()
+    }
+
+    /// Text with custom emoji images inline. Labels cannot embed widgets, so
+    /// this uses a read-only text view with the images at child anchors.
+    fn emoji_text(self: &Rc<Self>, pieces: &[Piece], resolver: &StateResolver) -> gtk::Widget {
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_cursor_visible(false);
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.add_css_class("kc-rich");
+        let buffer = view.buffer();
+
+        let mut run: Vec<Piece> = Vec::new();
+        let flush = |run: &mut Vec<Piece>| {
+            if run.is_empty() {
+                return;
+            }
+            let markup = without_anchors(&rich::to_markup(run, resolver, true));
+            buffer.insert_markup(&mut buffer.end_iter(), &markup);
+            run.clear();
+        };
+        for piece in pieces {
+            match piece {
+                Piece::Emoji { id, name, .. } => {
+                    flush(&mut run);
+                    let anchor = buffer.create_child_anchor(&mut buffer.end_iter());
+                    let image = gtk::Image::new();
+                    image.set_pixel_size(INLINE_EMOJI);
+                    image.set_tooltip_text(Some(&format!(":{name}:")));
+                    self.images
+                        .set_image(&image, &cdn::emoji(*id, false, INLINE_EMOJI as u32 * 2));
+                    view.add_child_at_anchor(&image, &anchor);
+                }
+                other => run.push(other.clone()),
+            }
+        }
+        flush(&mut run);
+        view.upcast()
+    }
+
+    /// An image, video poster, audio or file card for one attachment.
+    pub(crate) fn attachment_widget(self: &Rc<Self>, attachment: &Attachment) -> gtk::Widget {
+        let visual = attachment.is_image() || attachment.is_video();
+        if let (true, Some(width), Some(height)) = (visual, attachment.width, attachment.height) {
+            let still = if attachment.proxy_url.is_empty() {
+                &attachment.url
+            } else {
+                &attachment.proxy_url
+            };
+            return self.media_preview(Media {
+                still,
+                target: &attachment.url,
+                width,
+                height,
+                kind: if attachment.is_video() {
+                    MediaKind::Video
+                } else {
+                    MediaKind::Image
+                },
+                spoiler: attachment.is_spoiler(),
+                description: attachment.description.as_deref(),
+            });
+        }
+
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        card.add_css_class("kc-file");
+        card.set_halign(gtk::Align::Start);
+        let icon = gtk::Image::from_icon_name(if attachment.is_audio() {
+            "audio-x-generic-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        });
+        icon.set_pixel_size(28);
+        card.append(&icon);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let name = gtk::LinkButton::with_label(&attachment.url, &attachment.filename);
+        name.set_halign(gtk::Align::Start);
+        name.add_css_class("flat");
+        text.append(&name);
+        let size = label(&format_size(attachment.size), &["caption", "dim-label"]);
+        size.set_margin_start(8);
+        text.append(&size);
+        card.append(&text);
+        card.upcast()
+    }
+
+    /// A preview of an image, video or GIF, sized to keep its aspect.
+    fn media_preview(self: &Rc<Self>, media: Media) -> gtk::Widget {
+        let (display_width, display_height) = fit(media.width, media.height);
+        let scale = self.window.scale_factor().max(1) as u32;
+        let mut url = cdn::resized(
+            media.still,
+            display_width as u32 * scale,
+            display_height as u32 * scale,
+        );
+        if matches!(media.kind, MediaKind::Video) && url.starts_with(cdn::MEDIA_BASE) {
+            // The proxy renders a still frame of a video on request.
+            url.push_str("&format=webp");
+        }
+
+        let picture = gtk::Picture::new();
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Cover);
+        picture.set_size_request(-1, display_height);
+        picture.add_css_class("kc-media");
+        picture.set_overflow(gtk::Overflow::Hidden);
+        if let Some(description) = media.description.filter(|text| !text.is_empty()) {
+            picture.set_alternative_text(Some(description));
+            picture.set_tooltip_text(Some(description));
+        }
+
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&picture));
+        match &media.kind {
+            MediaKind::Video => {
+                let play = gtk::Image::from_icon_name("media-playback-start-symbolic");
+                play.set_pixel_size(48);
+                play.add_css_class("osd");
+                play.add_css_class("circular");
+                play.set_halign(gtk::Align::Center);
+                play.set_valign(gtk::Align::Center);
+                play.set_can_target(false);
+                overlay.add_overlay(&play);
+            }
+            MediaKind::Gif { .. } => {
+                let tag = gtk::Label::new(Some("GIF"));
+                tag.add_css_class("kc-media-tag");
+                tag.set_halign(gtk::Align::Start);
+                tag.set_valign(gtk::Align::Start);
+                tag.set_margin_start(6);
+                tag.set_margin_top(6);
+                tag.set_can_target(false);
+                overlay.add_overlay(&tag);
+            }
+            MediaKind::Image => {}
+        }
+
+        // Loading (and, for GIFs, playing) starts when a spoiler is revealed.
+        let gif_video = match &media.kind {
+            MediaKind::Gif { video_url } => Some(video_url.clone()),
+            _ => None,
+        };
+        let start = {
+            let app = self.clone();
+            let picture = picture.clone();
+            let url = url.clone();
+            move || {
+                app.images.set_picture(&picture, &url);
+                if let Some(video_url) = &gif_video {
+                    app.play_gif(&picture, video_url);
+                }
+            }
+        };
+
+        let hidden = Rc::new(std::cell::Cell::new(media.spoiler));
+        if media.spoiler {
+            let cover = gtk::Label::new(Some("SPOILER"));
+            cover.add_css_class("osd");
+            cover.add_css_class("heading");
+            cover.set_halign(gtk::Align::Fill);
+            cover.set_valign(gtk::Align::Fill);
+            overlay.add_overlay(&cover);
+            let hidden = hidden.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |gesture, _, _, _| {
+                if hidden.replace(false) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    if let Some(cover) = gesture.widget() {
+                        cover.set_visible(false);
+                    }
+                    start();
+                }
+            });
+            cover.add_controller(click);
+        } else {
+            start();
+        }
+
+        let opens = match &media.kind {
+            MediaKind::Image => Some(false),
+            MediaKind::Video => Some(true),
+            // A GIF already shows everything there is to see.
+            MediaKind::Gif { .. } => None,
+        };
+        if let Some(external) = opens {
+            let click = gtk::GestureClick::new();
+            let app = self.clone();
+            let target = media.target.to_owned();
+            let preview_url = url.clone();
+            click.connect_released(move |_, _, _, _| {
+                if hidden.get() {
+                    return;
+                }
+                if external {
+                    open_uri(Some(app.window.upcast_ref()), &target);
+                } else {
+                    app.show_image(&target, &preview_url);
+                }
+            });
+            picture.add_controller(click);
+            picture.set_cursor_from_name(Some("pointer"));
+        }
+
+        max_width(&overlay, display_width).upcast()
+    }
+
+    /// Downloads a GIF's video and, once its first frame is decoded, shows it
+    /// in place of the still.
+    fn play_gif(self: &Rc<Self>, picture: &gtk::Picture, video_url: &str) {
+        let app = Rc::downgrade(self);
+        let target = picture.downgrade();
+        self.images.file(video_url, "mp4", move |path| {
+            let (Some(app), Some(picture), Some(path)) = (app.upgrade(), target.upgrade(), path)
+            else {
+                return;
+            };
+            let shown = picture.downgrade();
+            let player = LoopingVideo::new(&path, move |paintable| {
+                if let Some(picture) = shown.upgrade() {
+                    picture.set_paintable(Some(&paintable));
+                }
+            });
+            match player {
+                Some(player) => app.register_player(picture.upcast_ref(), player),
+                None => tracing::debug!("gif playback unavailable; showing the still"),
+            }
+        });
+    }
+
+    /// Opens an image at full size in its own window.
+    pub(crate) fn show_image(self: &Rc<Self>, url: &str, preview_url: &str) {
+        let picture = gtk::Picture::new();
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        // Show the preview already in memory while the original downloads.
+        self.images.set_picture(&picture, preview_url);
+        self.images.set_picture(&picture, url);
+
+        let header = adw::HeaderBar::new();
+        let open = icon_button("web-browser-symbolic", "Open in Browser");
+        let link = url.to_owned();
+        let parent = self.window.clone();
+        open.connect_clicked(move |_| open_uri(Some(parent.upcast_ref()), &link));
+        header.pack_start(&open);
+        let copy = icon_button("edit-copy-symbolic", "Copy Link");
+        let link = url.to_owned();
+        let app = self.clone();
+        copy.connect_clicked(move |button| {
+            button.clipboard().set_text(&link);
+            app.set_status("Link copied");
+        });
+        header.pack_start(&copy);
+
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&picture));
+
+        let window = adw::Window::builder()
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width((self.window.width() as f64 * 0.85) as i32)
+            .default_height((self.window.height() as f64 * 0.85) as i32)
+            .title("Image")
+            .content(&view)
+            .build();
+        let keys = gtk::EventControllerKey::new();
+        let target = window.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                target.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(keys);
+        window.present();
+    }
+
+    pub(crate) fn sticker_widget(self: &Rc<Self>, sticker: &StickerItem) -> gtk::Widget {
+        match cdn::sticker(sticker.id, sticker.format_type) {
+            Some(url) => {
+                let picture = gtk::Picture::new();
+                picture.set_can_shrink(true);
+                picture.set_size_request(160, 160);
+                picture.set_halign(gtk::Align::Start);
+                picture.set_tooltip_text(Some(&sticker.name));
+                self.images.set_picture(&picture, &url);
+                max_width(&picture, 160).upcast()
+            }
+            // Lottie stickers are vector animations with no image form.
+            None => label(&format!("Sticker: {}", sticker.name), &["dim-label"]).upcast(),
+        }
+    }
+
+    /// A link preview or rich embed.
+    pub(crate) fn embed_widget(
+        self: &Rc<Self>,
+        embed: &Embed,
+        guild: Option<Snowflake>,
+        state: &State,
+    ) -> Option<gtk::Widget> {
+        let kind = embed.kind.as_deref().unwrap_or("rich");
+        let media_of = |media: &Option<EmbedMedia>| -> Option<(String, u32, u32)> {
+            let media = media.as_ref()?;
+            let url = media.proxy_url.clone().or_else(|| media.url.clone())?;
+            Some((url, media.width.unwrap_or(400), media.height.unwrap_or(300)))
+        };
+
+        // Bare media links render as the media alone, like the official client.
+        if matches!(kind, "image" | "gifv") {
+            let (url, width, height) =
+                media_of(&embed.thumbnail).or_else(|| media_of(&embed.image))?;
+            let target = embed.url.clone().unwrap_or_else(|| url.clone());
+            // A gifv is a short looping video with a still thumbnail.
+            let video = (kind == "gifv")
+                .then(|| media_of(&embed.video))
+                .flatten()
+                .map(|(video_url, _, _)| video_url);
+            return Some(self.media_preview(Media {
+                still: &url,
+                target: &target,
+                width,
+                height,
+                kind: match video {
+                    Some(video_url) => MediaKind::Gif { video_url },
+                    None => MediaKind::Image,
+                },
+                spoiler: false,
+                description: None,
+            }));
+        }
+
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        card.add_css_class("kc-embed");
+        if let Some(color) = embed.color.filter(|color| *color != 0) {
+            let provider = gtk::CssProvider::new();
+            provider.load_from_string(&format!(
+                "box.kc-embed {{ border-left-color: {}; }}",
+                hex_color(color)
+            ));
+            #[allow(deprecated)]
+            card.style_context()
+                .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+        }
+
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        body.set_hexpand(true);
+        if let Some(provider) = embed
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.name.as_deref())
+        {
+            body.append(&label(provider, &["caption", "dim-label"]));
+        }
+        if let Some(author) = &embed.author {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            if let Some(icon) = author
+                .proxy_icon_url
+                .as_deref()
+                .or(author.icon_url.as_deref())
+            {
+                row.append(&self.images.avatar(20, &author.name, Some(icon)));
+            }
+            row.append(&label(&author.name, &["caption-heading"]));
+            body.append(&row);
+        }
+        if let Some(title) = embed.title.as_deref().filter(|title| !title.is_empty()) {
+            let heading = gtk::Label::new(None);
+            heading.set_xalign(0.0);
+            heading.set_wrap(true);
+            heading.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            let escaped = glib::markup_escape_text(title);
+            match embed.url.as_deref() {
+                Some(url) => heading.set_markup(&format!(
+                    "<a href=\"{}\"><b>{escaped}</b></a>",
+                    glib::markup_escape_text(url)
+                )),
+                None => heading.set_markup(&format!("<b>{escaped}</b>")),
+            }
+            let app = self.clone();
+            heading.connect_activate_link(move |heading, uri| {
+                app.activate_link(uri, heading.upcast_ref());
+                glib::Propagation::Stop
+            });
+            body.append(&heading);
+        }
+        if let Some(description) = embed.description.as_deref()
+            && let Some(text) = self.text_widget(description, guild, state)
+        {
+            body.append(&text);
+        }
+        for field in &embed.fields {
+            let name = label(&field.name, &["caption-heading"]);
+            name.set_margin_top(4);
+            body.append(&name);
+            if let Some(value) = self.text_widget(&field.value, guild, state) {
+                body.append(&value);
+            }
+        }
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.append(&body);
+        let large_thumbnail = matches!(kind, "video" | "article") || embed.image.is_some();
+        if !large_thumbnail && let Some((url, width, height)) = media_of(&embed.thumbnail) {
+            let side = 80.0 / f64::from(width.max(height).max(1));
+            let (thumb_width, thumb_height) = (
+                (f64::from(width) * side) as i32,
+                (f64::from(height) * side) as i32,
+            );
+            let picture = gtk::Picture::new();
+            picture.set_can_shrink(true);
+            picture.set_size_request(thumb_width.max(16), thumb_height.max(16));
+            picture.set_valign(gtk::Align::Start);
+            picture.add_css_class("kc-media");
+            picture.set_overflow(gtk::Overflow::Hidden);
+            self.images
+                .set_picture(&picture, &cdn::resized(&url, 160, 160));
+            row.append(&picture);
+        }
+        card.append(&row);
+
+        let big = media_of(&embed.image).or_else(|| {
+            large_thumbnail
+                .then(|| media_of(&embed.thumbnail))
+                .flatten()
+        });
+        if let Some((url, width, height)) = big {
+            let target = match kind {
+                "video" => embed.url.clone().unwrap_or_else(|| url.clone()),
+                _ => embed
+                    .image
+                    .as_ref()
+                    .and_then(|image| image.url.clone())
+                    .unwrap_or_else(|| url.clone()),
+            };
+            let preview = self.media_preview(Media {
+                still: &url,
+                target: &target,
+                width,
+                height,
+                kind: if kind == "video" {
+                    MediaKind::Video
+                } else {
+                    MediaKind::Image
+                },
+                spoiler: false,
+                description: None,
+            });
+            preview.set_margin_top(4);
+            card.append(&preview);
+        }
+
+        if let Some(footer) = &embed.footer {
+            let mut text = footer.text.clone();
+            if let Some(timestamp) = embed.timestamp.as_deref() {
+                let time = format_time(timestamp);
+                if !time.is_empty() {
+                    text = if text.is_empty() {
+                        time
+                    } else {
+                        format!("{text} • {time}")
+                    };
+                }
+            }
+            let footer_label = label(&text, &["caption", "dim-label"]);
+            footer_label.set_margin_top(4);
+            card.append(&footer_label);
+        }
+
+        // Nothing to show (e.g. an embed type with no renderable parts).
+        card.first_child()?;
+        Some(max_width(&card, EMBED_MAX_WIDTH).upcast())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_fits_inside_the_preview_box() {
+        assert_eq!(fit(4000, 3000), (400, 300));
+        assert_eq!(fit(100, 50), (100, 50));
+        assert_eq!(fit(840, 100), (420, 50));
+    }
+
+    #[test]
+    fn anchors_become_underlined_spans() {
+        assert_eq!(
+            without_anchors("a <a href=\"https://x.y/?a=1&amp;b=2\">link</a> b"),
+            "a <span underline=\"single\">link</span> b"
+        );
+        assert_eq!(without_anchors("plain <b>bold</b>"), "plain <b>bold</b>");
+    }
+}

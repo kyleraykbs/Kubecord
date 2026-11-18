@@ -219,9 +219,8 @@ impl H264Depacketizer {
                 let end = payload[1] & 0x40 != 0;
                 let reconstructed = (payload[0] & 0xE0) | (payload[1] & 0x1F);
                 if start {
-                    if !self.buffer.is_empty() {
-                        completed = Some(std::mem::take(&mut self.buffer));
-                    }
+                    // Not a frame boundary: a frame is often parameter sets
+                    // followed by a fragmented picture, or several slices.
                     self.buffer.extend_from_slice(&[0, 0, 0, 1, reconstructed]);
                 } else if self.buffer.is_empty() {
                     // Lost the first fragment; wait for the next keyframe.
@@ -298,6 +297,25 @@ mod tests {
             }
         }
         assert_eq!(decoded.unwrap(), frame);
+    }
+
+    #[test]
+    fn a_frame_of_several_nal_units_stays_one_frame() {
+        // Parameter sets followed by a fragmented picture, as encoders send
+        // keyframes. Splitting it would hand the decoder (and the end-to-end
+        // decryptor) half a frame.
+        let mut frame = vec![0, 0, 0, 1, 0x67, 1, 2, 3, 0, 0, 0, 1, 0x68, 4, 5];
+        frame.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        frame.extend(std::iter::repeat_n(0xCD, 4000));
+        frame.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        frame.extend(std::iter::repeat_n(0xEF, 2500));
+
+        let mut depacketizer = H264Depacketizer::default();
+        let mut frames = Vec::new();
+        for (payload, marker) in packetize(&frame, 1200) {
+            frames.extend(depacketizer.push(&payload, 90_000, marker));
+        }
+        assert_eq!(frames, vec![frame]);
     }
 
     #[test]

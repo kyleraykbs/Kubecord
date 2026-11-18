@@ -8,8 +8,10 @@ use tokio::sync::broadcast;
 use tracing::warn;
 
 use crate::channel::Channel;
-use crate::guild::{Guild, Presence, Relationship, Stream, VoiceState};
+use crate::guild::{Emoji, Guild, Member, Presence, Relationship, Role, Stream, VoiceState};
+use crate::member_list::MemberList;
 use crate::message::{Message, Reaction};
+use crate::settings::{CustomStatus, GuildFolder, GuildSettings, ReadState};
 use crate::user::User;
 
 const MESSAGE_WINDOW: usize = 300;
@@ -140,6 +142,12 @@ pub enum StoreEvent {
     GuildChannelsLoaded(Snowflake),
     GuildMembersUpdated(Snowflake),
     HistoryLoaded(Snowflake),
+    /// Unread state or mention count of a channel changed.
+    ReadStateUpdated(Snowflake),
+    /// Guild folders, mutes, or the account's own status changed.
+    SettingsUpdated,
+    /// The lazily loaded member list of a guild changed.
+    MemberListUpdated(Snowflake),
 }
 
 #[derive(Default)]
@@ -147,17 +155,28 @@ pub struct State {
     pub me: Option<User>,
     pub users: HashMap<Snowflake, User>,
     pub guilds: HashMap<Snowflake, Guild>,
+    /// Guild ids in the order READY/GUILD_CREATE delivered them.
     pub guild_order: Vec<Snowflake>,
     pub channels: HashMap<Snowflake, Channel>,
     pub messages: HashMap<Snowflake, MessageBuffer>,
-    pub read_states: HashMap<Snowflake, Snowflake>,
+    pub read_states: HashMap<Snowflake, ReadState>,
     pub voice_states: HashMap<(Option<Snowflake>, Snowflake), VoiceState>,
-    pub presences: HashMap<(Option<Snowflake>, Snowflake), Presence>,
+    /// The latest presence seen for each user, from any guild or friendship.
+    pub presences: HashMap<Snowflake, Presence>,
     pub relationships: HashMap<Snowflake, Relationship>,
     pub streams: HashMap<String, Stream>,
     /// Guild id -> member user ids, seeded by READY/GUILD_CREATE and refreshed
     /// by GUILD_MEMBER_LIST_UPDATE.
     pub guild_members: HashMap<Snowflake, HashSet<Snowflake>>,
+    /// (guild id, user id) -> membership details (nickname, roles).
+    pub members: HashMap<(Snowflake, Snowflake), Member>,
+    /// Notification settings per guild; `None` holds the DM settings.
+    pub guild_settings: HashMap<Option<Snowflake>, GuildSettings>,
+    pub guild_folders: Vec<GuildFolder>,
+    pub member_lists: HashMap<Snowflake, MemberList>,
+    /// The account's own status: `online`, `idle`, `dnd` or `invisible`.
+    pub status: Option<String>,
+    pub custom_status: Option<CustomStatus>,
 }
 
 impl State {
@@ -172,26 +191,72 @@ impl State {
                 if let Some(id) = snowflake(data, "id") {
                     self.guilds.remove(&id);
                     self.guild_order.retain(|guild| *guild != id);
+                    self.channels
+                        .retain(|_, channel| channel.guild_id != Some(id));
+                    self.member_lists.remove(&id);
                     events.push(StoreEvent::GuildRemoved(id));
                 }
             }
-            "CHANNEL_CREATE" | "CHANNEL_UPDATE" => {
-                if let Ok(channel) = serde_json::from_value::<Channel>(data.clone()) {
-                    let id = channel.id;
-                    let is_new = self.channels.insert(id, channel.clone()).is_none();
-                    self.index_recipients(&channel);
-                    events.push(if is_new {
-                        StoreEvent::ChannelAdded(id)
-                    } else {
-                        StoreEvent::ChannelUpdated(id)
-                    });
-                }
+            "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "THREAD_CREATE" | "THREAD_UPDATE" => {
+                self.channel_upsert(data, &mut events);
             }
-            "CHANNEL_DELETE" => {
+            "CHANNEL_DELETE" | "THREAD_DELETE" => {
                 if let Some(id) = snowflake(data, "id") {
                     self.channels.remove(&id);
                     self.messages.remove(&id);
                     events.push(StoreEvent::ChannelRemoved(id));
+                }
+            }
+            "THREAD_LIST_SYNC" => {
+                if let (Some(guild_id), Some(threads)) =
+                    (snowflake(data, "guild_id"), data["threads"].as_array())
+                {
+                    for thread in threads {
+                        if let Ok(mut channel) = serde_json::from_value::<Channel>(thread.clone()) {
+                            channel.guild_id = Some(guild_id);
+                            let id = channel.id;
+                            // The sync omits `member`; keep what we know.
+                            if channel.member.is_none() {
+                                channel.member =
+                                    self.channels.get(&id).and_then(|old| old.member.clone());
+                            }
+                            self.channels.insert(id, channel);
+                        }
+                    }
+                    events.push(StoreEvent::GuildChannelsLoaded(guild_id));
+                }
+            }
+            "CHANNEL_RECIPIENT_ADD" | "CHANNEL_RECIPIENT_REMOVE" => {
+                if let (Some(channel_id), Ok(user)) = (
+                    snowflake(data, "channel_id"),
+                    serde_json::from_value::<User>(data["user"].clone()),
+                ) {
+                    let removed = name.ends_with("REMOVE");
+                    if !removed {
+                        self.upsert_user(user.clone());
+                    }
+                    if let Some(channel) = self.channels.get_mut(&channel_id) {
+                        let recipients = channel.recipients.get_or_insert_with(Vec::new);
+                        recipients.retain(|existing| existing.id != user.id);
+                        if !removed {
+                            recipients.push(user);
+                        }
+                        events.push(StoreEvent::ChannelUpdated(channel_id));
+                    }
+                }
+            }
+            "CHANNEL_UNREAD_UPDATE" => {
+                if let Some(updates) = data["channel_unread_updates"].as_array() {
+                    for update in updates {
+                        if let (Some(id), Some(last)) = (
+                            snowflake(update, "id"),
+                            snowflake(update, "last_message_id"),
+                        ) && let Some(channel) = self.channels.get_mut(&id)
+                        {
+                            channel.last_message_id = Some(last);
+                            events.push(StoreEvent::ReadStateUpdated(id));
+                        }
+                    }
                 }
             }
             "MESSAGE_CREATE" => self.message_create(data, &mut events),
@@ -226,14 +291,36 @@ impl State {
                     }
                 }
             }
-            "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
-                self.reaction(data, name.ends_with("REMOVE"))
+            "MESSAGE_ACK" => {
+                if let Some(channel_id) = snowflake(data, "channel_id") {
+                    let state = self.read_states.entry(channel_id).or_default();
+                    if let Some(message_id) = snowflake(data, "message_id") {
+                        state.last_message_id = Some(message_id);
+                    }
+                    // An omitted count means "keep"; a plain ack clears it.
+                    state.mention_count = match data["mention_count"].as_u64() {
+                        Some(count) => count as u32,
+                        None if data["manual"].as_bool() == Some(true) => state.mention_count,
+                        None => 0,
+                    };
+                    events.push(StoreEvent::ReadStateUpdated(channel_id));
+                }
             }
-            "MESSAGE_REACTION_REMOVE_ALL" => self.reaction_remove_all(data),
+            "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
+                self.reaction(data, name.ends_with("REMOVE"), &mut events)
+            }
+            "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" => {
+                self.reaction_clear(data, &mut events)
+            }
             "TYPING_START" => {
                 if let (Some(channel_id), Some(user_id)) =
                     (snowflake(data, "channel_id"), snowflake(data, "user_id"))
                 {
+                    if let (Some(guild_id), Some(member)) =
+                        (snowflake(data, "guild_id"), data.get("member"))
+                    {
+                        self.upsert_member(guild_id, member);
+                    }
                     events.push(StoreEvent::Typing {
                         channel_id,
                         user_id,
@@ -241,45 +328,115 @@ impl State {
                 }
             }
             "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => {
-                self.member_add(data, &mut events);
+                if let Some(guild_id) = snowflake(data, "guild_id")
+                    && self.upsert_member(guild_id, data).is_some()
+                {
+                    events.push(StoreEvent::GuildMembersUpdated(guild_id));
+                }
             }
             "GUILD_MEMBER_REMOVE" => {
-                if let (Some(guild_id), Some(user_id)) =
-                    (snowflake(data, "guild_id"), snowflake(data, "user_id"))
-                {
+                if let (Some(guild_id), Some(user_id)) = (
+                    snowflake(data, "guild_id"),
+                    data.pointer("/user/id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| id.parse().ok())
+                        .or_else(|| snowflake(data, "user_id")),
+                ) {
                     if let Some(members) = self.guild_members.get_mut(&guild_id) {
                         members.remove(&user_id);
+                    }
+                    self.members.remove(&(guild_id, user_id));
+                    events.push(StoreEvent::GuildMembersUpdated(guild_id));
+                }
+            }
+            "GUILD_MEMBERS_CHUNK" => {
+                if let Some(guild_id) = snowflake(data, "guild_id") {
+                    for member in data["members"].as_array().into_iter().flatten() {
+                        self.upsert_member(guild_id, member);
+                    }
+                    for presence in data["presences"].as_array().into_iter().flatten() {
+                        self.upsert_presence(presence);
                     }
                     events.push(StoreEvent::GuildMembersUpdated(guild_id));
                 }
             }
-            "GUILD_MEMBER_LIST_UPDATE" => {
-                self.member_list_update(data, &mut events);
-            }
-            "PRESENCE_UPDATE" => {
-                if let Ok(presence) = serde_json::from_value::<Presence>(data.clone())
-                    && let Some(guild_id) = presence.guild_id
+            "GUILD_MEMBER_LIST_UPDATE" => self.member_list_update(data, &mut events),
+            "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+                if let (Some(guild_id), Ok(role)) = (
+                    snowflake(data, "guild_id"),
+                    serde_json::from_value::<Role>(data["role"].clone()),
+                ) && let Some(guild) = self.guilds.get_mut(&guild_id)
                 {
-                    if let Some(user) = data.pointer("/user") {
-                        self.upsert_user_from_value(user);
-                    }
-                    let key = (Some(guild_id), presence.user_id);
-                    let event = StoreEvent::PresenceUpdated {
-                        guild_id: Some(guild_id),
-                        user_id: presence.user_id,
-                    };
-                    self.presences.insert(key, presence);
-                    events.push(event);
+                    guild.roles.retain(|existing| existing.id != role.id);
+                    guild.roles.push(role);
+                    events.push(StoreEvent::GuildUpdated(guild_id));
                 }
             }
-            "RELATIONSHIP_ADD" | "RELATIONSHIP_REMOVE" => {
+            "GUILD_ROLE_DELETE" => {
+                if let (Some(guild_id), Some(role_id)) =
+                    (snowflake(data, "guild_id"), snowflake(data, "role_id"))
+                    && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    guild.roles.retain(|role| role.id != role_id);
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
+            "GUILD_EMOJIS_UPDATE" => {
+                if let (Some(guild_id), Ok(emojis)) = (
+                    snowflake(data, "guild_id"),
+                    serde_json::from_value::<Vec<Emoji>>(data["emojis"].clone()),
+                ) && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    guild.emojis = emojis;
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
+            "PRESENCE_UPDATE" => {
+                if let Some(user) = data.get("user")
+                    && user.get("username").is_some()
+                {
+                    self.upsert_user_from_value(user);
+                }
+                if let Some((guild_id, user_id)) = self.upsert_presence(data) {
+                    events.push(StoreEvent::PresenceUpdated { guild_id, user_id });
+                }
+            }
+            "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" => {
+                if let Some(user) = data.get("user") {
+                    self.upsert_user_from_value(user);
+                }
                 if let Ok(relationship) = serde_json::from_value::<Relationship>(data.clone()) {
-                    if name.ends_with("REMOVE") {
-                        self.relationships.remove(&relationship.id);
-                    } else {
-                        self.relationships.insert(relationship.id, relationship);
-                    }
+                    self.relationships.insert(relationship.id, relationship);
                     events.push(StoreEvent::RelationshipsUpdated);
+                }
+            }
+            "RELATIONSHIP_REMOVE" => {
+                if let Some(id) = snowflake(data, "id") {
+                    self.relationships.remove(&id);
+                    events.push(StoreEvent::RelationshipsUpdated);
+                }
+            }
+            "USER_UPDATE" => {
+                if let Ok(user) = serde_json::from_value::<User>(data.clone()) {
+                    if self.me.as_ref().is_some_and(|me| me.id == user.id) {
+                        self.me = Some(user.clone());
+                    }
+                    self.upsert_user(user);
+                    events.push(StoreEvent::SettingsUpdated);
+                }
+            }
+            "USER_SETTINGS_UPDATE" => {
+                self.user_settings(data);
+                events.push(StoreEvent::SettingsUpdated);
+            }
+            "USER_GUILD_SETTINGS_UPDATE" => {
+                let (guild_id, settings) = GuildSettings::parse(data);
+                self.guild_settings.insert(guild_id, settings);
+                events.push(StoreEvent::SettingsUpdated);
+            }
+            "SESSIONS_REPLACE" => {
+                if self.sessions(data) {
+                    events.push(StoreEvent::SettingsUpdated);
                 }
             }
             "VOICE_STATE_UPDATE" => {
@@ -333,6 +490,12 @@ impl State {
             self.me = Some(user);
         }
 
+        // With DEDUPE_USER_OBJECTS every other user object in READY is
+        // replaced by an id that refers into this array.
+        for user in data["users"].as_array().into_iter().flatten() {
+            self.upsert_user_from_value(user);
+        }
+
         if let Some(guilds) = data["guilds"].as_array() {
             for guild in guilds {
                 let Some(id) = snowflake(guild, "id") else {
@@ -352,7 +515,7 @@ impl State {
                     continue;
                 }
 
-                let Ok(parsed) = serde_json::from_value::<Guild>(guild.clone()) else {
+                let Ok(mut parsed) = serde_json::from_value::<Guild>(guild.clone()) else {
                     self.guilds.entry(id).or_insert_with(|| Guild {
                         id,
                         name: String::new(),
@@ -360,41 +523,24 @@ impl State {
                     });
                     continue;
                 };
-                if let Some(channels) = parsed.channels.clone() {
+                if let Some(channels) = parsed.channels.take() {
                     self.merge_guild_channels(id, channels);
+                }
+                for thread in guild["threads"].as_array().into_iter().flatten() {
+                    if let Ok(thread) = serde_json::from_value::<Channel>(thread.clone()) {
+                        self.merge_guild_channels(id, vec![thread]);
+                    }
                 }
                 self.guilds.insert(id, parsed);
             }
         }
 
-        if let Some(merged) = data["merged_members"].as_array() {
-            for (index, members) in merged.iter().enumerate() {
-                let Some(guild_id) = data["guilds"]
-                    .get(index)
-                    .and_then(|guild| snowflake(guild, "id"))
-                else {
-                    continue;
-                };
-                let Some(members) = members.as_array() else {
-                    continue;
-                };
-                for member in members {
-                    if let Some(user) = member.get("user") {
-                        self.upsert_user_from_value(user);
-                        if let Some(user_id) = snowflake(user, "id") {
-                            self.guild_members
-                                .entry(guild_id)
-                                .or_default()
-                                .insert(user_id);
-                        }
-                    }
-                }
-            }
-        }
+        self.merged_members(data);
 
         if let Some(channels) = data["private_channels"].as_array() {
             for channel in channels {
-                if let Ok(channel) = serde_json::from_value::<Channel>(channel.clone()) {
+                if let Ok(mut channel) = serde_json::from_value::<Channel>(channel.clone()) {
+                    self.resolve_recipients(&mut channel);
                     self.index_recipients(&channel);
                     self.channels.insert(channel.id, channel);
                 }
@@ -403,6 +549,9 @@ impl State {
 
         if let Some(relationships) = data["relationships"].as_array() {
             for relationship in relationships {
+                if let Some(user) = relationship.get("user") {
+                    self.upsert_user_from_value(user);
+                }
                 if let Ok(relationship) =
                     serde_json::from_value::<Relationship>(relationship.clone())
                 {
@@ -411,23 +560,118 @@ impl State {
             }
         }
 
-        if let Some(entries) = data
+        // `read_state` is `{entries: [...]}` with VERSIONED_READ_STATES and a
+        // plain array without it.
+        let entries = data
             .pointer("/read_state/entries")
-            .and_then(Value::as_array)
-        {
-            for entry in entries {
-                if let (Some(channel_id), Some(last)) = (
-                    snowflake(entry, "id"),
-                    entry["last_message_id"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok()),
-                ) {
-                    self.read_states.insert(channel_id, last);
-                }
+            .or_else(|| data.get("read_state"))
+            .and_then(Value::as_array);
+        for entry in entries.into_iter().flatten() {
+            // Non-channel read states (events, onboarding, ...) carry a type.
+            if entry["read_state_type"].as_u64().unwrap_or(0) != 0 {
+                continue;
+            }
+            if let Some(channel_id) = snowflake(entry, "id") {
+                self.read_states.insert(
+                    channel_id,
+                    ReadState {
+                        last_message_id: snowflake(entry, "last_message_id")
+                            .filter(|id| id.get() != 0),
+                        mention_count: entry["mention_count"].as_u64().unwrap_or(0) as u32,
+                    },
+                );
             }
         }
 
+        let settings = data
+            .pointer("/user_guild_settings/entries")
+            .or_else(|| data.get("user_guild_settings"))
+            .and_then(Value::as_array);
+        for entry in settings.into_iter().flatten() {
+            let (guild_id, settings) = GuildSettings::parse(entry);
+            self.guild_settings.insert(guild_id, settings);
+        }
+
+        if let Some(settings) = data.get("user_settings") {
+            self.user_settings(settings);
+        }
+        if let Some(sessions) = data.get("sessions") {
+            self.sessions(sessions);
+        }
+
+        // Without DEDUPE_USER_OBJECTS presences arrive here; with it they are
+        // in READY_SUPPLEMENTAL.
+        for presence in data["presences"].as_array().into_iter().flatten() {
+            self.upsert_presence(presence);
+        }
+
         events.push(StoreEvent::Ready);
+    }
+
+    /// `merged_members[i]` lists the members of `guilds[i]` that READY wants
+    /// the client to know (the account itself, friends, voice participants).
+    fn merged_members(&mut self, data: &Value) {
+        let Some(merged) = data["merged_members"].as_array() else {
+            return;
+        };
+        for (index, members) in merged.iter().enumerate() {
+            let Some(guild_id) = data["guilds"]
+                .get(index)
+                .and_then(|guild| snowflake(guild, "id"))
+            else {
+                continue;
+            };
+            for member in members.as_array().into_iter().flatten() {
+                self.upsert_member(guild_id, member);
+            }
+        }
+    }
+
+    fn user_settings(&mut self, settings: &Value) {
+        if let Some(folders) = settings.get("guild_folders")
+            && let Ok(folders) = serde_json::from_value::<Vec<GuildFolder>>(folders.clone())
+        {
+            self.guild_folders = folders;
+        } else if self.guild_folders.is_empty()
+            && let Some(positions) = settings["guild_positions"].as_array()
+        {
+            self.guild_folders = positions
+                .iter()
+                .filter_map(|id| id.as_str()?.parse().ok())
+                .map(|id| GuildFolder {
+                    guild_ids: vec![id],
+                    ..GuildFolder::default()
+                })
+                .collect();
+        }
+        if let Some(status) = settings["status"].as_str() {
+            self.status = Some(status.to_owned());
+        }
+        if let Some(custom) = settings.get("custom_status") {
+            self.custom_status = (!custom.is_null()).then(|| CustomStatus {
+                text: custom["text"].as_str().map(str::to_owned),
+                emoji_name: custom["emoji_name"].as_str().map(str::to_owned),
+                emoji_id: snowflake(custom, "emoji_id"),
+            });
+        }
+    }
+
+    /// The account's effective status is the `all` session when present,
+    /// otherwise the first listed session. Returns whether it changed.
+    fn sessions(&mut self, sessions: &Value) -> bool {
+        let Some(list) = sessions.as_array() else {
+            return false;
+        };
+        let session = list
+            .iter()
+            .find(|session| session["session_id"] == "all")
+            .or_else(|| list.first());
+        let Some(status) = session.and_then(|session| session["status"].as_str()) else {
+            return false;
+        };
+        let changed = self.status.as_deref() != Some(status);
+        self.status = Some(status.to_owned());
+        changed
     }
 
     fn guild_create(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
@@ -439,43 +683,40 @@ impl State {
         let channels = guild.channels.take().unwrap_or_default();
 
         let is_new = !self.guilds.contains_key(&id);
-        if is_new {
+        if !self.guild_order.contains(&id) {
             self.guild_order.push(id);
         }
-        self.guilds
-            .entry(id)
-            .and_modify(|existing| {
-                existing.name = guild.name.clone();
-                existing.icon = guild.icon.clone();
-                existing.owner_id = guild.owner_id;
-                existing.unavailable = guild.unavailable;
-            })
-            .or_insert(guild);
+        if let Some(existing) = self.guilds.get(&id) {
+            // A later GUILD_CREATE can be a lighter object than the READY one.
+            if guild.roles.is_empty() {
+                guild.roles = existing.roles.clone();
+            }
+            if guild.emojis.is_empty() {
+                guild.emojis = existing.emojis.clone();
+            }
+            if guild.joined_at.is_none() {
+                guild.joined_at = existing.joined_at.clone();
+            }
+        }
+        self.guilds.insert(id, guild);
 
         self.merge_guild_channels(id, channels);
-
-        if let Some(members) = data["members"].as_array() {
-            for member in members {
-                if let Some(user) = member.get("user") {
-                    self.upsert_user_from_value(user);
-                    if let Some(user_id) = snowflake(user, "id") {
-                        self.guild_members.entry(id).or_default().insert(user_id);
-                    }
-                }
+        for thread in data["threads"].as_array().into_iter().flatten() {
+            if let Ok(thread) = serde_json::from_value::<Channel>(thread.clone()) {
+                self.merge_guild_channels(id, vec![thread]);
             }
         }
 
-        if let Some(presences) = data["presences"].as_array() {
-            for presence in presences {
-                if let Some(user_id) = snowflake(presence, "user_id") {
-                    if let Some(user) = presence.get("user") {
-                        self.upsert_user_from_value(user);
-                    }
-                    if let Ok(presence) = serde_json::from_value::<Presence>(presence.clone()) {
-                        self.presences.insert((Some(id), user_id), presence);
-                    }
-                }
+        for member in data["members"].as_array().into_iter().flatten() {
+            self.upsert_member(id, member);
+        }
+        for presence in data["presences"].as_array().into_iter().flatten() {
+            if let Some(user) = presence.get("user")
+                && user.get("username").is_some()
+            {
+                self.upsert_user_from_value(user);
             }
+            self.upsert_presence(presence);
         }
 
         if let Some(voice_states) = data["voice_states"].as_array() {
@@ -483,7 +724,12 @@ impl State {
                 if let Some(user) = voice_state.pointer("/member/user") {
                     self.upsert_user_from_value(user);
                 }
-                if let Ok(voice_state) = serde_json::from_value::<VoiceState>(voice_state.clone()) {
+                if let Ok(mut voice_state) =
+                    serde_json::from_value::<VoiceState>(voice_state.clone())
+                {
+                    if voice_state.guild_id.is_none() {
+                        voice_state.guild_id = Some(id);
+                    }
                     self.voice_states.insert(voice_state.key(), voice_state);
                 }
             }
@@ -497,17 +743,63 @@ impl State {
     }
 
     fn guild_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        if let Some(id) = snowflake(data, "id")
-            && let Some(guild) = self.guilds.get_mut(&id)
-        {
-            if let Some(name) = data["name"].as_str() {
-                guild.name = name.to_owned();
-            }
-            if let Some(icon) = data.get("icon") {
-                guild.icon = icon.as_str().map(str::to_owned);
-            }
-            events.push(StoreEvent::GuildUpdated(id));
+        let Some(id) = snowflake(data, "id") else {
+            return;
+        };
+        let Some(guild) = self.guilds.get_mut(&id) else {
+            return;
+        };
+        if let Some(name) = data["name"].as_str() {
+            guild.name = name.to_owned();
         }
+        if let Some(icon) = data.get("icon") {
+            guild.icon = icon.as_str().map(str::to_owned);
+        }
+        if let Some(banner) = data.get("banner") {
+            guild.banner = banner.as_str().map(str::to_owned);
+        }
+        if let Some(owner) = snowflake(data, "owner_id") {
+            guild.owner_id = Some(owner);
+        }
+        if let Some(roles) = data.get("roles")
+            && let Ok(roles) = serde_json::from_value::<Vec<Role>>(roles.clone())
+        {
+            guild.roles = roles;
+        }
+        if let Some(emojis) = data.get("emojis")
+            && let Ok(emojis) = serde_json::from_value::<Vec<Emoji>>(emojis.clone())
+        {
+            guild.emojis = emojis;
+        }
+        events.push(StoreEvent::GuildUpdated(id));
+    }
+
+    fn channel_upsert(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        let Ok(mut channel) = serde_json::from_value::<Channel>(data.clone()) else {
+            return;
+        };
+        let id = channel.id;
+        self.resolve_recipients(&mut channel);
+        if let Some(existing) = self.channels.get(&id) {
+            // Updates do not carry `last_message_id`, and thread updates do
+            // not repeat the membership.
+            if channel.last_message_id.is_none() {
+                channel.last_message_id = existing.last_message_id;
+            }
+            if channel.member.is_none() {
+                channel.member = existing.member.clone();
+            }
+            if channel.recipients.is_none() {
+                channel.recipients = existing.recipients.clone();
+            }
+        }
+        self.index_recipients(&channel);
+        let is_new = self.channels.insert(id, channel).is_none();
+        events.push(if is_new {
+            StoreEvent::ChannelAdded(id)
+        } else {
+            StoreEvent::ChannelUpdated(id)
+        });
     }
 
     fn message_create(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
@@ -518,6 +810,30 @@ impl State {
         let channel_id = message.channel_id;
         let id = message.id;
         self.upsert_user(message.author.clone());
+        for user in &message.mentions {
+            self.upsert_user(user.clone());
+        }
+        if let (Some(guild_id), Some(member)) = (message.guild_id, data.get("member")) {
+            self.store_member(guild_id, message.author.id, member);
+        }
+
+        let my_id = self.me.as_ref().map(|me| me.id);
+        if my_id == Some(message.author.id) {
+            // Sending marks the channel read.
+            self.read_states.insert(
+                channel_id,
+                ReadState {
+                    last_message_id: Some(id),
+                    mention_count: 0,
+                },
+            );
+        } else if self.mentions_me(&message) {
+            self.read_states
+                .entry(channel_id)
+                .or_default()
+                .mention_count += 1;
+        }
+
         self.messages.entry(channel_id).or_default().insert(message);
         if let Some(channel) = self.channels.get_mut(&channel_id) {
             channel.last_message_id = Some(id);
@@ -526,6 +842,47 @@ impl State {
             channel_id,
             message_id: id,
         });
+        events.push(StoreEvent::ReadStateUpdated(channel_id));
+    }
+
+    /// Whether a new message should raise the channel's mention badge.
+    fn mentions_me(&self, message: &Message) -> bool {
+        let Some(me) = self.me.as_ref().map(|me| me.id) else {
+            return false;
+        };
+        if self
+            .relationships
+            .get(&message.author.id)
+            .is_some_and(|relationship| relationship.kind == Relationship::BLOCKED)
+        {
+            return false;
+        }
+        if message.mentions.iter().any(|user| user.id == me) {
+            return true;
+        }
+        let Some(guild_id) = message.guild_id.or_else(|| {
+            self.channels
+                .get(&message.channel_id)
+                .and_then(|channel| channel.guild_id)
+        }) else {
+            // Every message in an unmuted DM counts.
+            return !self.is_muted(message.channel_id);
+        };
+        let settings = self.guild_settings.get(&Some(guild_id));
+        if message.mention_everyone && !settings.is_some_and(|settings| settings.suppress_everyone)
+        {
+            return true;
+        }
+        if !message.mention_roles.is_empty()
+            && !settings.is_some_and(|settings| settings.suppress_roles)
+            && let Some(member) = self.members.get(&(guild_id, me))
+        {
+            return message
+                .mention_roles
+                .iter()
+                .any(|role| member.roles.contains(role));
+        }
+        false
     }
 
     fn message_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
@@ -536,9 +893,19 @@ impl State {
 
         // A full message (e.g. link-preview embed completion) replaces the row.
         if data.get("author").is_some() {
-            if let Ok(message) = serde_json::from_value::<Message>(data.clone()) {
+            if let Ok(mut message) = serde_json::from_value::<Message>(data.clone()) {
                 self.upsert_user(message.author.clone());
-                self.messages.entry(channel_id).or_default().insert(message);
+                let buffer = self.messages.entry(channel_id).or_default();
+                // Updates omit reactions; keep the ones already counted.
+                if message.reactions.is_empty()
+                    && let Some(existing) = buffer.get(id)
+                {
+                    message.reactions = existing.reactions.clone();
+                }
+                // Do not let an edit of an old message outside the window in.
+                if buffer.get(id).is_some() {
+                    buffer.insert(message);
+                }
             }
         } else {
             let Some(buffer) = self.messages.get_mut(&channel_id) else {
@@ -561,6 +928,12 @@ impl State {
                 {
                     message.attachments = attachments;
                 }
+                if let Some(pinned) = data.get("pinned").and_then(Value::as_bool) {
+                    message.pinned = pinned;
+                }
+                if let Some(flags) = data.get("flags").and_then(Value::as_u64) {
+                    message.flags = flags;
+                }
             });
             if !updated {
                 return;
@@ -573,7 +946,7 @@ impl State {
         });
     }
 
-    fn reaction(&mut self, data: &Value, removed: bool) {
+    fn reaction(&mut self, data: &Value, removed: bool, events: &mut Vec<StoreEvent>) {
         let (Some(channel_id), Some(message_id), Some(user_id)) = (
             snowflake(data, "channel_id"),
             snowflake(data, "message_id"),
@@ -591,29 +964,30 @@ impl State {
         let Some(buffer) = self.messages.get_mut(&channel_id) else {
             return;
         };
-        buffer.update_with(message_id, |message| {
+        let updated = buffer.update_with(message_id, |message| {
             let key = |reaction: &Reaction| (reaction.emoji.id, reaction.emoji.name.clone());
-            let target = (emoji.id, emoji.name.clone());
+            // Custom emoji are identified by id alone: the name can change.
+            let same = |reaction: &Reaction| match emoji.id {
+                Some(id) => reaction.emoji.id == Some(id),
+                None => key(reaction) == (None, emoji.name.clone()),
+            };
 
-            if let Some(reaction) = message
-                .reactions
-                .iter_mut()
-                .find(|reaction| key(reaction) == target)
-            {
+            if let Some(reaction) = message.reactions.iter_mut().find(|reaction| same(reaction)) {
                 if removed {
                     reaction.count = reaction.count.saturating_sub(1);
                     if me {
                         reaction.me = false;
                     }
                 } else {
-                    reaction.count += 1;
+                    // The server echoes our own optimistic reaction.
+                    if !(me && reaction.me) {
+                        reaction.count += 1;
+                    }
                     if me {
                         reaction.me = true;
                     }
                 }
-                if reaction.count == 0 {
-                    message.reactions.retain(|reaction| key(reaction) != target);
-                }
+                message.reactions.retain(|reaction| reaction.count > 0);
             } else if !removed {
                 message.reactions.push(Reaction {
                     count: 1,
@@ -622,22 +996,45 @@ impl State {
                 });
             }
         });
+        if updated {
+            events.push(StoreEvent::MessageUpdated {
+                channel_id,
+                message_id,
+            });
+        }
     }
 
-    fn reaction_remove_all(&mut self, data: &Value) {
+    /// REMOVE_ALL clears every reaction; REMOVE_EMOJI clears one emoji.
+    fn reaction_clear(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
         let (Some(channel_id), Some(message_id)) =
             (snowflake(data, "channel_id"), snowflake(data, "message_id"))
         else {
             return;
         };
-        if let Some(buffer) = self.messages.get_mut(&channel_id) {
-            buffer.update_with(message_id, |message| message.reactions.clear());
+        let emoji = serde_json::from_value::<crate::message::ReactionEmoji>(data["emoji"].clone())
+            .ok()
+            .filter(|_| data.get("emoji").is_some());
+        if let Some(buffer) = self.messages.get_mut(&channel_id)
+            && buffer.update_with(message_id, |message| match &emoji {
+                Some(emoji) => message.reactions.retain(|reaction| {
+                    (reaction.emoji.id, &reaction.emoji.name) != (emoji.id, &emoji.name)
+                }),
+                None => message.reactions.clear(),
+            })
+        {
+            events.push(StoreEvent::MessageUpdated {
+                channel_id,
+                message_id,
+            });
         }
     }
 
     pub fn load_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
         for message in &messages {
             self.upsert_user(message.author.clone());
+            for user in &message.mentions {
+                self.upsert_user(user.clone());
+            }
         }
         self.messages
             .entry(channel_id)
@@ -646,60 +1043,126 @@ impl State {
     }
 
     pub fn mark_read(&mut self, channel_id: Snowflake, message_id: Snowflake) {
-        self.read_states.insert(channel_id, message_id);
+        self.read_states.insert(
+            channel_id,
+            ReadState {
+                last_message_id: Some(message_id),
+                mention_count: 0,
+            },
+        );
+    }
+
+    /// Stores a member object (`{user, nick, roles, ...}` or the deduplicated
+    /// `{user_id, ...}` form). Returns the user id.
+    fn upsert_member(&mut self, guild_id: Snowflake, value: &Value) -> Option<Snowflake> {
+        if let Some(user) = value.get("user")
+            && user.get("username").is_some()
+        {
+            self.upsert_user_from_value(user);
+        }
+        let user_id = value
+            .pointer("/user/id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse().ok())
+            .or_else(|| snowflake(value, "user_id"))?;
+        self.store_member(guild_id, user_id, value);
+        Some(user_id)
+    }
+
+    fn store_member(&mut self, guild_id: Snowflake, user_id: Snowflake, value: &Value) {
+        self.guild_members
+            .entry(guild_id)
+            .or_default()
+            .insert(user_id);
+        if let Ok(member) = serde_json::from_value::<Member>(value.clone()) {
+            self.members.insert((guild_id, user_id), member);
+        }
+    }
+
+    fn upsert_presence(&mut self, value: &Value) -> Option<(Option<Snowflake>, Snowflake)> {
+        let presence = Presence::from_value(value)?;
+        let key = (presence.guild_id, presence.user_id);
+        self.presences.insert(presence.user_id, presence);
+        Some(key)
+    }
+
+    /// Applies SYNC / INSERT / UPDATE / DELETE / INVALIDATE to the guild's
+    /// member list and records the members and presences the rows carry.
+    fn member_list_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        let Some(guild_id) = snowflake(data, "guild_id") else {
+            return;
+        };
+        let list_id = data["id"].as_str().unwrap_or("everyone").to_owned();
+        let mut items_seen: Vec<&Value> = Vec::new();
+        let mut list = self.member_lists.remove(&guild_id).unwrap_or_default();
+        // A different list id means a different channel audience.
+        if list.id != list_id {
+            list = MemberList {
+                id: list_id,
+                ..MemberList::default()
+            };
+        }
+        list.member_count = data["member_count"].as_u64().unwrap_or(0) as u32;
+        list.online_count = data["online_count"].as_u64().unwrap_or(0) as u32;
+        if let Some(groups) = data["groups"].as_array() {
+            list.group_counts = groups
+                .iter()
+                .filter_map(|group| {
+                    Some((
+                        group["id"].as_str()?.to_owned(),
+                        group["count"].as_u64().unwrap_or(0) as u32,
+                    ))
+                })
+                .collect();
+        }
+
+        for op in data["ops"].as_array().into_iter().flatten() {
+            let index = op["index"].as_u64().unwrap_or(0) as usize;
+            let range = |position: usize| op["range"][position].as_u64().unwrap_or(0) as usize;
+            match op["op"].as_str().unwrap_or("") {
+                "SYNC" => {
+                    let items: Vec<&Value> = op["items"].as_array().into_iter().flatten().collect();
+                    list.sync(
+                        range(0),
+                        items
+                            .iter()
+                            .map(|item| MemberList::parse_item(item))
+                            .collect(),
+                    );
+                    items_seen.extend(items);
+                }
+                "INSERT" => {
+                    list.insert(index, MemberList::parse_item(&op["item"]));
+                    items_seen.push(&op["item"]);
+                }
+                "UPDATE" => {
+                    list.update(index, MemberList::parse_item(&op["item"]));
+                    items_seen.push(&op["item"]);
+                }
+                "DELETE" => list.delete(index),
+                "INVALIDATE" => list.invalidate(range(0), range(1)),
+                _ => {}
+            }
+        }
+        self.member_lists.insert(guild_id, list);
+
+        for item in items_seen {
+            let Some(member) = item.get("member") else {
+                continue;
+            };
+            self.upsert_member(guild_id, member);
+            if let Some(presence) = member.get("presence") {
+                self.upsert_presence(presence);
+            }
+        }
+        events.push(StoreEvent::GuildMembersUpdated(guild_id));
+        events.push(StoreEvent::MemberListUpdated(guild_id));
     }
 
     /// Guild channel objects from `READY`/`GUILD_CREATE` are scoped by the
     /// enclosing guild, not by a `guild_id` on each channel. Abaddon does the
     /// same assignment in ProcessNewGuild; without it `guild_channels()` finds
     /// nothing and the sidebar says "No channels".
-    fn member_add(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        let (Some(guild_id), Some(user)) = (snowflake(data, "guild_id"), data.get("user")) else {
-            return;
-        };
-        self.upsert_user_from_value(user);
-        if let Some(user_id) = snowflake(user, "id") {
-            self.guild_members
-                .entry(guild_id)
-                .or_default()
-                .insert(user_id);
-            events.push(StoreEvent::GuildMembersUpdated(guild_id));
-        }
-    }
-
-    /// Handles the common `SYNC`/`INSERT`/`UPDATE` ops. `DELETE` only carries
-    /// indexes, so it is left to the next SYNC rather than removing the wrong
-    /// member.
-    fn member_list_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        let Some(guild_id) = snowflake(data, "guild_id") else {
-            return;
-        };
-        let mut changed = false;
-        if let Some(ops) = data["ops"].as_array() {
-            for op in ops {
-                let Some(items) = op["items"].as_array() else {
-                    continue;
-                };
-                for item in items {
-                    let Some(user) = item.pointer("/member/user") else {
-                        continue;
-                    };
-                    self.upsert_user_from_value(user);
-                    if let Some(user_id) = snowflake(user, "id") {
-                        self.guild_members
-                            .entry(guild_id)
-                            .or_default()
-                            .insert(user_id);
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if changed {
-            events.push(StoreEvent::GuildMembersUpdated(guild_id));
-        }
-    }
-
     fn merge_guild_channels(&mut self, guild_id: Snowflake, channels: Vec<Channel>) {
         for mut channel in channels {
             channel.guild_id = Some(guild_id);
@@ -708,34 +1171,44 @@ impl State {
         }
     }
 
-    /// READY_SUPPLEMENTAL carries live voice states and friend presences that
-    /// READY itself omits.
+    /// READY_SUPPLEMENTAL carries live voice states, the rest of the merged
+    /// members and every presence that READY itself omits.
     fn ready_supplemental(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        if let Some(friends) = data
+        self.merged_members(data);
+
+        for presence in data
             .pointer("/merged_presences/friends")
             .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
         {
-            for entry in friends {
-                let Some(user_id) = snowflake(entry, "user_id") else {
-                    continue;
-                };
-                let status = entry
-                    .pointer("/presence/status")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                self.presences.insert(
-                    (None, user_id),
-                    Presence {
-                        guild_id: None,
-                        user_id,
-                        status,
-                        activities: Vec::new(),
-                    },
-                );
+            if let Some((_, user_id)) = self.upsert_presence(presence) {
                 events.push(StoreEvent::PresenceUpdated {
                     guild_id: None,
                     user_id,
                 });
+            }
+        }
+        for guild_presences in data
+            .pointer("/merged_presences/guilds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for presence in guild_presences.as_array().into_iter().flatten() {
+                self.upsert_presence(presence);
+            }
+        }
+
+        for channel in data["lazy_private_channels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(mut channel) = serde_json::from_value::<Channel>(channel.clone()) {
+                self.resolve_recipients(&mut channel);
+                self.index_recipients(&channel);
+                self.channels.insert(channel.id, channel);
             }
         }
 
@@ -767,6 +1240,20 @@ impl State {
         }
     }
 
+    /// Fills `recipients` from `recipient_ids` using the known users.
+    fn resolve_recipients(&self, channel: &mut Channel) {
+        if channel.recipients.is_some() {
+            return;
+        }
+        if let Some(ids) = &channel.recipient_ids {
+            channel.recipients = Some(
+                ids.iter()
+                    .filter_map(|id| self.users.get(id).cloned())
+                    .collect(),
+            );
+        }
+    }
+
     fn index_recipients(&mut self, channel: &Channel) {
         if let Some(recipients) = &channel.recipients {
             for user in recipients {
@@ -783,109 +1270,6 @@ impl State {
         if let Ok(user) = serde_json::from_value::<User>(value.clone()) {
             self.upsert_user(user);
         }
-    }
-
-    // -- queries ---------------------------------------------------------
-
-    pub fn guild(&self, id: Snowflake) -> Option<&Guild> {
-        self.guilds.get(&id)
-    }
-
-    pub fn ordered_guilds(&self) -> Vec<&Guild> {
-        self.guild_order
-            .iter()
-            .filter_map(|id| self.guilds.get(id))
-            .collect()
-    }
-
-    /// Channels of a guild, categories and children interleaved by position.
-    pub fn guild_channels(&self, guild_id: Snowflake) -> Vec<&Channel> {
-        let mut channels: Vec<&Channel> = self
-            .channels
-            .values()
-            .filter(|channel| channel.guild_id == Some(guild_id))
-            .collect();
-        channels.sort_by_key(|channel| channel.sort_key());
-        channels
-    }
-
-    /// DM and group-DM channels, most recent conversation first.
-    pub fn dm_channels(&self) -> Vec<&Channel> {
-        let mut channels: Vec<&Channel> = self
-            .channels
-            .values()
-            .filter(|channel| {
-                matches!(
-                    channel.kind,
-                    crate::channel::ChannelType::Dm | crate::channel::ChannelType::GroupDm
-                )
-            })
-            .collect();
-        channels
-            .sort_by_key(|channel| std::cmp::Reverse(channel.last_message_id.map(|id| id.get())));
-        channels
-    }
-
-    pub fn messages(&self, channel_id: Snowflake) -> Vec<Message> {
-        self.messages
-            .get(&channel_id)
-            .map(|buffer| buffer.messages().to_vec())
-            .unwrap_or_default()
-    }
-
-    pub fn last_message_id(&self, channel_id: Snowflake) -> Option<Snowflake> {
-        self.messages
-            .get(&channel_id)
-            .and_then(|buffer| buffer.messages().last().map(|message| message.id))
-            .or_else(|| {
-                self.channels
-                    .get(&channel_id)
-                    .and_then(|channel| channel.last_message_id)
-            })
-    }
-
-    pub fn unread(&self, channel_id: Snowflake) -> bool {
-        match (
-            self.last_message_id(channel_id),
-            self.read_states.get(&channel_id).copied(),
-        ) {
-            (Some(last), Some(read)) => last > read,
-            (Some(_), None) => true,
-            _ => false,
-        }
-    }
-
-    pub fn users_in_channel_voice(&self, guild_id: Snowflake, channel_id: Snowflake) -> Vec<User> {
-        self.voice_states
-            .values()
-            .filter(|state| {
-                state.guild_id == Some(guild_id) && state.channel_id == Some(channel_id)
-            })
-            .filter_map(|state| self.users.get(&state.user_id).cloned())
-            .collect()
-    }
-
-    pub fn guild_voice_states(&self, guild_id: Snowflake) -> Vec<&VoiceState> {
-        self.voice_states
-            .values()
-            .filter(|state| state.guild_id == Some(guild_id))
-            .collect()
-    }
-
-    pub fn guild_member_users(&self, guild_id: Snowflake) -> Vec<User> {
-        let mut users: Vec<User> = self
-            .guild_members
-            .get(&guild_id)
-            .into_iter()
-            .flatten()
-            .filter_map(|user_id| self.users.get(user_id).cloned())
-            .collect();
-        users.sort_by_key(|user| user.display_name().to_lowercase());
-        users
-    }
-
-    pub fn all_user_ids(&self) -> HashSet<Snowflake> {
-        self.users.keys().copied().collect()
     }
 }
 
@@ -1088,6 +1472,7 @@ mod tests {
     #[test]
     fn unread_tracks_read_state() {
         let store = Store::new();
+        store.apply("CHANNEL_CREATE", &json!({"id": "10", "type": 1}));
         store.apply("MESSAGE_CREATE", &message(100, 10, "hi"));
         assert!(store.read(|state| state.unread(Snowflake(10))));
         store.mark_read(Snowflake(10), Snowflake(100));
@@ -1220,10 +1605,16 @@ mod tests {
             "GUILD_MEMBER_LIST_UPDATE",
             &json!({
                 "guild_id": "5",
-                "ops": [{
-                    "op": "INSERT",
-                    "items": [{"member": {"user": {"id": "3", "username": "third"}}}]
-                }]
+                "id": "everyone",
+                "ops": [
+                    {"op": "SYNC", "range": [0, 99], "items": [
+                        {"group": {"id": "online", "count": 2}},
+                        {"member": {"user": {"id": "1", "username": "lambda"},
+                                    "presence": {"user": {"id": "1"}, "status": "idle"}}}
+                    ]},
+                    {"op": "INSERT", "index": 2,
+                     "item": {"member": {"user": {"id": "3", "username": "third"}}}}
+                ]
             }),
         );
         store.read(|state| {
@@ -1233,6 +1624,9 @@ mod tests {
                 .map(|user| user.username)
                 .collect();
             assert_eq!(names, vec!["friend", "lambda", "third"]);
+            let list = &state.member_lists[&Snowflake(5)];
+            assert_eq!(list.rows().count(), 3);
+            assert_eq!(state.status_of(Snowflake(1)), "idle");
         });
     }
 
@@ -1277,6 +1671,326 @@ mod tests {
             let states = state.guild_voice_states(Snowflake(5));
             assert_eq!(states.len(), 1);
             assert_eq!(states[0].channel_id, Some(Snowflake(12)));
+        });
+    }
+
+    fn ready_fixture() -> Value {
+        json!({
+            "user": {"id": "1", "username": "me"},
+            "users": [
+                {"id": "2", "username": "friend", "global_name": "Friend"},
+                {"id": "3", "username": "blocked"}
+            ],
+            "guilds": [
+                {
+                    "id": "50", "name": "Alpha", "owner_id": "9", "joined_at": "2020-01-01T00:00:00+00:00",
+                    "roles": [
+                        {"id": "50", "name": "@everyone", "permissions": "3072", "position": 0},
+                        {"id": "51", "name": "Mods", "permissions": "0", "position": 2, "color": 255},
+                        {"id": "52", "name": "Low", "permissions": "0", "position": 1, "color": 65280}
+                    ],
+                    "emojis": [
+                        {"id": "70", "name": "wave"},
+                        {"id": "71", "name": "dance", "animated": true},
+                        {"id": "72", "name": "mods_only", "roles": ["99"]}
+                    ],
+                    "channels": [
+                        {"id": "60", "type": 4, "name": "Text", "position": 1},
+                        {"id": "61", "type": 0, "name": "general", "position": 5, "parent_id": "60",
+                         "last_message_id": "4000000000000000000"},
+                        {"id": "62", "type": 2, "name": "Voice", "position": 0, "parent_id": "60"},
+                        {"id": "63", "type": 0, "name": "secret", "position": 6, "parent_id": "60",
+                         "permission_overwrites": [{"id": "50", "type": 0, "allow": "0", "deny": "1024"}]},
+                        {"id": "64", "type": 4, "name": "Empty", "position": 2},
+                        {"id": "65", "type": 0, "name": "rules", "position": 9}
+                    ]
+                },
+                {"id": "80", "name": "Beta", "joined_at": "2021-01-01T00:00:00+00:00"},
+                {"id": "90", "name": "Gamma", "joined_at": "2022-01-01T00:00:00+00:00"}
+            ],
+            "merged_members": [
+                [{"user_id": "1", "roles": ["51", "52"], "nick": "Me Here"}], [], []
+            ],
+            "private_channels": [
+                {"id": "100", "type": 1, "recipient_ids": ["2"], "last_message_id": "5"},
+                {"id": "101", "type": 3, "recipient_ids": ["2", "3"], "last_message_id": "9"}
+            ],
+            "relationships": [
+                {"id": "2", "user_id": "2", "type": 1, "nickname": "Bestie"},
+                {"id": "3", "user_id": "3", "type": 2}
+            ],
+            "read_state": {"entries": [
+                {"id": "61", "last_message_id": "4000000000000000000", "mention_count": 0},
+                {"id": "100", "last_message_id": "5", "mention_count": 0},
+                {"id": "7", "read_state_type": 3, "last_acked_id": "1"}
+            ]},
+            "user_guild_settings": {"entries": [
+                {"guild_id": "80", "muted": true, "mute_config": null, "channel_overrides": []}
+            ]},
+            "user_settings": {
+                "status": "dnd",
+                "custom_status": {"text": "busy", "emoji_name": null, "emoji_id": null},
+                "guild_folders": [
+                    {"id": null, "guild_ids": ["50"]},
+                    {"id": 7, "name": "Games", "color": 16711680, "guild_ids": ["80", "12345"]}
+                ]
+            },
+            "sessions": [{"session_id": "abc", "status": "dnd"}]
+        })
+    }
+
+    #[test]
+    fn ready_resolves_deduplicated_users() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.read(|state| {
+            let dm = &state.channels[&Snowflake(100)];
+            assert_eq!(state.channel_title(dm), "Bestie");
+            assert_eq!(dm.dm_recipient().unwrap().id, Snowflake(2));
+            assert_eq!(state.dm_with(Snowflake(2)).unwrap().id, Snowflake(100));
+            // Group DM is newer, so it sorts first.
+            let order: Vec<u64> = state.dm_channels().iter().map(|c| c.id.0).collect();
+            assert_eq!(order, vec![101, 100]);
+            assert_eq!(state.relationships_of(Relationship::FRIEND).len(), 1);
+            assert!(state.is_blocked(Snowflake(3)));
+            assert_eq!(state.status_of(Snowflake(1)), "dnd");
+            assert_eq!(
+                state.custom_status.as_ref().unwrap().text.as_deref(),
+                Some("busy")
+            );
+            // Non-channel read states are skipped.
+            assert!(!state.read_states.contains_key(&Snowflake(7)));
+        });
+    }
+
+    #[test]
+    fn guild_rail_follows_folders_and_puts_unlisted_guilds_first() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.read(|state| {
+            use crate::settings::GuildEntry;
+            assert_eq!(
+                state.guild_entries(),
+                vec![
+                    // Gamma is in no folder: newest join first.
+                    GuildEntry::Guild(Snowflake(90)),
+                    GuildEntry::Guild(Snowflake(50)),
+                    // The folder drops the guild the account has left.
+                    GuildEntry::Folder {
+                        id: 7,
+                        name: Some("Games".into()),
+                        color: Some(16711680),
+                        guild_ids: vec![Snowflake(80)],
+                    },
+                ]
+            );
+            let flat: Vec<u64> = state.ordered_guilds().iter().map(|g| g.id.0).collect();
+            assert_eq!(flat, vec![90, 50, 80]);
+        });
+    }
+
+    #[test]
+    fn channel_tree_hides_what_the_account_cannot_see() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.read(|state| {
+            let tree = state.channel_tree(Snowflake(50));
+            let shape: Vec<(Option<&str>, Vec<&str>)> = tree
+                .iter()
+                .map(|section| {
+                    (
+                        section.category.as_ref().and_then(|c| c.name.as_deref()),
+                        section
+                            .channels
+                            .iter()
+                            .filter_map(|c| c.name.as_deref())
+                            .collect(),
+                    )
+                })
+                .collect();
+            // Orphans first; text before voice despite positions; the hidden
+            // channel and the empty category are gone.
+            assert_eq!(
+                shape,
+                vec![
+                    (None, vec!["rules"]),
+                    (Some("Text"), vec!["general", "Voice"])
+                ]
+            );
+            assert!(state.can_send(Snowflake(61)));
+            assert!(!state.can(Snowflake(63), crate::permissions::VIEW_CHANNEL));
+            assert_eq!(state.member_color(Snowflake(50), Snowflake(1)), Some(255));
+            let me = state.me.clone().unwrap();
+            assert_eq!(state.display_name(Some(Snowflake(50)), &me), "Me Here");
+        });
+    }
+
+    #[test]
+    fn mentions_and_acks_drive_unread_state() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        let read = |store: &Store, channel: u64| {
+            store.read(|state| {
+                (
+                    state.unread(Snowflake(channel)),
+                    state.mention_count(Snowflake(channel)),
+                )
+            })
+        };
+        assert_eq!(read(&store, 61), (false, 0));
+        // Before the account joined: `rules` has no read state and no messages.
+        assert_eq!(read(&store, 65), (false, 0));
+
+        let mut plain = message(4_000_000_000_000_000_001, 61, "hello");
+        plain["guild_id"] = json!("50");
+        plain["author"] = json!({"id": "2", "username": "friend"});
+        store.apply("MESSAGE_CREATE", &plain);
+        assert_eq!(read(&store, 61), (true, 0));
+        assert_eq!(
+            store.read(|state| state.guild_unread(Snowflake(50))),
+            (true, 0)
+        );
+
+        let mut role_ping = plain.clone();
+        role_ping["id"] = json!("4000000000000000002");
+        role_ping["mention_roles"] = json!(["52"]);
+        store.apply("MESSAGE_CREATE", &role_ping);
+        assert_eq!(read(&store, 61), (true, 1));
+
+        // A blocked user's mention does not count.
+        let mut blocked = plain.clone();
+        blocked["id"] = json!("4000000000000000003");
+        blocked["author"] = json!({"id": "3", "username": "blocked"});
+        blocked["mentions"] = json!([{"id": "1", "username": "me"}]);
+        store.apply("MESSAGE_CREATE", &blocked);
+        assert_eq!(read(&store, 61), (true, 1));
+
+        store.apply(
+            "MESSAGE_ACK",
+            &json!({"channel_id": "61", "message_id": "4000000000000000003"}),
+        );
+        assert_eq!(read(&store, 61), (false, 0));
+
+        // Our own message marks the channel read.
+        store.apply(
+            "MESSAGE_CREATE",
+            &plain_from(&plain, "4000000000000000004", "2"),
+        );
+        assert!(read(&store, 61).0);
+        store.apply(
+            "MESSAGE_CREATE",
+            &plain_from(&plain, "4000000000000000005", "1"),
+        );
+        assert_eq!(read(&store, 61), (false, 0));
+
+        // Every message in an unmuted DM is a mention.
+        let mut dm = message(50, 100, "yo");
+        dm["author"] = json!({"id": "2", "username": "friend"});
+        store.apply("MESSAGE_CREATE", &dm);
+        assert_eq!(read(&store, 100), (true, 1));
+        // The group DM has no read state at all, so it is unread as well.
+        let unread: Vec<(u64, u32)> = store.read(|state| {
+            state
+                .unread_dms()
+                .iter()
+                .map(|(channel, count)| (channel.id.0, *count))
+                .collect()
+        });
+        assert_eq!(unread, vec![(100, 1), (101, 1)]);
+    }
+
+    fn plain_from(base: &Value, id: &str, author: &str) -> Value {
+        let mut value = base.clone();
+        value["id"] = json!(id);
+        value["author"] = json!({"id": author, "username": "someone"});
+        value
+    }
+
+    #[test]
+    fn muted_guilds_only_report_mentions() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.apply(
+            "CHANNEL_CREATE",
+            &json!({"id": "81", "type": 0, "guild_id": "80", "name": "chat"}),
+        );
+        let mut msg = message(4_000_000_000_000_000_010, 81, "hi");
+        msg["guild_id"] = json!("80");
+        msg["author"] = json!({"id": "2", "username": "friend"});
+        store.apply("MESSAGE_CREATE", &msg);
+        assert_eq!(
+            store.read(|state| state.guild_unread(Snowflake(80))),
+            (false, 0)
+        );
+        msg["id"] = json!("4000000000000000011");
+        msg["mentions"] = json!([{"id": "1", "username": "me"}]);
+        store.apply("MESSAGE_CREATE", &msg);
+        assert_eq!(
+            store.read(|state| state.guild_unread(Snowflake(80))),
+            (true, 1)
+        );
+    }
+
+    #[test]
+    fn presence_updates_use_the_nested_user_id() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.apply(
+            "PRESENCE_UPDATE",
+            &json!({
+                "user": {"id": "2"}, "status": "online",
+                "activities": [
+                    {"type": 0, "name": "Factorio"},
+                    {"type": 4, "name": "Custom Status", "state": "afk soon", "emoji": {"name": "🌙"}}
+                ]
+            }),
+        );
+        store.read(|state| {
+            assert_eq!(state.status_of(Snowflake(2)), "online");
+            let presence = state.presence(Snowflake(2)).unwrap();
+            assert_eq!(presence.summary().as_deref(), Some("🌙 afk soon"));
+            // The partial user object must not erase the known user.
+            assert_eq!(state.users[&Snowflake(2)].username, "friend");
+        });
+    }
+
+    #[test]
+    fn sendable_emojis_respect_nitro_and_roles() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.read(|state| {
+            let names = |nitro: bool, guild: Option<u64>| -> Vec<String> {
+                state
+                    .sendable_emojis(guild.map(Snowflake), nitro)
+                    .into_iter()
+                    .flat_map(|(_, emojis)| emojis.into_iter().map(|emoji| emoji.name.clone()))
+                    .collect()
+            };
+            assert_eq!(names(false, Some(50)), vec!["wave"]);
+            assert_eq!(names(true, None), vec!["wave", "dance"]);
+            assert!(names(false, None).is_empty());
+            assert_eq!(
+                state.emoji(Snowflake(71)).unwrap().1.mention(),
+                "<a:dance:71>"
+            );
+        });
+    }
+
+    #[test]
+    fn channel_updates_keep_the_last_message_id() {
+        let store = Store::new();
+        store.apply("READY", &ready_fixture());
+        store.apply(
+            "CHANNEL_UPDATE",
+            &json!({"id": "61", "type": 0, "guild_id": "50", "name": "renamed", "parent_id": "60"}),
+        );
+        store.read(|state| {
+            let channel = &state.channels[&Snowflake(61)];
+            assert_eq!(channel.name.as_deref(), Some("renamed"));
+            assert_eq!(
+                channel.last_message_id,
+                Some(Snowflake(4_000_000_000_000_000_000))
+            );
         });
     }
 }

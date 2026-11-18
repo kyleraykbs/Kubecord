@@ -1,7 +1,7 @@
 //! Camera and screen capture to H.264 Annex-B access units.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -48,6 +48,9 @@ pub struct VideoSettings {
     pub drop_frames_after_ms: u32,
     /// Drop old buffers in the capture pipeline instead of building latency.
     pub leaky_queue: bool,
+    /// How long sent packets stay available for retransmission after a
+    /// network dropout. `0` disables retransmission.
+    pub retransmit_ms: u32,
     /// x264 preset; `zerolatency` tuning is always applied.
     pub preset: String,
     pub encoder: EncoderPreference,
@@ -71,6 +74,7 @@ impl Default for VideoSettings {
             keyframe_secs: 2,
             drop_frames_after_ms: 250,
             leaky_queue: true,
+            retransmit_ms: 2000,
             preset: "ultrafast".into(),
             encoder: EncoderPreference::Auto,
         }
@@ -114,7 +118,11 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
         )
     } else {
         format!(
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
+            // x264enc's default 600 ms VBV lets a single IDR take 0.6 s of
+            // bitrate (150 KB at 2.5 Mbit/s, ~130 RTP packets). Bound any one
+            // frame to 150 ms of bitrate so keyframes stay small enough to
+            // pace out within a few frame intervals.
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} vbv-buf-capacity=150 key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
@@ -196,10 +204,7 @@ pub fn preload_pipewire() -> Result<()> {
     Ok(())
 }
 
-fn encoder_descriptions(
-    settings: &VideoSettings,
-    make: impl Fn(bool) -> String,
-) -> Vec<String> {
+fn encoder_descriptions(settings: &VideoSettings, make: impl Fn(bool) -> String) -> Vec<String> {
     let mut descriptions = Vec::new();
     if settings.encoder == EncoderPreference::Auto && hardware_available() {
         descriptions.push(make(true));
@@ -257,7 +262,8 @@ impl VideoSource {
             while !thread_stop.load(Ordering::Relaxed) {
                 let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
                 else {
-                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100)) {
+                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100))
+                    {
                         tracing::debug!(
                             silent_ms = last_arrival.unwrap().elapsed().as_millis(),
                             "video capture starved"
@@ -333,28 +339,38 @@ impl VideoSource {
     pub fn force_keyframe(&self) {
         // Viewers can send PLI/FIR repeatedly when they are starved. Re-encoding
         // a keyframe for every request creates larger periodic freezes, so cap
-        // forced keyframes to one every two seconds.
+        // forced keyframes to one per second. This is short enough that a viewer
+        // whose decoder froze (a dropped/lost P-frame) recovers in well under a
+        // GOP instead of waiting for the next scheduled IDR, but long enough
+        // that a PLI storm cannot flood the pacer with back-to-back keyframes.
         if let Ok(mut last) = self.last_force_keyframe.lock() {
-            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(30)) {
+            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(1)) {
                 return;
             }
             *last = Some(Instant::now());
         }
-        let Some(sink) = self.pipeline.by_name("sink") else {
-            return;
+        // `all_headers=true` re-sends SPS/PPS with the IDR so a viewer that lost
+        // the stream headers can decode again. Inject via the pipeline: a bin
+        // routes an upstream event to its sink elements, which forward it up to
+        // the encoder. Sending on the appsink's static sink pad returned false
+        // (the event was not handled), so that path never produced a keyframe.
+        let build_event = || {
+            gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+                .all_headers(true)
+                .build()
         };
-        let Some(pad) = sink.static_pad("sink") else {
-            return;
-        };
-        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
-            .all_headers(true)
-            .count(1)
-            .build();
-        if pad.send_event(event) {
+        if self.pipeline.send_event(build_event()) {
             tracing::info!("forced encoder keyframe from viewer request");
-        } else {
-            tracing::warn!("could not send force-key-unit event upstream");
+            return;
         }
+        if let Some(sink) = self.pipeline.by_name("sink")
+            && let Some(pad) = sink.static_pad("sink")
+            && pad.send_event(build_event())
+        {
+            tracing::info!("forced encoder keyframe from viewer request (pad fallback)");
+            return;
+        }
+        tracing::warn!("could not send force-key-unit event upstream");
     }
 
     /// Opens a V4L2 camera, or the first available one when `device` is None.
@@ -368,12 +384,9 @@ impl VideoSource {
         let descriptions = encoder_descriptions(&settings, |hardware| {
             pipeline_description(&source, &settings, hardware)
         });
-        Self::start_with_fallback(
-            descriptions,
-            1000 / settings.fps.max(1),
-            on_frame,
-            |_| Ok(()),
-        )
+        Self::start_with_fallback(descriptions, 1000 / settings.fps.max(1), on_frame, |_| {
+            Ok(())
+        })
     }
 
     /// Captures a PipeWire node, as returned by the desktop portal.
@@ -386,12 +399,9 @@ impl VideoSource {
         let descriptions = encoder_descriptions(&settings, |hardware| {
             pipeline_description(&source, &settings, hardware)
         });
-        Self::start_with_fallback(
-            descriptions,
-            1000 / settings.fps.max(1),
-            on_frame,
-            |_| Ok(()),
-        )
+        Self::start_with_fallback(descriptions, 1000 / settings.fps.max(1), on_frame, |_| {
+            Ok(())
+        })
     }
 
     /// Captures the desktop stream selected through the XDG portal.
@@ -427,13 +437,11 @@ impl VideoSource {
                 camera.serial.clone(),
             )]);
         }
-        let mut source =
-            Self::from_pipewire(node_id, fd, true, &settings, targets, on_frame)?;
+        let mut source = Self::from_pipewire(node_id, fd, true, &settings, targets, on_frame)?;
         // The portal owns the PipeWire fd; keep it alive with the pipeline.
         source._camera = Some(camera);
         Ok(source)
     }
-
 
     fn from_screen_portal(
         portal: crate::portal::ScreenCast,
@@ -603,7 +611,8 @@ impl VideoDecoder {
             while !thread_stop.load(Ordering::Relaxed) {
                 let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
                 else {
-                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100)) {
+                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100))
+                    {
                         tracing::debug!(
                             silent_ms = last_arrival.unwrap().elapsed().as_millis(),
                             "video capture starved"

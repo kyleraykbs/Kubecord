@@ -1,83 +1,24 @@
-//! Voice audio: mic capture, Opus encode, receive decode, mix and playback.
+//! Voice audio: mic capture and Opus encode. Receiving is in [`crate::receive`].
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use gstreamer as gst;
 use gstreamer_app::prelude::*;
 use opus2::{Application, Channels, Decoder, Encoder};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::delay::DelayedSender;
 use crate::error::{Error, Result};
+use crate::receive::{ReceiveStats, RemoteAudio};
 use kc_voice::VoiceHandle;
 
 const SAMPLE_RATE: u32 = 48_000;
 const FRAME_SAMPLES: usize = 960; // 20 ms per channel
 const FRAME_INTERLEAVED: usize = FRAME_SAMPLES * 2;
 const MAX_OPUS_FRAME: usize = 5760;
-
-/// Plays interleaved 48 kHz stereo S16 samples.
-pub struct Playback {
-    pipeline: gst::Pipeline,
-    appsrc: gstreamer_app::AppSrc,
-}
-
-impl Playback {
-    pub fn new() -> Result<Self> {
-        gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
-        let element = gst::parse::launch(
-            "appsrc name=src is-live=true format=time do-timestamp=true \
-             ! queue max-size-buffers=4 max-size-time=200000000 \
-             ! audioconvert ! audioresample ! autoaudiosink sync=true",
-        )
-        .map_err(|error| Error::Message(format!("playback pipeline: {error}")))?;
-        let pipeline = element
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| Error::Message("playback pipeline is not a pipeline".into()))?;
-        let appsrc = pipeline
-            .by_name("src")
-            .and_then(|element| element.downcast::<gstreamer_app::AppSrc>().ok())
-            .ok_or_else(|| Error::Message("playback appsrc missing".into()))?;
-
-        let caps = gst::Caps::builder("audio/x-raw")
-            .field("format", "S16LE")
-            .field("rate", SAMPLE_RATE as i32)
-            .field("channels", 2i32)
-            .field("layout", "interleaved")
-            .build();
-        appsrc.set_caps(Some(&caps));
-        appsrc.set_format(gst::Format::Time);
-        appsrc.set_max_bytes(FRAME_INTERLEAVED as u64 * 2 * 8);
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|error| Error::Message(format!("playback state: {error}")))?;
-
-        Ok(Self { pipeline, appsrc })
-    }
-
-    pub fn push(&self, samples: &[i16]) -> Result<()> {
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        let buffer = gst::Buffer::from_slice(bytes);
-        self.appsrc
-            .push_buffer(buffer)
-            .map_err(|error| Error::Message(format!("playback push: {error}")))?;
-        Ok(())
-    }
-}
-
-impl Drop for Playback {
-    fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
-    }
-}
 
 /// Captures the default input device as 48 kHz stereo S16, in 20 ms frames.
 pub struct Capture {
@@ -175,120 +116,6 @@ impl Drop for Capture {
     }
 }
 
-struct UserAudio {
-    mono: Decoder,
-    stereo: Decoder,
-    queue: VecDeque<Vec<i16>>,
-    volume: f32,
-    last_timestamp: Option<u32>,
-}
-
-impl UserAudio {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            mono: Decoder::new(SAMPLE_RATE, Channels::Mono)
-                .map_err(|error| Error::Message(format!("opus decoder: {error}")))?,
-            stereo: Decoder::new(SAMPLE_RATE, Channels::Stereo)
-                .map_err(|error| Error::Message(format!("opus decoder: {error}")))?,
-            queue: VecDeque::with_capacity(8),
-            volume: 1.0,
-            last_timestamp: None,
-        })
-    }
-
-    fn push(&mut self, opus: &[u8], timestamp: u32) -> Result<()> {
-        if opus.is_empty() {
-            return Ok(());
-        }
-        let stereo = (opus[0] >> 2) & 1 == 1;
-        let mut pcm = vec![0i16; MAX_OPUS_FRAME * 2];
-        let decoded = if stereo {
-            self.stereo
-                .decode(opus, &mut pcm, false)
-                .map_err(|error| Error::Message(format!("opus decode: {error}")))?
-        } else {
-            let decoded = self
-                .mono
-                .decode(opus, &mut pcm, false)
-                .map_err(|error| Error::Message(format!("opus decode: {error}")))?;
-            // Duplicate mono into stereo in place, back to front.
-            for index in (0..decoded).rev() {
-                pcm[index * 2] = pcm[index];
-                pcm[index * 2 + 1] = pcm[index];
-            }
-            decoded
-        };
-
-        let mut frame = pcm[..decoded * 2].to_vec();
-        if frame.len() < FRAME_INTERLEAVED {
-            frame.resize(FRAME_INTERLEAVED, 0);
-        }
-
-        // Drop packets that are too late to be useful.
-        if let Some(last) = self.last_timestamp
-            && timestamp.wrapping_add(FRAME_SAMPLES as u32 * 5) < last
-        {
-            return Ok(());
-        }
-        self.last_timestamp = Some(timestamp);
-        if self.queue.len() >= 10 {
-            self.queue.pop_front();
-        }
-        self.queue.push_back(frame);
-        Ok(())
-    }
-
-    fn mix_into(&mut self, output: &mut [i32]) {
-        if let Some(frame) = self.queue.pop_front() {
-            for (index, sample) in frame.iter().enumerate() {
-                if index >= output.len() {
-                    break;
-                }
-                output[index] += (*sample as f32 * self.volume) as i32;
-            }
-        }
-    }
-}
-
-struct Mixer {
-    users: HashMap<u64, UserAudio>,
-    master: f32,
-}
-
-impl Mixer {
-    fn new() -> Self {
-        Self {
-            users: HashMap::new(),
-            master: 1.0,
-        }
-    }
-
-    fn push(&mut self, user_id: u64, opus: &[u8], timestamp: u32) -> Result<()> {
-        let user = match self.users.get_mut(&user_id) {
-            Some(user) => user,
-            None => {
-                self.users.insert(user_id, UserAudio::new()?);
-                self.users.get_mut(&user_id).expect("just inserted")
-            }
-        };
-        user.push(opus, timestamp)
-    }
-
-    fn mix(&mut self) -> Vec<i16> {
-        let mut accumulator = vec![0i32; FRAME_INTERLEAVED];
-        for user in self.users.values_mut() {
-            user.mix_into(&mut accumulator);
-        }
-        accumulator
-            .into_iter()
-            .map(|sample| {
-                let scaled = (sample as f32 * self.master).clamp(i16::MIN as f32, i16::MAX as f32);
-                scaled as i16
-            })
-            .collect()
-    }
-}
-
 /// System-audio capture for a Go Live stream connection. The stream's audio
 /// SSRC is separate from the parent voice connection; Discord expects this on
 /// the stream connection with the SOUNDSHARE speaking flag.
@@ -341,18 +168,57 @@ impl Drop for ScreenAudio {
     }
 }
 
-/// Owns the local audio path for one voice connection.
+/// Root-mean-square level above which the microphone counts as speech,
+/// about -38 dBFS: well above a quiet room, well below normal speech.
+const SPEECH_RMS: f64 = 400.0;
+/// Frames the speaking state outlives the last loud frame (300 ms), so it
+/// does not flicker between words.
+const SPEECH_HANGOVER_FRAMES: u32 = 15;
+
+/// Decides from microphone frames whether the user is speaking.
+#[derive(Default)]
+struct SpeechDetector {
+    /// Frames left before a pause counts as silence.
+    hangover: u32,
+}
+
+impl SpeechDetector {
+    /// Feeds one frame; returns `Some(state)` when speaking starts or stops.
+    fn feed(&mut self, frame: &[i16]) -> Option<bool> {
+        let was = self.hangover > 0;
+        let energy: f64 = frame
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum();
+        let rms = (energy / frame.len().max(1) as f64).sqrt();
+        if rms >= SPEECH_RMS {
+            self.hangover = SPEECH_HANGOVER_FRAMES;
+        } else {
+            self.hangover = self.hangover.saturating_sub(1);
+        }
+        let now = self.hangover > 0;
+        (was != now).then_some(now)
+    }
+
+    /// Ends speech at once (the microphone was switched off).
+    fn silence(&mut self) -> Option<bool> {
+        (std::mem::take(&mut self.hangover) > 0).then_some(false)
+    }
+}
+
+/// Owns the local audio path for one voice connection: the microphone on its
+/// way out, and everyone else on their way in.
 pub struct VoiceAudio {
-    mixer: Arc<Mutex<Mixer>>,
+    remote: RemoteAudio,
     mic_enabled: Arc<AtomicBool>,
-    _playback: Playback,
     _capture: Capture,
-    task: tokio::task::JoinHandle<()>,
 }
 
 impl VoiceAudio {
-    pub fn start(voice: VoiceHandle) -> Result<Self> {
-        let playback = Playback::new()?;
+    /// `on_speaking` is called, from the capture thread, when the local user
+    /// starts or stops speaking.
+    pub fn start(voice: VoiceHandle, on_speaking: impl Fn(bool) + Send + 'static) -> Result<Self> {
+        let remote = RemoteAudio::start()?;
         let encoder = Arc::new(Mutex::new(
             Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Voip)
                 .map_err(|error| Error::Message(format!("opus encoder: {error}")))?,
@@ -366,9 +232,16 @@ impl VoiceAudio {
         let mic_enabled = Arc::new(AtomicBool::new(true));
         let capture_enabled = mic_enabled.clone();
         let first_packet = Arc::new(AtomicBool::new(true));
+        let mut detector = SpeechDetector::default();
         let capture = Capture::start(move |frame| {
             if !capture_enabled.load(Ordering::Relaxed) {
+                if let Some(speaking) = detector.silence() {
+                    on_speaking(speaking);
+                }
                 return;
+            }
+            if let Some(speaking) = detector.feed(&frame) {
+                on_speaking(speaking);
             }
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
@@ -382,44 +255,19 @@ impl VoiceAudio {
             }
         })?;
 
-        let mixer = Arc::new(Mutex::new(Mixer::new()));
-        let playback_for_task = playback.appsrc.clone();
-        let mixer_for_task = mixer.clone();
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(20));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let frame = mixer_for_task.lock().mix();
-                let mut bytes = Vec::with_capacity(frame.len() * 2);
-                for sample in frame {
-                    bytes.extend_from_slice(&sample.to_le_bytes());
-                }
-                let buffer = gst::Buffer::from_slice(bytes);
-                if playback_for_task.push_buffer(buffer).is_err() {
-                    debug!("playback appsrc rejected a frame");
-                }
-            }
-        });
-
         Ok(Self {
-            mixer,
+            remote,
             mic_enabled,
-            _playback: playback,
             _capture: capture,
-            task,
         })
     }
 
     pub fn set_volume(&self, user_id: u64, volume: f32) {
-        let mut mixer = self.mixer.lock();
-        if let Some(user) = mixer.users.get_mut(&user_id) {
-            user.volume = volume.clamp(0.0, 2.0);
-        }
+        self.remote.set_volume(user_id, volume);
     }
 
     pub fn set_master_volume(&self, volume: f32) {
-        self.mixer.lock().master = volume.clamp(0.0, 2.0);
+        self.remote.set_master_volume(volume);
     }
 
     pub fn set_mic_enabled(&self, enabled: bool) {
@@ -432,16 +280,19 @@ impl VoiceAudio {
         self.set_master_volume(if deafened { 0.0 } else { 1.0 });
     }
 
-    pub fn push_remote(&self, user_id: u64, opus: &[u8], timestamp: u32) {
-        if let Err(error) = self.mixer.lock().push(user_id, opus, timestamp) {
-            warn!(%error, user_id, "could not decode remote audio");
-        }
+    /// Queues one Opus packet received from a participant.
+    pub fn push_remote(&self, user_id: u64, sequence: u16, opus: &[u8]) {
+        self.remote.push(user_id, sequence, opus);
     }
-}
 
-impl Drop for VoiceAudio {
-    fn drop(&mut self) {
-        self.task.abort();
+    /// Forgets a participant who left the call.
+    pub fn remove_remote(&self, user_id: u64) {
+        self.remote.remove(user_id);
+    }
+
+    /// What has happened to received packets so far.
+    pub fn receive_stats(&self) -> ReceiveStats {
+        self.remote.stats()
     }
 }
 
@@ -526,6 +377,26 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("capture produced no frames");
         assert_eq!(first, FRAME_INTERLEAVED);
+    }
+
+    #[test]
+    fn speech_detector_reports_edges_and_holds_through_pauses() {
+        let quiet = vec![20i16; FRAME_INTERLEAVED];
+        let loud = vec![3000i16; FRAME_INTERLEAVED];
+        let mut detector = SpeechDetector::default();
+        assert_eq!(detector.feed(&quiet), None);
+        assert_eq!(detector.feed(&loud), Some(true));
+        assert_eq!(detector.feed(&loud), None);
+        // A pause shorter than the hangover does not end speech.
+        for _ in 0..SPEECH_HANGOVER_FRAMES - 1 {
+            assert_eq!(detector.feed(&quiet), None);
+        }
+        assert_eq!(detector.feed(&quiet), Some(false));
+        assert_eq!(detector.feed(&quiet), None);
+        // Muting ends speech immediately.
+        assert_eq!(detector.feed(&loud), Some(true));
+        assert_eq!(detector.silence(), Some(false));
+        assert_eq!(detector.silence(), None);
     }
 
     #[test]

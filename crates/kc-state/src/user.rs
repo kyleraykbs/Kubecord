@@ -17,6 +17,18 @@ pub struct User {
     pub bot: Option<bool>,
     #[serde(default)]
     pub system: Option<bool>,
+    /// 0 none, 1 Nitro Classic, 2 Nitro, 3 Nitro Basic. Only sent for the
+    /// current user and in profiles.
+    #[serde(default)]
+    pub premium_type: Option<u8>,
+}
+
+impl User {
+    /// Whether the account can use custom emoji from other guilds and
+    /// animated emoji.
+    pub fn has_nitro(&self) -> bool {
+        matches!(self.premium_type, Some(1..=3))
+    }
 }
 
 impl User {

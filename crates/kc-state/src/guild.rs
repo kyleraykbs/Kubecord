@@ -3,6 +3,70 @@ use serde::{Deserialize, Serialize};
 
 use crate::channel::Channel;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// RGB colour; zero means the role does not colour names.
+    #[serde(default)]
+    pub color: u32,
+    /// Shown as its own group in the member list.
+    #[serde(default)]
+    pub hoist: bool,
+    #[serde(default)]
+    pub position: i32,
+    #[serde(default, deserialize_with = "crate::serde_util::u64_string")]
+    pub permissions: u64,
+    #[serde(default)]
+    pub mentionable: bool,
+}
+
+/// A custom guild emoji.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Emoji {
+    pub id: Snowflake,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub name: String,
+    #[serde(default)]
+    pub animated: bool,
+    /// False when the guild lost the boost level that provided the slot.
+    #[serde(default = "default_true")]
+    pub available: bool,
+    /// When non-empty, only members with one of these roles may use it.
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub roles: Vec<Snowflake>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Emoji {
+    /// The text that represents this emoji in message content.
+    pub fn mention(&self) -> String {
+        if self.animated {
+            format!("<a:{}:{}>", self.name, self.id)
+        } else {
+            format!("<:{}:{}>", self.name, self.id)
+        }
+    }
+}
+
+/// A user's membership of one guild.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    #[serde(default)]
+    pub nick: Option<String>,
+    /// Per-guild avatar hash.
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub roles: Vec<Snowflake>,
+    #[serde(default)]
+    pub joined_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Guild {
     pub id: Snowflake,
@@ -16,6 +80,19 @@ pub struct Guild {
     /// Present on `GUILD_CREATE`, absent on the `READY` guild stubs.
     #[serde(default)]
     pub channels: Option<Vec<Channel>>,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub roles: Vec<Role>,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub emojis: Vec<Emoji>,
+    #[serde(default)]
+    pub banner: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub member_count: Option<u64>,
+    /// When the current user joined, as an ISO 8601 timestamp.
+    #[serde(default)]
+    pub joined_at: Option<String>,
 }
 
 impl Guild {
@@ -81,13 +158,91 @@ pub struct Presence {
     pub activities: Vec<serde_json::Value>,
 }
 
+impl Presence {
+    /// Parses a presence from READY (`user_id`) or PRESENCE_UPDATE (`user.id`).
+    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let user_id = value["user_id"]
+            .as_str()
+            .or_else(|| {
+                value
+                    .pointer("/user/id")
+                    .and_then(serde_json::Value::as_str)
+            })?
+            .parse()
+            .ok()?;
+        Some(Self {
+            guild_id: value["guild_id"].as_str().and_then(|id| id.parse().ok()),
+            user_id,
+            status: value["status"].as_str().map(str::to_owned),
+            activities: value["activities"].as_array().cloned().unwrap_or_default(),
+        })
+    }
+
+    /// `online`, `idle`, `dnd` or `offline`.
+    pub fn status(&self) -> &str {
+        self.status.as_deref().unwrap_or("offline")
+    }
+
+    /// The custom status text (activity type 4), with its emoji when unicode.
+    pub fn custom_status(&self) -> Option<String> {
+        let activity = self
+            .activities
+            .iter()
+            .find(|activity| activity["type"] == 4)?;
+        let text = activity["state"].as_str().unwrap_or("");
+        let emoji = activity
+            .pointer("/emoji/name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| {
+                activity
+                    .pointer("/emoji/id")
+                    .is_none_or(serde_json::Value::is_null)
+            })
+            .unwrap_or("");
+        let combined = format!("{emoji} {text}");
+        let combined = combined.trim();
+        (!combined.is_empty()).then(|| combined.to_owned())
+    }
+
+    /// A one-line description of what the user is doing: the custom status,
+    /// otherwise "Playing X" / "Listening to X" and so on.
+    pub fn summary(&self) -> Option<String> {
+        if let Some(custom) = self.custom_status() {
+            return Some(custom);
+        }
+        let activity = self
+            .activities
+            .iter()
+            .find(|activity| activity["type"] != 4)?;
+        let name = activity["name"].as_str()?;
+        let verb = match activity["type"].as_u64().unwrap_or(0) {
+            1 => "Streaming",
+            2 => "Listening to",
+            3 => "Watching",
+            5 => "Competing in",
+            _ => "Playing",
+        };
+        Some(format!("{verb} {name}"))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Relationship {
+    /// The other user's id.
     pub id: Snowflake,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub kind: u8,
     #[serde(default)]
     pub nickname: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+impl Relationship {
+    pub const FRIEND: u8 = 1;
+    pub const BLOCKED: u8 = 2;
+    pub const INCOMING_REQUEST: u8 = 3;
+    pub const OUTGOING_REQUEST: u8 = 4;
 }
 
 /// A Go Live stream, from `STREAM_CREATE`/`STREAM_UPDATE`.

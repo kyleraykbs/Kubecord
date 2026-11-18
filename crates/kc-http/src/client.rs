@@ -12,6 +12,75 @@ use crate::rate_limit::{RateLimiter, normalise_route};
 const USER_AGENT: &str = kc_core::super_properties::USER_AGENT;
 const MAX_ATTEMPTS: usize = 5;
 
+/// Everything the composer can put in one message.
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub content: String,
+    pub reply_to: Option<Snowflake>,
+    /// Whether a reply pings the author of the message replied to.
+    pub mention_reply: bool,
+    /// Attachment descriptors returned by [`HttpClient::upload_attachment`].
+    pub attachments: Vec<Value>,
+    pub sticker_ids: Vec<Snowflake>,
+    /// Client-chosen id echoed back on the gateway, to match a pending row.
+    pub nonce: Option<String>,
+    /// `@silent`: deliver without a notification.
+    pub silent: bool,
+}
+
+impl Default for Outgoing {
+    fn default() -> Self {
+        Self {
+            content: String::new(),
+            reply_to: None,
+            mention_reply: true,
+            attachments: Vec::new(),
+            sticker_ids: Vec::new(),
+            nonce: None,
+            silent: false,
+        }
+    }
+}
+
+/// One page of message search results.
+#[derive(Clone, Debug, Default)]
+pub struct SearchPage {
+    pub total: u64,
+    pub messages: Vec<Message>,
+    /// Discord is still indexing this guild; retry shortly.
+    pub indexing: bool,
+}
+
+/// A GIF from Discord's picker endpoints.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Gif {
+    #[serde(default)]
+    pub id: String,
+    /// The provider page URL; this is what gets sent as the message.
+    #[serde(default)]
+    pub url: String,
+    /// Media URL in the requested format.
+    #[serde(default)]
+    pub src: String,
+    #[serde(default)]
+    pub gif_src: String,
+    /// Still preview image.
+    #[serde(default)]
+    pub preview: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct GifCategory {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub src: String,
+}
+
 /// A REST client authenticated as one user account.
 #[derive(Clone)]
 pub struct HttpClient {
@@ -78,6 +147,19 @@ impl HttpClient {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value> {
+        self.request_json_in(method, path, body, None).await
+    }
+
+    /// Like [`request_json`](Self::request_json), with the
+    /// `X-Context-Properties` header the web client attaches to actions taken
+    /// from a particular place in its interface (`{"location": "Friends"}`).
+    async fn request_json_in(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        context: Option<&Value>,
+    ) -> Result<Value> {
         let route = normalise_route(method.as_str(), path);
 
         for attempt in 0..MAX_ATTEMPTS {
@@ -86,6 +168,9 @@ impl HttpClient {
             let mut request = self.request(method.clone(), path);
             if let Some(body) = body {
                 request = request.json(body);
+            }
+            if let Some(context) = context {
+                request = request.header("x-context-properties", base64_json(context));
             }
 
             let response = request.send().await?;
@@ -152,6 +237,12 @@ impl HttpClient {
         self.request_json(Method::GET, path, None).await
     }
 
+    /// A GET of an API path (`/channels/1/messages?limit=5`) returning the
+    /// raw JSON, for diagnostics.
+    pub async fn get_raw(&self, path: &str) -> Result<Value> {
+        self.get(path).await
+    }
+
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
         self.request_json(Method::POST, path, Some(&body)).await
     }
@@ -213,14 +304,123 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    /// Opens (or reopens) the DM with a user. Discord limits how many new
+    /// DMs an account may start, so callers should prefer an existing channel.
     pub async fn create_dm(&self, recipient: Snowflake) -> Result<Channel> {
         let value = self
-            .post(
+            .request_json_in(
+                Method::POST,
                 "/users/@me/channels",
-                json!({ "recipients": [recipient.to_string()] }),
+                Some(&json!({ "recipients": [recipient.to_string()] })),
+                Some(&json!({})),
             )
             .await?;
         Self::parse(value, StatusCode::OK)
+    }
+
+    /// Closes a DM (it can be reopened) or leaves a group DM.
+    pub async fn close_dm(&self, channel_id: Snowflake) -> Result<()> {
+        self.delete(&format!("/channels/{channel_id}?silent=false"))
+            .await?;
+        Ok(())
+    }
+
+    // -- relationships ---------------------------------------------------
+
+    /// Sends a friend request by unique username.
+    pub async fn add_friend(&self, username: &str) -> Result<()> {
+        self.request_json_in(
+            Method::POST,
+            "/users/@me/relationships",
+            Some(&json!({ "username": username, "discriminator": null })),
+            Some(&json!({ "location": "Add Friend" })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Accepts an incoming request or sends one to a known user.
+    pub async fn accept_friend(&self, user_id: Snowflake) -> Result<()> {
+        self.request_json_in(
+            Method::PUT,
+            &format!("/users/@me/relationships/{user_id}"),
+            Some(&json!({})),
+            Some(&json!({ "location": "Friends" })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn block_user(&self, user_id: Snowflake) -> Result<()> {
+        self.request_json_in(
+            Method::PUT,
+            &format!("/users/@me/relationships/{user_id}"),
+            Some(&json!({ "type": 2 })),
+            Some(&json!({ "location": "ContextMenu" })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Removes a friend, declines or cancels a request, or unblocks.
+    pub async fn remove_relationship(&self, user_id: Snowflake) -> Result<()> {
+        self.request_json_in(
+            Method::DELETE,
+            &format!("/users/@me/relationships/{user_id}"),
+            None,
+            Some(&json!({ "location": "Friends" })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // -- users -----------------------------------------------------------
+
+    /// A user's profile: bio, pronouns, badges, mutual guilds and friends.
+    pub async fn user_profile(
+        &self,
+        user_id: Snowflake,
+        guild_id: Option<Snowflake>,
+    ) -> Result<Value> {
+        let mut path = format!(
+            "/users/{user_id}/profile?type=popout&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
+        );
+        if let Some(guild_id) = guild_id {
+            path.push_str(&format!("&guild_id={guild_id}"));
+        }
+        self.get(&path).await
+    }
+
+    pub async fn set_note(&self, user_id: Snowflake, note: &str) -> Result<()> {
+        self.request_json(
+            Method::PUT,
+            &format!("/users/@me/notes/{user_id}"),
+            Some(&json!({ "note": note })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Persists the account's status (`online`, `idle`, `dnd`, `invisible`)
+    /// so other sessions and the next login use it.
+    pub async fn set_status(&self, status: &str) -> Result<()> {
+        self.patch("/users/@me/settings", json!({ "status": status }))
+            .await?;
+        Ok(())
+    }
+
+    /// Sets or clears (`None`) the custom status. `emoji` is a unicode emoji.
+    pub async fn set_custom_status(&self, text: Option<&str>, emoji: Option<&str>) -> Result<()> {
+        let custom_status = match (text, emoji) {
+            (None, None) => Value::Null,
+            _ => json!({ "text": text, "emoji_name": emoji, "emoji_id": null, "expires_at": null }),
+        };
+        self.patch(
+            "/users/@me/settings",
+            json!({ "custom_status": custom_status }),
+        )
+        .await?;
+        Ok(())
     }
 
     // -- messages --------------------------------------------------------
@@ -240,21 +440,205 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    /// Messages after an id, oldest first as Discord returns newest first.
+    pub async fn messages_after(
+        &self,
+        channel_id: Snowflake,
+        limit: u8,
+        after: Snowflake,
+    ) -> Result<Vec<Message>> {
+        let limit = limit.clamp(1, 100);
+        let value = self
+            .get(&format!(
+                "/channels/{channel_id}/messages?limit={limit}&after={after}"
+            ))
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// A window of messages centred on an id (used to jump to a message).
+    pub async fn messages_around(
+        &self,
+        channel_id: Snowflake,
+        limit: u8,
+        around: Snowflake,
+    ) -> Result<Vec<Message>> {
+        let limit = limit.clamp(1, 100);
+        let value = self
+            .get(&format!(
+                "/channels/{channel_id}/messages?limit={limit}&around={around}"
+            ))
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
     pub async fn send_message(
         &self,
         channel_id: Snowflake,
         content: &str,
         reply_to: Option<Snowflake>,
     ) -> Result<Message> {
-        let mut body = json!({ "content": content, "nonce": Snowflake::new(nonce()) });
-        if let Some(reply_to) = reply_to {
+        self.send(
+            channel_id,
+            &Outgoing {
+                content: content.to_owned(),
+                reply_to,
+                ..Outgoing::default()
+            },
+        )
+        .await
+    }
+
+    /// Sends a message with every option the composer supports.
+    pub async fn send(&self, channel_id: Snowflake, message: &Outgoing) -> Result<Message> {
+        let nonce = message.nonce.clone().unwrap_or_else(|| nonce().to_string());
+        let mut body = json!({
+            "content": message.content,
+            "nonce": nonce,
+            "tts": false,
+            "flags": if message.silent { 1 << 12 } else { 0 },
+        });
+        if let Some(reply_to) = message.reply_to {
             body["message_reference"] = json!({
                 "message_id": reply_to,
                 "channel_id": channel_id,
             });
+            body["allowed_mentions"] = json!({
+                "parse": ["users", "roles", "everyone"],
+                "replied_user": message.mention_reply,
+            });
+        }
+        if !message.attachments.is_empty() {
+            body["attachments"] = Value::Array(message.attachments.clone());
+        }
+        if !message.sticker_ids.is_empty() {
+            body["sticker_ids"] = json!(message.sticker_ids);
         }
         let value = self
             .post(&format!("/channels/{channel_id}/messages"), body)
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    // -- pins and search -------------------------------------------------
+
+    pub async fn pins(&self, channel_id: Snowflake) -> Result<Vec<Message>> {
+        let value = self.get(&format!("/channels/{channel_id}/pins")).await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    pub async fn pin_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
+        self.put_empty(&format!("/channels/{channel_id}/pins/{message_id}"))
+            .await
+    }
+
+    pub async fn unpin_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
+        self.delete(&format!("/channels/{channel_id}/pins/{message_id}"))
+            .await?;
+        Ok(())
+    }
+
+    /// Full-text search in a guild (optionally one channel) or in a DM.
+    /// Returns the total hit count and one page of 25 hits, newest first.
+    /// Discord answers 202 while it is still indexing; that surfaces as an
+    /// empty page with `indexing` set.
+    pub async fn search(
+        &self,
+        guild_id: Option<Snowflake>,
+        channel_id: Snowflake,
+        query: &str,
+        offset: u32,
+    ) -> Result<SearchPage> {
+        let mut path = match guild_id {
+            Some(guild_id) => {
+                format!("/guilds/{guild_id}/messages/search?channel_id={channel_id}&")
+            }
+            None => format!("/channels/{channel_id}/messages/search?"),
+        };
+        path.push_str(&format!("content={}", percent_encode(query)));
+        if offset > 0 {
+            path.push_str(&format!("&offset={offset}"));
+        }
+        let value = self.get(&path).await?;
+        let Some(groups) = value["messages"].as_array() else {
+            return Ok(SearchPage {
+                total: 0,
+                messages: Vec::new(),
+                indexing: value.get("retry_after").is_some() || value["code"] == 110000,
+            });
+        };
+        let messages = groups
+            .iter()
+            .filter_map(|group| {
+                group
+                    .as_array()?
+                    .iter()
+                    .find(|hit| hit["hit"] == true)
+                    .or(group.get(0))
+            })
+            .filter_map(|message| serde_json::from_value::<Message>(message.clone()).ok())
+            .collect();
+        Ok(SearchPage {
+            total: value["total_results"].as_u64().unwrap_or(0),
+            messages,
+            indexing: false,
+        })
+    }
+
+    // -- read states -----------------------------------------------------
+
+    /// Marks several channels read at once (used for "mark server as read").
+    pub async fn ack_bulk(&self, read_states: &[(Snowflake, Snowflake)]) -> Result<()> {
+        let entries: Vec<Value> = read_states
+            .iter()
+            .map(|(channel_id, message_id)| {
+                json!({ "channel_id": channel_id, "message_id": message_id, "read_state_type": 0 })
+            })
+            .collect();
+        self.post("/read-states/ack-bulk", json!({ "read_states": entries }))
+            .await?;
+        Ok(())
+    }
+
+    // -- gifs ------------------------------------------------------------
+
+    /// GIF categories shown when the picker opens.
+    pub async fn gif_categories(&self) -> Result<Vec<GifCategory>> {
+        let value = self
+            .get("/gifs/trending?provider=tenor&locale=en-US&media_format=tinygif")
+            .await?;
+        Ok(serde_json::from_value(value["categories"].clone()).unwrap_or_default())
+    }
+
+    pub async fn gif_trending(&self) -> Result<Vec<Gif>> {
+        let value = self
+            .get("/gifs/trending-gifs?provider=tenor&locale=en-US&media_format=tinygif")
+            .await?;
+        Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    pub async fn gif_search(&self, query: &str) -> Result<Vec<Gif>> {
+        let value = self
+            .get(&format!(
+                "/gifs/search?q={}&provider=tenor&locale=en-US&media_format=tinygif&limit=50",
+                percent_encode(query)
+            ))
+            .await?;
+        Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    /// Users who reacted with an emoji (first 25).
+    pub async fn reactors(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: &str,
+    ) -> Result<Vec<User>> {
+        let value = self
+            .get(&format!(
+                "/channels/{channel_id}/messages/{message_id}/reactions/{}?limit=25&type=0",
+                encode_emoji(emoji)
+            ))
             .await?;
         Self::parse(value, StatusCode::OK)
     }
@@ -414,21 +798,16 @@ impl HttpClient {
         attachments: Vec<Value>,
         reply_to: Option<Snowflake>,
     ) -> Result<Message> {
-        let mut body = json!({
-            "content": content,
-            "nonce": Snowflake::new(nonce()),
-            "attachments": attachments,
-        });
-        if let Some(reply_to) = reply_to {
-            body["message_reference"] = json!({
-                "message_id": reply_to,
-                "channel_id": channel_id,
-            });
-        }
-        let value = self
-            .post(&format!("/channels/{channel_id}/messages"), body)
-            .await?;
-        Self::parse(value, StatusCode::OK)
+        self.send(
+            channel_id,
+            &Outgoing {
+                content: content.to_owned(),
+                reply_to,
+                attachments,
+                ..Outgoing::default()
+            },
+        )
+        .await
     }
 
     pub fn token(&self) -> &Token {
@@ -459,6 +838,25 @@ async fn parse_retry_after(headers: &HeaderMap, response: reqwest::Response) -> 
 
 /// Discord's snowflake epoch is 1420070400000 ms; a locally unique nonce only
 /// needs to be recent and unique, so reuse it with a counter.
+/// Percent-encodes a query-string value.
+fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 3);
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn base64_json(value: &Value) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(value.to_string())
+}
+
 fn nonce() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

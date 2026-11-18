@@ -93,6 +93,16 @@ impl Srtp {
         Ok(packet)
     }
 
+    /// Encrypts one RTCP packet (single or compound) the way Discord's
+    /// `rtpsize` modes do: the first eight bytes (header and sender SSRC)
+    /// stay clear and are authenticated, the rest is encrypted, and the
+    /// four-byte nonce counter follows. The counter is shared with RTP.
+    pub fn encrypt_rtcp(&mut self, packet: &[u8]) -> Result<Vec<u8>> {
+        if packet.len() < 8 {
+            return Err(Error::Message("RTCP packet too short".into()));
+        }
+        self.encrypt(&packet[..8], &packet[8..])
+    }
 
     /// Decrypts one SRTCP packet (AEAD `rtpsize`). The RTCP header and SRTCP
     /// index are authenticated in the clear; the report/NACK payload is
@@ -108,9 +118,13 @@ impl Srtp {
             packet[index_offset + 2],
             packet[index_offset + 3],
         ]);
-        if index & 0x8000_0000 == 0 {
-            return Ok(packet[..index_offset].to_vec());
-        }
+        // Discord does NOT use the RFC 3711 SRTCP E-flag/index scheme: the
+        // trailing four bytes are the AEAD nonce counter, exactly like the SRTP
+        // send path. The counter is small, so its top bit is effectively always
+        // zero — treating it as an "unencrypted" E-flag returned every feedback
+        // packet still ciphertext, which broke NACK retransmission, PLI->keyframe
+        // and the RR loss stats (every field past the 8-byte header was garbage).
+        // Always run the AEAD decrypt below.
         let encrypted = &packet[8..index_offset];
         let header = &packet[..8];
         let index_bytes = &packet[index_offset..];
@@ -265,6 +279,18 @@ mod tests {
             &decrypted[header.payload_offset - header.header_len..],
             b"opus"
         );
+    }
+
+    #[test]
+    fn rtcp_roundtrip_keeps_the_header_clear() {
+        for mode in [Mode::Aes256GcmRtpsize, Mode::XChaCha20Poly1305Rtpsize] {
+            let mut srtp = Srtp::new(mode, &[5u8; 32]).unwrap();
+            let rtcp = crate::rtcp::picture_loss(0x1111_2222, 0x3333_4444);
+            let packet = srtp.encrypt_rtcp(&rtcp).unwrap();
+            assert_eq!(&packet[..8], &rtcp[..8]);
+            assert_ne!(&packet[8..rtcp.len()], &rtcp[8..]);
+            assert_eq!(srtp.decrypt_rtcp(&packet).unwrap(), rtcp);
+        }
     }
 
     #[test]

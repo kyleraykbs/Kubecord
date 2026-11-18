@@ -183,40 +183,109 @@ impl Dave {
             .map_err(|error| Error::Message(format!("DAVE encrypt video: {error}")))
     }
 
-    pub fn decrypt_audio(&mut self, user_id: u64, data: &[u8]) -> Option<Vec<u8>> {
+    pub fn decrypt_audio(
+        &mut self,
+        user_id: u64,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, FrameRejected> {
         if !self.session.is_ready() {
-            return Some(data.to_vec());
+            // Before the group is established, peers may already encrypt.
+            // An encrypted frame played as Opus is noise, so only frames
+            // without the protocol's trailing marker pass through.
+            return if is_dave_frame(data) {
+                Err(FrameRejected::NotReady)
+            } else {
+                Ok(data.to_vec())
+            };
         }
         match self.session.decrypt(user_id, MediaType::AUDIO, data) {
-            Ok(frame) => Some(frame),
-            Err(error) if self.session.can_passthrough(user_id) => {
-                tracing::debug!(user_id, %error, "DAVE audio passthrough");
-                Some(data.to_vec())
+            Ok(frame) => Ok(frame),
+            Err(_) if self.session.can_passthrough(user_id) && !is_dave_frame(data) => {
+                Ok(data.to_vec())
             }
-            Err(error) => {
-                tracing::debug!(user_id, %error, "DAVE audio decrypt failed");
-                None
-            }
+            Err(error) => Err(FrameRejected::from(error)),
         }
     }
 
-    pub fn decrypt_video(&mut self, user_id: u64, data: &[u8]) -> Option<Vec<u8>> {
+    /// Decrypts one whole video frame. Like audio, a frame carrying the
+    /// protocol's marker is never passed through undecrypted: a decoder fed
+    /// ciphertext shows garbage until the next keyframe.
+    pub fn decrypt_video(
+        &mut self,
+        user_id: u64,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, FrameRejected> {
         if !self.session.is_ready() {
-            return Some(data.to_vec());
+            return if is_dave_frame(data) {
+                Err(FrameRejected::NotReady)
+            } else {
+                Ok(data.to_vec())
+            };
         }
         match self.session.decrypt(user_id, MediaType::VIDEO, data) {
-            Ok(frame) => Some(frame),
-            Err(error) => {
-                tracing::debug!(user_id, %error, "DAVE video decrypt failed");
-                None
+            Ok(frame) => Ok(frame),
+            Err(_) if self.session.can_passthrough(user_id) && !is_dave_frame(data) => {
+                Ok(data.to_vec())
             }
+            Err(error) => Err(FrameRejected::from(error)),
         }
     }
+}
+
+/// Why a received frame was not handed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameRejected {
+    /// The frame's nonce was already used: a duplicate delivery of a frame
+    /// that has been decrypted before. Nothing is lost.
+    Replayed,
+    /// The frame is encrypted but the session has no key for it yet (the
+    /// group is still forming, or the sender is not in it).
+    NotReady,
+    /// The frame arrived unencrypted while encryption is required.
+    Unencrypted,
+    /// Authentication failed: the frame is corrupt or was cut wrongly.
+    Corrupt,
+}
+
+impl From<davey::errors::DecryptError> for FrameRejected {
+    fn from(error: davey::errors::DecryptError) -> Self {
+        use davey::errors::{DecryptError, DecryptorDecryptError as Inner};
+        match error {
+            DecryptError::NoDecryptorForUser => Self::NotReady,
+            DecryptError::DecryptionFailed(Inner::InvalidNonce) => Self::Replayed,
+            DecryptError::DecryptionFailed(Inner::MissingKeyRatchet | Inner::MissingCryptor) => {
+                Self::NotReady
+            }
+            DecryptError::DecryptionFailed(Inner::UnencryptedWhenPassthroughDisabled) => {
+                Self::Unencrypted
+            }
+            DecryptError::DecryptionFailed(Inner::DecryptionFailure) => Self::Corrupt,
+        }
+    }
+}
+
+/// Whether a media frame carries DAVE's end-to-end encryption trailer, which
+/// ends with the magic marker `0xFAFA`.
+fn is_dave_frame(frame: &[u8]) -> bool {
+    frame.ends_with(&[0xFA, 0xFA])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encrypted_frames_do_not_pass_through_before_the_session_is_ready() {
+        let mut dave = Dave::new(1, 42, 7).expect("session");
+        assert!(!dave.is_ready());
+        let plain = [0x78, 1, 2, 3];
+        assert_eq!(dave.decrypt_audio(9, &plain), Ok(plain.to_vec()));
+        let encrypted = [0x78, 1, 2, 3, 0xFA, 0xFA];
+        assert_eq!(
+            dave.decrypt_audio(9, &encrypted),
+            Err(FrameRejected::NotReady)
+        );
+    }
 
     #[test]
     fn creates_session_and_key_package() {

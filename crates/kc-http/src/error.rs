@@ -30,6 +30,9 @@ pub enum Error {
 
     #[error("invalid url: {0}")]
     Url(String),
+
+    #[error("download is larger than the client will buffer")]
+    TooLarge,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

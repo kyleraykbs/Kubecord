@@ -17,6 +17,8 @@ pub const KEYFRAME_INTERVALS: [u32; 4] = [2, 4, 6, 10];
 
 pub const DROP_AFTER_MS: [u32; 6] = [0, 100, 250, 500, 1000, 2000];
 
+pub const RETRANSMIT_WINDOWS_MS: [u32; 5] = [0, 1000, 2000, 5000, 10000];
+
 pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
@@ -36,6 +38,9 @@ pub struct CapturePreferences {
     pub drop_frames_after_ms: u32,
     /// Drop old frames in the capture queue instead of accumulating latency.
     pub leaky_queue: bool,
+    /// How long sent packets are kept to repair a network dropout by
+    /// retransmission. Zero disables retransmission.
+    pub retransmit_ms: u32,
     /// Fixed Go Live buffering delay in milliseconds.
     pub stream_delay_ms: u64,
     /// Force the software x264 encoder instead of trying VA-API first.
@@ -52,6 +57,7 @@ impl Default for CapturePreferences {
             keyframe_secs: 2,
             drop_frames_after_ms: 250,
             leaky_queue: true,
+            retransmit_ms: 2000,
             stream_delay_ms: 0,
             cpu_encoder: false,
         }
@@ -64,12 +70,13 @@ impl CapturePreferences {
             width: self.width,
             height: self.height,
             fps: self.fps,
-            bitrate_kbps: self
-                .bitrate_kbps
-                .unwrap_or_else(|| VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)),
+            bitrate_kbps: self.bitrate_kbps.unwrap_or_else(|| {
+                VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)
+            }),
             keyframe_secs: self.keyframe_secs,
             drop_frames_after_ms: self.drop_frames_after_ms,
             leaky_queue: self.leaky_queue,
+            retransmit_ms: self.retransmit_ms,
             preset: "ultrafast".into(),
             encoder: if self.cpu_encoder {
                 EncoderPreference::Cpu
@@ -126,6 +133,9 @@ impl CapturePreferences {
         if !DROP_AFTER_MS.contains(&self.drop_frames_after_ms) {
             self.drop_frames_after_ms = 250;
         }
+        if !RETRANSMIT_WINDOWS_MS.contains(&self.retransmit_ms) {
+            self.retransmit_ms = 2000;
+        }
     }
 }
 
@@ -158,6 +168,7 @@ mod tests {
             keyframe_secs: 4,
             drop_frames_after_ms: 500,
             leaky_queue: false,
+            retransmit_ms: 5000,
             stream_delay_ms: 1000,
             cpu_encoder: true,
         };

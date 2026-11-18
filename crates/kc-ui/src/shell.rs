@@ -1,0 +1,805 @@
+//! The application window: widget construction and the shared state every
+//! interface module hangs its behaviour on.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::Arc;
+
+use gtk::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
+
+use kc_core::{AccountStore, Snowflake};
+
+use crate::chat::ChatView;
+use crate::images::ImageCache;
+use crate::player::LoopingVideo;
+use crate::session::{AccountId, Command, Session, UiEvent};
+use crate::settings::CapturePreferences;
+use crate::widgets::{icon_available, icon_button, toggle_icon_button};
+
+const SIDEBAR_WIDTH: i32 = 248;
+
+pub(crate) struct Model {
+    pub accounts: AccountStore,
+    pub sessions: HashMap<AccountId, Session>,
+    pub active: Option<AccountId>,
+}
+
+pub(crate) struct AppState {
+    pub window: adw::ApplicationWindow,
+    pub stack: gtk::Stack,
+    pub toasts: adw::ToastOverlay,
+
+    // Login.
+    pub token_entry: gtk::PasswordEntry,
+    pub label_entry: gtk::Entry,
+    pub login_button: gtk::Button,
+    pub login_error: gtk::Label,
+    pub login_cancel: gtk::Button,
+
+    // Server rail and channel sidebar.
+    pub guild_box: gtk::Box,
+    pub guild_name_label: gtk::Label,
+    pub channel_box: gtk::Box,
+
+    // User bar.
+    pub account_button: gtk::MenuButton,
+    pub account_popover: gtk::Popover,
+    pub account_popover_box: gtk::Box,
+    pub user_avatar: adw::Avatar,
+    pub user_avatar_slot: gtk::Overlay,
+    pub user_name_label: gtk::Label,
+    pub user_status_label: gtk::Label,
+
+    // Voice controls.
+    pub voice_panel: gtk::Box,
+    pub voice_channel_label: gtk::Label,
+    pub voice_status_label: gtk::Label,
+    pub voice_leave: gtk::Button,
+    pub voice_mute: gtk::ToggleButton,
+    pub voice_deafen: gtk::ToggleButton,
+    pub voice_camera: gtk::ToggleButton,
+    pub voice_screen: gtk::ToggleButton,
+    pub capture_button: gtk::Button,
+
+    // Content header.
+    pub banner: adw::Banner,
+    pub header_icon: gtk::Image,
+    pub channel_title_label: gtk::Label,
+    pub channel_topic_label: gtk::Label,
+    pub search_entry: gtk::SearchEntry,
+    pub pins_button: gtk::Button,
+    pub members_toggle: gtk::ToggleButton,
+
+    // Content.
+    pub content_stack: gtk::Stack,
+    pub split: adw::OverlaySplitView,
+    pub messages_scroll: gtk::ScrolledWindow,
+    pub message_stack: gtk::Stack,
+    pub message_overlay: gtk::Overlay,
+    pub toolbar: gtk::Box,
+    pub hover: RefCell<crate::chat::Hover>,
+    pub messages_list: gtk::ListBox,
+    pub history_spinner: gtk::Spinner,
+    pub chat_placeholder: gtk::Box,
+    pub voice_view: gtk::Box,
+    /// Participant tiles of the open voice view, for speaking updates.
+    pub voice_tiles: RefCell<HashMap<Snowflake, gtk::Widget>>,
+    /// Cameras and streams being received, by account, person and whether
+    /// it is their stream (`true`) or their camera.
+    pub videos: RefCell<HashMap<(AccountId, Snowflake, bool), crate::live::LiveVideo>>,
+    /// The last voice channel clicked and when, to recognise double-clicks.
+    pub last_channel_click: Cell<Option<(Snowflake, std::time::Instant)>>,
+    pub typing_label: gtk::Label,
+
+    // Composer.
+    pub composer_area: gtk::Box,
+    pub composer_box: gtk::Box,
+    pub composer: gtk::TextView,
+    pub composer_hint: gtk::Label,
+    pub context_bar: gtk::Box,
+    pub context_label: gtk::Label,
+    pub context_ping: gtk::ToggleButton,
+    pub context_cancel: gtk::Button,
+    pub upload_tray: gtk::Box,
+    pub attach_button: gtk::Button,
+    pub gif_button: gtk::MenuButton,
+    pub emoji_button: gtk::MenuButton,
+    pub blocked_label: gtk::Label,
+    pub completion: gtk::Popover,
+    pub completion_list: gtk::ListBox,
+
+    // Friends page and member list.
+    pub friends_box: gtk::Box,
+    pub members_box: gtk::Box,
+    pub members_count_label: gtk::Label,
+
+    pub model: RefCell<Model>,
+    pub cmd_tx: async_channel::Sender<Command>,
+    pub runtime: Arc<tokio::runtime::Runtime>,
+    pub ui_tx: async_channel::Sender<UiEvent>,
+    pub images: ImageCache,
+    pub capture: RefCell<CapturePreferences>,
+    pub window_identifier: RefCell<Option<Arc<ashpd::WindowIdentifier>>>,
+    pub chat: RefCell<ChatView>,
+    pub show_members: Cell<bool>,
+    pub members_guard: Cell<bool>,
+    pub speaking: RefCell<HashSet<Snowflake>>,
+    /// Sidebar rows of people in voice channels, for speaking updates.
+    pub voice_rows: RefCell<HashMap<Snowflake, gtk::Widget>>,
+    /// Coalesces bursts of store events into one sidebar redraw.
+    pub sidebar_redraw_queued: Cell<bool>,
+    /// Inline GIF players and the widgets showing them.
+    pub players: RefCell<Vec<(glib::WeakRef<gtk::Widget>, std::rc::Weak<LoopingVideo>)>>,
+    pub players_update_queued: Cell<bool>,
+}
+
+impl AppState {
+    pub(crate) fn new(
+        window: adw::ApplicationWindow,
+        accounts: AccountStore,
+        cmd_tx: async_channel::Sender<Command>,
+        runtime: Arc<tokio::runtime::Runtime>,
+        ui_tx: async_channel::Sender<UiEvent>,
+    ) -> Rc<Self> {
+        crate::style::install();
+
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+
+        // -- login -------------------------------------------------------
+        let login_clamp = adw::Clamp::new();
+        login_clamp.set_maximum_size(380);
+        login_clamp.set_valign(gtk::Align::Center);
+        let login_form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        login_form.set_margin_start(24);
+        login_form.set_margin_end(24);
+
+        let login_title = gtk::Label::new(Some("kylecord"));
+        login_title.add_css_class("title-1");
+        let login_subtitle = gtk::Label::new(Some("Sign in with a Discord user token"));
+        login_subtitle.add_css_class("dim-label");
+        login_subtitle.set_wrap(true);
+        login_subtitle.set_margin_bottom(12);
+
+        let token_entry = gtk::PasswordEntry::new();
+        token_entry.set_show_peek_icon(true);
+        token_entry.set_placeholder_text(Some("User token"));
+
+        let label_entry = gtk::Entry::new();
+        label_entry.set_placeholder_text(Some("Label (optional)"));
+
+        let login_button = gtk::Button::with_label("Add account");
+        login_button.add_css_class("suggested-action");
+        login_button.add_css_class("pill");
+        login_button.set_halign(gtk::Align::Center);
+        login_button.set_margin_top(6);
+
+        let login_cancel = gtk::Button::with_label("Cancel");
+        login_cancel.add_css_class("flat");
+        login_cancel.set_halign(gtk::Align::Center);
+        login_cancel.set_visible(false);
+
+        let login_error = gtk::Label::new(None);
+        login_error.add_css_class("error");
+        login_error.set_wrap(true);
+        login_error.set_visible(false);
+
+        login_form.append(&login_title);
+        login_form.append(&login_subtitle);
+        login_form.append(&token_entry);
+        login_form.append(&label_entry);
+        login_form.append(&login_button);
+        login_form.append(&login_cancel);
+        login_form.append(&login_error);
+        login_clamp.set_child(Some(&login_form));
+
+        let login_page = adw::ToolbarView::new();
+        login_page.add_top_bar(&adw::HeaderBar::new());
+        login_page.set_content(Some(&login_clamp));
+        stack.add_named(&login_page, Some("login"));
+
+        // -- server rail -------------------------------------------------
+        let guild_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        guild_box.set_margin_top(10);
+        guild_box.set_margin_bottom(10);
+        guild_box.set_valign(gtk::Align::Start);
+        let guild_scroll = gtk::ScrolledWindow::new();
+        guild_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::External);
+        guild_scroll.set_width_request(72);
+        guild_scroll.set_child(Some(&guild_box));
+        guild_scroll.add_css_class("kc-rail");
+
+        // -- channel sidebar ---------------------------------------------
+        let guild_name_label = gtk::Label::new(None);
+        guild_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        guild_name_label.add_css_class("heading");
+
+        let sidebar_header = adw::HeaderBar::new();
+        sidebar_header.set_show_end_title_buttons(false);
+        sidebar_header.set_show_start_title_buttons(false);
+        sidebar_header.set_title_widget(Some(&guild_name_label));
+
+        let channel_box = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        channel_box.set_margin_top(6);
+        channel_box.set_margin_bottom(8);
+        channel_box.set_margin_start(8);
+        channel_box.set_margin_end(8);
+        channel_box.set_valign(gtk::Align::Start);
+        let channel_scroll = gtk::ScrolledWindow::new();
+        channel_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        channel_scroll.set_vexpand(true);
+        channel_scroll.set_child(Some(&channel_box));
+
+        // Voice connected card. It stays visible for as long as the account
+        // has a voice session, whichever channel is being browsed.
+        let voice_panel = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        voice_panel.add_css_class("card");
+        voice_panel.set_margin_start(8);
+        voice_panel.set_margin_end(8);
+        voice_panel.set_margin_top(4);
+        voice_panel.set_margin_bottom(6);
+
+        let voice_connected = gtk::Label::new(Some("Voice Connected"));
+        voice_connected.set_xalign(0.0);
+        voice_connected.add_css_class("caption-heading");
+        voice_connected.add_css_class("success");
+
+        let voice_channel_label = gtk::Label::new(None);
+        voice_channel_label.set_xalign(0.0);
+        voice_channel_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        voice_channel_label.add_css_class("caption");
+        voice_channel_label.add_css_class("dim-label");
+
+        let voice_status_label = gtk::Label::new(None);
+        voice_status_label.set_xalign(0.0);
+        voice_status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        voice_status_label.add_css_class("dim-label");
+        voice_status_label.add_css_class("caption");
+        voice_status_label.set_visible(false);
+
+        let voice_camera = toggle_icon_button("camera-video-symbolic", "Turn On Camera");
+        let voice_screen = toggle_icon_button("video-display-symbolic", "Share Your Screen");
+        let capture_button = icon_button("emblem-system-symbolic", "Capture Quality");
+        let voice_leave = icon_button("call-stop-symbolic", "Disconnect");
+        voice_leave.add_css_class("error");
+
+        let voice_text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        voice_text.set_hexpand(true);
+        voice_text.append(&voice_connected);
+        voice_text.append(&voice_channel_label);
+        let voice_top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        voice_top.append(&voice_text);
+        voice_top.append(&voice_leave);
+
+        let voice_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        voice_buttons.set_homogeneous(true);
+        voice_buttons.append(&voice_camera);
+        voice_buttons.append(&voice_screen);
+        voice_buttons.append(&capture_button);
+
+        let voice_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        voice_content.set_margin_top(8);
+        voice_content.set_margin_bottom(8);
+        voice_content.set_margin_start(10);
+        voice_content.set_margin_end(8);
+        voice_content.append(&voice_top);
+        voice_content.append(&voice_status_label);
+        voice_content.append(&voice_buttons);
+        voice_panel.append(&voice_content);
+        voice_panel.set_visible(false);
+
+        // User bar, fixed at the bottom of the sidebar. The avatar and name
+        // open the status and account menu.
+        let user_avatar = adw::Avatar::new(32, None, true);
+        let user_avatar_slot = gtk::Overlay::new();
+        user_avatar_slot.set_child(Some(&user_avatar));
+
+        let user_name_label = gtk::Label::new(None);
+        user_name_label.set_xalign(0.0);
+        user_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        user_name_label.add_css_class("heading");
+
+        let user_status_label = gtk::Label::new(Some("Offline"));
+        user_status_label.set_xalign(0.0);
+        user_status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        user_status_label.add_css_class("dim-label");
+        user_status_label.add_css_class("caption");
+
+        let user_text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        user_text.set_valign(gtk::Align::Center);
+        user_text.append(&user_name_label);
+        user_text.append(&user_status_label);
+
+        let user_identity = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        user_identity.append(&user_avatar_slot);
+        user_identity.append(&user_text);
+
+        let account_button = gtk::MenuButton::new();
+        account_button.add_css_class("flat");
+        account_button.set_hexpand(true);
+        account_button.set_child(Some(&user_identity));
+        account_button.set_tooltip_text(Some("Status and accounts"));
+        account_button.set_direction(gtk::ArrowType::Up);
+        let account_popover = gtk::Popover::new();
+        let account_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        account_popover_box.set_margin_top(6);
+        account_popover_box.set_margin_bottom(6);
+        account_popover_box.set_margin_start(6);
+        account_popover_box.set_margin_end(6);
+        account_popover_box.set_width_request(260);
+        account_popover.set_child(Some(&account_popover_box));
+        account_button.set_popover(Some(&account_popover));
+
+        let voice_mute = toggle_icon_button("microphone-sensitivity-muted-symbolic", "Mute");
+        voice_mute.set_sensitive(false);
+        let voice_deafen = toggle_icon_button("audio-volume-muted-symbolic", "Deafen");
+        voice_deafen.set_sensitive(false);
+
+        let user_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        user_bar.add_css_class("kc-userbar");
+        let user_bar_inner = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        user_bar_inner.set_margin_start(4);
+        user_bar_inner.set_margin_end(6);
+        user_bar_inner.set_margin_top(4);
+        user_bar_inner.set_margin_bottom(4);
+        user_bar_inner.set_hexpand(true);
+        user_bar_inner.append(&account_button);
+        user_bar_inner.append(&voice_mute);
+        user_bar_inner.append(&voice_deafen);
+        user_bar.append(&user_bar_inner);
+
+        let sidebar_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar_body.append(&channel_scroll);
+        sidebar_body.append(&voice_panel);
+        sidebar_body.append(&user_bar);
+
+        let channel_sidebar = adw::ToolbarView::new();
+        channel_sidebar.add_top_bar(&sidebar_header);
+        channel_sidebar.set_content(Some(&sidebar_body));
+        // Ellipsised labels still report their full text as natural width,
+        // so the sidebar is clamped to a fixed width.
+        let sidebar_clamp = adw::Clamp::new();
+        sidebar_clamp.set_maximum_size(SIDEBAR_WIDTH);
+        sidebar_clamp.set_tightening_threshold(SIDEBAR_WIDTH);
+        sidebar_clamp.set_width_request(SIDEBAR_WIDTH);
+        sidebar_clamp.set_hexpand(false);
+        sidebar_clamp.set_child(Some(&channel_sidebar));
+        channel_sidebar.add_css_class("sidebar-pane");
+
+        // -- content header ----------------------------------------------
+        let header_icon = gtk::Image::new();
+        header_icon.add_css_class("dim-label");
+
+        let channel_title_label = gtk::Label::new(None);
+        channel_title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        channel_title_label.add_css_class("heading");
+
+        let channel_topic_label = gtk::Label::new(None);
+        channel_topic_label.set_xalign(0.0);
+        channel_topic_label.set_hexpand(true);
+        channel_topic_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        channel_topic_label.add_css_class("dim-label");
+        channel_topic_label.add_css_class("caption");
+        channel_topic_label.set_margin_start(8);
+
+        let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        title_box.set_margin_start(6);
+        title_box.append(&header_icon);
+        title_box.append(&channel_title_label);
+        title_box.append(&channel_topic_label);
+
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_placeholder_text(Some("Search"));
+        search_entry.set_width_request(180);
+        search_entry.set_valign(gtk::Align::Center);
+
+        let pins_button = icon_button("view-pin-symbolic", "Pinned Messages");
+        let members_toggle = toggle_icon_button("system-users-symbolic", "Member List");
+        members_toggle.set_active(true);
+
+        let content_header = adw::HeaderBar::new();
+        content_header.set_show_title(false);
+        content_header.pack_start(&title_box);
+        content_header.pack_end(&search_entry);
+        content_header.pack_end(&members_toggle);
+        content_header.pack_end(&pins_button);
+
+        let banner = adw::Banner::new("");
+        banner.set_revealed(false);
+
+        // -- messages ----------------------------------------------------
+        let messages_list = gtk::ListBox::new();
+        messages_list.set_selection_mode(gtk::SelectionMode::None);
+        messages_list.add_css_class("kc-messages");
+        messages_list.set_valign(gtk::Align::End);
+
+        let history_spinner = gtk::Spinner::new();
+        history_spinner.set_margin_top(12);
+        history_spinner.set_margin_bottom(12);
+        history_spinner.set_visible(false);
+
+        // The spacer absorbs spare height so a short history sits at the
+        // bottom of the pane, next to the composer.
+        let messages_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        spacer.set_vexpand(true);
+        messages_column.append(&spacer);
+        messages_column.append(&history_spinner);
+        messages_column.append(&messages_list);
+        messages_column.set_margin_bottom(16);
+
+        let messages_scroll = gtk::ScrolledWindow::new();
+        messages_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        messages_scroll.set_vexpand(true);
+        messages_scroll.set_child(Some(&messages_column));
+
+        let chat_placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat_placeholder.set_vexpand(true);
+        let placeholder_scroll = gtk::ScrolledWindow::new();
+        placeholder_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        placeholder_scroll.set_child(Some(&chat_placeholder));
+
+        // Voice channels show who is connected instead of a message list.
+        let voice_view = gtk::Box::new(gtk::Orientation::Vertical, 20);
+        voice_view.set_valign(gtk::Align::Center);
+        voice_view.set_margin_top(24);
+        voice_view.set_margin_bottom(24);
+        voice_view.set_margin_start(24);
+        voice_view.set_margin_end(24);
+        let voice_scroll = gtk::ScrolledWindow::new();
+        voice_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        voice_scroll.set_child(Some(&voice_view));
+
+        // One hover toolbar for the whole list, placed over the hovered row
+        // by `connect_chat`.
+        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toolbar.add_css_class("kc-toolbar");
+        toolbar.set_visible(false);
+        let message_overlay = gtk::Overlay::new();
+        message_overlay.set_child(Some(&messages_scroll));
+        message_overlay.add_overlay(&toolbar);
+
+        let message_stack = gtk::Stack::new();
+        message_stack.add_named(&message_overlay, Some("messages"));
+        message_stack.add_named(&placeholder_scroll, Some("placeholder"));
+        message_stack.add_named(&voice_scroll, Some("voice"));
+        message_stack.set_vexpand(true);
+        // The placeholder page is taller than a short window allows; it must
+        // not set the minimum height of the message list.
+        message_stack.set_vhomogeneous(false);
+
+        // -- composer ----------------------------------------------------
+        let context_label = gtk::Label::new(None);
+        context_label.set_xalign(0.0);
+        context_label.set_hexpand(true);
+        context_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let context_ping = gtk::ToggleButton::with_label("@ ON");
+        context_ping.add_css_class("flat");
+        context_ping.set_active(true);
+        context_ping.set_tooltip_text(Some("Notify the author of the message you reply to"));
+        let context_cancel = icon_button("window-close-symbolic", "Cancel");
+        let context_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        context_bar.add_css_class("kc-composer-bar");
+        context_bar.append(&context_label);
+        context_bar.append(&context_ping);
+        context_bar.append(&context_cancel);
+        context_bar.set_visible(false);
+
+        let upload_tray = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        upload_tray.add_css_class("kc-composer-bar");
+        upload_tray.set_visible(false);
+
+        let composer = gtk::TextView::new();
+        composer.set_wrap_mode(gtk::WrapMode::WordChar);
+        composer.set_accepts_tab(false);
+        composer.set_top_margin(10);
+        composer.set_bottom_margin(10);
+        composer.set_left_margin(4);
+        composer.set_right_margin(4);
+
+        let composer_hint = gtk::Label::new(None);
+        composer_hint.set_xalign(0.0);
+        composer_hint.set_margin_start(4);
+        composer_hint.add_css_class("dim-label");
+        composer_hint.set_can_target(false);
+        composer_hint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+        let composer_scroll = gtk::ScrolledWindow::new();
+        composer_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        composer_scroll.set_max_content_height(220);
+        composer_scroll.set_propagate_natural_height(true);
+        composer_scroll.set_child(Some(&composer));
+
+        let composer_overlay = gtk::Overlay::new();
+        composer_overlay.set_hexpand(true);
+        composer_overlay.set_child(Some(&composer_scroll));
+        composer_overlay.add_overlay(&composer_hint);
+
+        let attach_button = icon_button("list-add-symbolic", "Attach Files");
+        attach_button.set_valign(gtk::Align::End);
+        attach_button.set_margin_bottom(4);
+        attach_button.add_css_class("circular");
+
+        let gif_button = gtk::MenuButton::new();
+        gif_button.add_css_class("flat");
+        // A child label instead of `set_label`, which adds a menu arrow.
+        gif_button.set_child(Some(&gtk::Label::new(Some("GIF"))));
+        gif_button.set_tooltip_text(Some("Send a GIF"));
+        gif_button.set_valign(gtk::Align::End);
+        gif_button.set_margin_bottom(4);
+        gif_button.set_direction(gtk::ArrowType::Up);
+
+        let emoji_button = gtk::MenuButton::new();
+        emoji_button.add_css_class("flat");
+        emoji_button.add_css_class("circular");
+        emoji_button.set_tooltip_text(Some("Emoji"));
+        emoji_button.set_valign(gtk::Align::End);
+        emoji_button.set_margin_bottom(4);
+        emoji_button.set_direction(gtk::ArrowType::Up);
+        if icon_available("face-smile-symbolic") {
+            emoji_button.set_icon_name("face-smile-symbolic");
+        } else {
+            emoji_button.set_label("Emoji");
+        }
+
+        let composer_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        composer_box.add_css_class("kc-composer");
+        composer_box.append(&attach_button);
+        composer_box.append(&composer_overlay);
+        composer_box.append(&gif_button);
+        composer_box.append(&emoji_button);
+        // Padding lives on the children so the rounded background reaches
+        // the edges.
+        attach_button.set_margin_start(6);
+        emoji_button.set_margin_end(6);
+
+        let completion_list = gtk::ListBox::new();
+        completion_list.set_selection_mode(gtk::SelectionMode::Browse);
+        completion_list.add_css_class("navigation-sidebar");
+        let completion = gtk::Popover::new();
+        completion.set_child(Some(&completion_list));
+        completion.set_autohide(false);
+        completion.set_can_focus(false);
+        completion.set_has_arrow(false);
+        completion.set_position(gtk::PositionType::Top);
+        completion.set_halign(gtk::Align::Start);
+        completion.set_parent(&composer_box);
+
+        let blocked_label = gtk::Label::new(Some(
+            "You do not have permission to send messages in this channel.",
+        ));
+        blocked_label.add_css_class("dim-label");
+        blocked_label.set_margin_top(12);
+        blocked_label.set_margin_bottom(12);
+        blocked_label.set_visible(false);
+
+        let typing_label = gtk::Label::new(None);
+        typing_label.set_xalign(0.0);
+        typing_label.set_margin_start(8);
+        typing_label.add_css_class("caption");
+        typing_label.add_css_class("dim-label");
+        typing_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        // Reserve the line so the composer does not jump when someone types.
+        typing_label.set_height_request(18);
+
+        let composer_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        composer_area.set_margin_start(16);
+        composer_area.set_margin_end(16);
+        composer_area.set_margin_bottom(4);
+        composer_area.append(&context_bar);
+        composer_area.append(&upload_tray);
+        composer_area.append(&composer_box);
+        composer_area.append(&blocked_label);
+        composer_area.append(&typing_label);
+
+        let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat_column.append(&message_stack);
+        chat_column.append(&composer_area);
+
+        // -- member list -------------------------------------------------
+        let members_count_label = gtk::Label::new(None);
+        members_count_label.set_xalign(0.0);
+        members_count_label.add_css_class("caption");
+        members_count_label.add_css_class("dim-label");
+        members_count_label.set_margin_top(10);
+        members_count_label.set_margin_start(14);
+        members_count_label.set_margin_bottom(2);
+
+        let members_box = gtk::Box::new(gtk::Orientation::Vertical, 1);
+        members_box.set_margin_bottom(8);
+        members_box.set_margin_start(8);
+        members_box.set_margin_end(8);
+        members_box.set_valign(gtk::Align::Start);
+        let members_scroll = gtk::ScrolledWindow::new();
+        members_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        members_scroll.set_vexpand(true);
+        members_scroll.set_child(Some(&members_box));
+
+        let members_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        members_panel.append(&members_count_label);
+        members_panel.append(&members_scroll);
+
+        let split = adw::OverlaySplitView::new();
+        split.set_sidebar_position(gtk::PackType::End);
+        split.set_content(Some(&chat_column));
+        split.set_sidebar(Some(&members_panel));
+        split.set_min_sidebar_width(220.0);
+        split.set_max_sidebar_width(260.0);
+        split.set_show_sidebar(false);
+
+        // -- friends page ------------------------------------------------
+        let friends_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let friends_clamp = adw::Clamp::new();
+        friends_clamp.set_maximum_size(760);
+        friends_clamp.set_child(Some(&friends_box));
+        let friends_scroll = gtk::ScrolledWindow::new();
+        friends_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        friends_scroll.set_child(Some(&friends_clamp));
+
+        let content_stack = gtk::Stack::new();
+        content_stack.add_named(&split, Some("chat"));
+        content_stack.add_named(&friends_scroll, Some("friends"));
+
+        let content = adw::ToolbarView::new();
+        content.add_top_bar(&content_header);
+        content.add_top_bar(&banner);
+        content.set_content(Some(&content_stack));
+        content.set_hexpand(true);
+
+        let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        body.append(&guild_scroll);
+        body.append(&sidebar_clamp);
+        body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        body.append(&content);
+        stack.add_named(&body, Some("chat"));
+
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&stack));
+        window.set_content(Some(&toasts));
+        window.set_size_request(720, 420);
+
+        let images = ImageCache::new(runtime.clone());
+
+        Rc::new(Self {
+            window,
+            stack,
+            toasts,
+            token_entry,
+            label_entry,
+            login_button,
+            login_error,
+            login_cancel,
+            guild_box,
+            guild_name_label,
+            channel_box,
+            account_button,
+            account_popover,
+            account_popover_box,
+            user_avatar,
+            user_avatar_slot,
+            user_name_label,
+            user_status_label,
+            voice_panel,
+            voice_channel_label,
+            voice_status_label,
+            voice_leave,
+            voice_mute,
+            voice_deafen,
+            voice_camera,
+            voice_screen,
+            capture_button,
+            banner,
+            header_icon,
+            channel_title_label,
+            channel_topic_label,
+            search_entry,
+            pins_button,
+            members_toggle,
+            content_stack,
+            split,
+            messages_scroll,
+            message_stack: message_stack.clone(),
+            message_overlay,
+            toolbar,
+            hover: RefCell::new(crate::chat::Hover::default()),
+            messages_list,
+            history_spinner,
+            chat_placeholder,
+            voice_view,
+            voice_tiles: RefCell::new(HashMap::new()),
+            videos: RefCell::new(HashMap::new()),
+            last_channel_click: Cell::new(None),
+            typing_label,
+            composer_area,
+            composer_box,
+            composer,
+            composer_hint,
+            context_bar,
+            context_label,
+            context_ping,
+            context_cancel,
+            upload_tray,
+            attach_button,
+            gif_button,
+            emoji_button,
+            blocked_label,
+            completion,
+            completion_list,
+            friends_box,
+            members_box,
+            members_count_label,
+            model: RefCell::new(Model {
+                accounts,
+                sessions: HashMap::new(),
+                active: None,
+            }),
+            cmd_tx,
+            runtime,
+            ui_tx,
+            images,
+            capture: RefCell::new(CapturePreferences::load()),
+            window_identifier: RefCell::new(None),
+            chat: RefCell::new(ChatView::default()),
+            show_members: Cell::new(true),
+            members_guard: Cell::new(false),
+            speaking: RefCell::new(HashSet::new()),
+            voice_rows: RefCell::new(HashMap::new()),
+            sidebar_redraw_queued: Cell::new(false),
+            players: RefCell::new(Vec::new()),
+            players_update_queued: Cell::new(false),
+        })
+    }
+
+    /// Shows a transient message at the bottom of the window. Empty text is
+    /// ignored, so callers can pass a cleared status through.
+    pub(crate) fn set_status(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let toast = adw::Toast::new(text);
+        toast.set_timeout(4);
+        self.toasts.add_toast(toast);
+    }
+
+    /// Runs `future` on the Tokio runtime, then `done` with its result on the
+    /// GTK thread.
+    pub(crate) fn spawn<T: Send + 'static>(
+        self: &Rc<Self>,
+        future: impl std::future::Future<Output = T> + Send + 'static,
+        done: impl FnOnce(&Rc<AppState>, T) + Send + 'static,
+    ) {
+        let ui = self.ui_tx.clone();
+        self.runtime.spawn(async move {
+            let result = future.await;
+            let _ = ui
+                .send(UiEvent::Run(Box::new(move |app| done(app, result))))
+                .await;
+        });
+    }
+
+    /// The active account with its REST client and store.
+    pub(crate) fn active(&self) -> Option<(AccountId, kc_http::HttpClient, kc_state::Store)> {
+        let model = self.model.borrow();
+        let active = model.active?;
+        let session = model.sessions.get(&active)?;
+        Some((active, session.http.clone(), session.store.clone()))
+    }
+
+    /// Reads from the active session.
+    pub(crate) fn with_session<R>(&self, read: impl FnOnce(&Session) -> R) -> Option<R> {
+        let model = self.model.borrow();
+        let session = model.sessions.get(&model.active?)?;
+        Some(read(session))
+    }
+
+    /// Mutates the active session.
+    pub(crate) fn with_session_mut<R>(&self, write: impl FnOnce(&mut Session) -> R) -> Option<R> {
+        let mut model = self.model.borrow_mut();
+        let active = model.active?;
+        let session = model.sessions.get_mut(&active)?;
+        Some(write(session))
+    }
+}

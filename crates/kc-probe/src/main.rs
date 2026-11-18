@@ -82,6 +82,22 @@ async fn main() -> Result<()> {
             // READY and prints them.
             watch(token, true).await?;
         }
+        "playback-test" => {
+            playback_test().await?;
+        }
+        "video-test" => {
+            // Optional argument: lose every Nth packet (0 for none).
+            let lose_every = filtered
+                .get(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(41);
+            video_test(lose_every).await?;
+        }
+        "raw" => {
+            let path = filtered.get(1).context("usage: raw /api/path")?;
+            let value = http.get_raw(path).await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         "messages" => {
             let channel_id = parse_id(filtered.get(1))?;
             let limit = filtered
@@ -198,11 +214,201 @@ async fn main() -> Result<()> {
             let audio = !filtered.iter().any(|arg| arg == "--no-audio");
             voice(token, guild_id, channel_id, camera, stream, screen, audio).await?;
         }
+        "watch-stream" => {
+            let guild_id = parse_id(filtered.get(1))?;
+            let channel_id = parse_id(filtered.get(2))?;
+            let owner = parse_id(filtered.get(3))?;
+            let seconds = filtered
+                .get(4)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(20);
+            watch_stream(token, guild_id, channel_id, owner, seconds).await?;
+        }
         other => bail!(
             "unknown command {other:?}; try user|guilds|channels|dms|messages|send|watch|voice"
         ),
     }
 
+    Ok(())
+}
+
+/// Runs encoded test video through the receive path (packets, loss,
+/// retransmission, frame assembly, decoding) without a network.
+async fn video_test(lose_every: u32) -> Result<()> {
+    use kc_voice::video_rx::{Assembled, Packet, VideoStream};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let frames = kc_media::decode::test_pattern(240, 60)?;
+    let keyframes = frames
+        .iter()
+        .filter(|frame| kc_voice::rtp::is_keyframe(frame))
+        .count();
+    println!("encoded {} frames ({keyframes} keyframes)", frames.len());
+
+    let feed = Arc::new(kc_media::decode::VideoFeed::default());
+    let start = Instant::now();
+    let mut stream = VideoStream::new(1, start);
+    let mut sequence = 65_000u16;
+    let mut sent = 0u32;
+    let (mut repaired, mut lost, mut held, mut admitted, mut requested) = (0, 0, 0, 0u64, 0);
+    // Packets "retransmitted" a little later: (when, packet).
+    let mut late: Vec<(Instant, Packet)> = Vec::new();
+    let mut decoder = None;
+
+    for (index, frame) in frames.iter().enumerate() {
+        let now = start + Duration::from_millis(index as u64 * 33);
+        let mut ready = Vec::new();
+        late.retain(|(due, packet)| {
+            if *due <= now {
+                stream.push(packet.clone(), now, &mut ready);
+                false
+            } else {
+                true
+            }
+        });
+        for (payload, marker) in kc_voice::rtp::packetize(frame, 1200) {
+            let packet = Packet {
+                sequence,
+                timestamp: index as u32 * 3000,
+                marker,
+                payload,
+            };
+            sequence = sequence.wrapping_add(1);
+            sent += 1;
+            // Every Nth packet goes missing; every other one of those is
+            // retransmitted 60 ms later, the rest never arrive.
+            if lose_every > 0 && sent.is_multiple_of(lose_every) {
+                if (sent / lose_every).is_multiple_of(2) {
+                    repaired += 1;
+                    late.push((now + Duration::from_millis(60), packet));
+                }
+                continue;
+            }
+            stream.push(packet, now, &mut ready);
+        }
+        stream.poll(now, &mut ready);
+        let _ = stream.missing(now);
+        for item in ready {
+            match item {
+                Assembled::Lost => lost += 1,
+                Assembled::Frame(frame, _) => {
+                    if stream.admit(&frame) {
+                        admitted += 1;
+                        let keyframe = kc_voice::rtp::is_keyframe(&frame);
+                        feed.push(frame, keyframe);
+                    } else {
+                        held += 1;
+                    }
+                }
+            }
+        }
+        if stream.should_request_keyframe(now, Duration::from_millis(600)) {
+            requested += 1;
+        }
+        // The display attaches late, as it does in the app.
+        if index == 20 {
+            decoder = Some(kc_media::decode::VideoDecoder::start_headless(
+                feed.clone(),
+            )?);
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let decoded = decoder
+        .as_ref()
+        .map(|decoder| decoder.decoded())
+        .unwrap_or(0);
+    println!(
+        "packets sent {sent}, retransmitted {repaired}, losses {lost}, frames held for a keyframe {held}, keyframe requests {requested}"
+    );
+    println!("frames passed to the decoder {admitted}, decoded {decoded}");
+    if decoded != admitted {
+        bail!("decoder produced {decoded} of {admitted} frames");
+    }
+    Ok(())
+}
+
+/// Plays three seconds of a synthetic speaker through the real receive path
+/// (jitter buffer, decoder, mixer, sound device) and records the output
+/// device's monitor to check that it came out unbroken. Arrival times are
+/// jittered and some packets are dropped, as on a real network.
+///
+/// Point it at a null sink to run silently:
+/// `KYLECORD_PLAYBACK_DEVICE=<sink> KYLECORD_MONITOR_DEVICE=<sink>.monitor`.
+async fn playback_test() -> Result<()> {
+    use std::sync::{Arc, Mutex};
+    const FRAME: usize = 1920;
+
+    let levels: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = levels.clone();
+    let _monitor = kc_media::audio::Capture::start_monitor(move |frame| {
+        let energy: f64 = frame.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        if let Ok(mut levels) = sink.lock() {
+            levels.push((energy / frame.len() as f64).sqrt());
+        }
+    })?;
+    let remote = kc_media::receive::RemoteAudio::start()?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let mut encoder = kc_media::audio::OpusEncoder::new()?;
+    let total = 150usize;
+    let mut dropped = 0;
+    let start = tokio::time::Instant::now();
+    for index in 0..total {
+        let pcm: Vec<i16> = (0..FRAME / 2)
+            .flat_map(|sample| {
+                let time = (index * FRAME / 2 + sample) as f32 / 48_000.0;
+                let value = ((time * 440.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
+                [value, value]
+            })
+            .collect();
+        let packet = encoder.encode(&pcm)?;
+        // Deterministic jitter of up to +/-15 ms around each 20 ms slot.
+        let jitter = ((index * 7919) % 31) as i64 - 15;
+        let due = (index as i64 * 20 + jitter).max(0) as u64;
+        tokio::time::sleep_until(start + std::time::Duration::from_millis(due)).await;
+        if index % 25 == 24 {
+            dropped += 1;
+            continue;
+        }
+        remote.push(1, index as u16, &packet);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    let stats = remote.stats();
+    let levels = levels
+        .lock()
+        .map(|levels| levels.clone())
+        .unwrap_or_default();
+    let voiced: Vec<bool> = levels.iter().map(|level| *level > 200.0).collect();
+    let first = voiced.iter().position(|v| *v);
+    let last = voiced.iter().rposition(|v| *v);
+    println!(
+        "sent {} packets ({} dropped on purpose)",
+        total - dropped,
+        dropped
+    );
+    println!("receiver: {stats:?}");
+    match (first, last) {
+        (Some(first), Some(last)) => {
+            let span = &voiced[first..=last];
+            let gaps = span.iter().filter(|v| !**v).count();
+            let mut longest = 0;
+            let mut run = 0;
+            for v in span {
+                run = if *v { 0 } else { run + 1 };
+                longest = longest.max(run);
+            }
+            println!(
+                "monitor: tone heard for {} ms of a {} ms span; {} silent frames inside it, longest gap {} ms",
+                (span.len() - gaps) * 20,
+                span.len() * 20,
+                gaps,
+                longest * 20
+            );
+        }
+        _ => println!("monitor: no tone heard ({} frames captured)", levels.len()),
+    }
     Ok(())
 }
 
@@ -259,6 +465,225 @@ async fn watch(token: Token, dms_only: bool) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Joins a voice channel muted and without a microphone, watches `owner`'s
+/// stream for a while and reports what video arrived and decoded. Cameras
+/// in the channel are counted too.
+async fn watch_stream(
+    token: Token,
+    guild_id: Snowflake,
+    channel_id: Snowflake,
+    owner: Snowflake,
+    seconds: u64,
+) -> Result<()> {
+    use kc_media::decode::{VideoDecoder, VideoFeed};
+    use kc_voice::{VoiceEvent, VoiceParams};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// One sender's video: its feed, decoder, keyframes and bytes so far.
+    struct Video {
+        feed: Arc<VideoFeed>,
+        decoder: Option<VideoDecoder>,
+        keyframes: u64,
+        bytes: usize,
+    }
+    #[derive(Default)]
+    struct Videos(HashMap<Snowflake, Video>);
+    impl Videos {
+        fn push(&mut self, label: &str, user_id: Snowflake, frame: Vec<u8>, keyframe: bool) {
+            let video = self.0.entry(user_id).or_insert_with(|| {
+                println!(
+                    "{label}: first frame from {user_id} ({} bytes, keyframe={keyframe})",
+                    frame.len()
+                );
+                let feed = Arc::new(VideoFeed::default());
+                let decoder = VideoDecoder::start_headless(feed.clone())
+                    .map_err(|error| eprintln!("decoder: {error}"))
+                    .ok();
+                Video {
+                    feed,
+                    decoder,
+                    keyframes: 0,
+                    bytes: 0,
+                }
+            });
+            video.keyframes += u64::from(keyframe);
+            video.bytes += frame.len();
+            video.feed.push(frame, keyframe);
+        }
+
+        fn report(&self, label: &str) {
+            for (user_id, video) in &self.0 {
+                println!(
+                    "{label} {user_id}: {} frames ({} keyframes, {} kB), {} decoded",
+                    video.feed.pushed(),
+                    video.keyframes,
+                    video.bytes / 1000,
+                    video
+                        .decoder
+                        .as_ref()
+                        .map(|decoder| decoder.decoded())
+                        .unwrap_or(0)
+                );
+            }
+        }
+    }
+
+    let (gateway, mut events, _task) = Gateway::new(token).start();
+    let mut me: Option<Snowflake> = None;
+    let mut session_id: Option<String> = None;
+    let mut server: Option<(String, String)> = None;
+    let key = format!("guild:{guild_id}:{channel_id}:{owner}");
+
+    let (voice_tx, mut voice_events) = mpsc::unbounded_channel();
+    let (stream_tx, mut stream_events) = mpsc::unbounded_channel();
+    let mut stream_tx = Some(stream_tx);
+    let mut voice_handle: Option<kc_voice::VoiceHandle> = None;
+    let mut stream_handle: Option<kc_voice::VoiceHandle> = None;
+    let mut stream_rtc: Option<Snowflake> = None;
+    let mut stream_server: Option<(String, String)> = None;
+    let mut cameras = Videos::default();
+    let mut streams = Videos::default();
+    let mut stream_audio = 0u64;
+
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(seconds + 15));
+    tokio::pin!(deadline);
+    let mut report = tokio::time::interval(std::time::Duration::from_secs(4));
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            _ = tokio::signal::ctrl_c() => break,
+            _ = report.tick() => {
+                cameras.report("camera");
+                streams.report("stream");
+            }
+            event = events.recv() => {
+                let Some(event) = event else { bail!("gateway ended") };
+                let GatewayEvent::Dispatch { name, data } = event else { continue };
+                match name.as_str() {
+                    "READY" => {
+                        me = data["user"]["id"].as_str().and_then(|id| id.parse().ok());
+                        println!("logged in; joining voice channel {channel_id}");
+                        gateway.update_voice_state(Some(guild_id), Some(channel_id), true, false, false);
+                    }
+                    "VOICE_STATE_UPDATE" => {
+                        let user_id = data["user_id"].as_str().and_then(|id| id.parse::<Snowflake>().ok());
+                        if user_id == me && session_id.is_none() {
+                            session_id = data["session_id"].as_str().map(str::to_owned);
+                        }
+                    }
+                    "VOICE_SERVER_UPDATE" => {
+                        if let (Some(token), Some(endpoint)) = (data["token"].as_str(), data["endpoint"].as_str()) {
+                            server = Some((token.to_owned(), endpoint.to_owned()));
+                        }
+                    }
+                    "STREAM_CREATE" if data["stream_key"].as_str() == Some(key.as_str()) => {
+                        stream_rtc = data["rtc_server_id"].as_str().and_then(|id| id.parse().ok());
+                        println!("stream create: rtc={stream_rtc:?} viewers={}", data["viewer_ids"]);
+                    }
+                    "STREAM_SERVER_UPDATE" if data["stream_key"].as_str() == Some(key.as_str()) => {
+                        if let (Some(token), Some(endpoint)) = (data["token"].as_str(), data["endpoint"].as_str()) {
+                            stream_server = Some((token.to_owned(), endpoint.to_owned()));
+                        }
+                    }
+                    "STREAM_DELETE" if data["stream_key"].as_str() == Some(key.as_str()) => {
+                        println!("stream delete: reason={}", data["reason"]);
+                    }
+                    _ => {}
+                }
+                if voice_handle.is_none()
+                    && let (Some(user_id), Some(session), Some((token, endpoint))) = (me, session_id.clone(), server.clone())
+                {
+                    let params = VoiceParams {
+                        server_id: guild_id,
+                        channel_id,
+                        user_id,
+                        session_id: session,
+                        token,
+                        endpoint,
+                        video: true,
+                        screen: false,
+                        dave_channel_id: channel_id,
+                        receive_only: false,
+                    };
+                    voice_handle = Some(kc_voice::connect(params, voice_tx.clone()).await?);
+                }
+                if stream_handle.is_none()
+                    && let (Some(user_id), Some(session), Some(rtc_id), Some((token, endpoint))) =
+                        (me, session_id.clone(), stream_rtc, stream_server.clone())
+                    && let Some(events) = stream_tx.take()
+                {
+                    let params = VoiceParams {
+                        server_id: rtc_id,
+                        channel_id,
+                        user_id,
+                        session_id: session,
+                        token,
+                        endpoint,
+                        video: true,
+                        screen: true,
+                        dave_channel_id: Snowflake::new(rtc_id.get().saturating_sub(1)),
+                        receive_only: true,
+                    };
+                    println!("connecting to the stream");
+                    stream_handle = Some(kc_voice::connect(params, events).await?);
+                }
+            }
+            event = voice_events.recv() => match event {
+                Some(VoiceEvent::Ready { ssrc, mode, dave_version, .. }) => {
+                    println!("voice ready: ssrc={ssrc} mode={mode} dave={dave_version}; asking to watch {key}");
+                    gateway.stream_watch(&key);
+                }
+                Some(VoiceEvent::Video { user_id, frame, keyframe, .. }) => {
+                    cameras.push("camera", user_id, frame, keyframe);
+                }
+                Some(VoiceEvent::VideoEnded { user_id }) => println!("camera ended: {user_id}"),
+                Some(VoiceEvent::Error(error)) => bail!("voice error: {error}"),
+                Some(VoiceEvent::Closed { code, reason }) => bail!("voice closed: {code:?} {reason}"),
+                Some(_) => {}
+                None => bail!("voice ended"),
+            },
+            event = stream_events.recv() => match event {
+                Some(VoiceEvent::Ready { ssrc, mode, dave_version, .. }) => {
+                    println!("stream ready: ssrc={ssrc} mode={mode} dave={dave_version}");
+                }
+                Some(VoiceEvent::DaveReady) => println!("stream DAVE ready"),
+                Some(VoiceEvent::Video { user_id, frame, keyframe, .. }) => {
+                    streams.push("stream", user_id, frame, keyframe);
+                }
+                Some(VoiceEvent::VideoEnded { user_id }) => println!("stream video ended: {user_id}"),
+                Some(VoiceEvent::Audio { .. }) => stream_audio += 1,
+                Some(VoiceEvent::Error(error)) => {
+                    println!("stream error: {error}");
+                    break;
+                }
+                Some(VoiceEvent::Closed { code, reason }) => {
+                    println!("stream closed: {code:?} {reason}");
+                    break;
+                }
+                Some(_) => {}
+                None => {}
+            },
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    cameras.report("camera");
+    streams.report("stream");
+    println!("stream audio packets: {stream_audio}");
+    if let Some(handle) = stream_handle {
+        handle.disconnect().await;
+        gateway.stream_delete(&key);
+    }
+    if let Some(handle) = voice_handle {
+        handle.disconnect().await;
+    }
+    gateway.update_voice_state(Some(guild_id), None, false, false, false);
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
     Ok(())
 }
 
@@ -336,6 +761,7 @@ async fn voice(
         video: true,
         screen: false,
         dave_channel_id: channel_id,
+        receive_only: false,
     };
 
     let (voice_tx, mut voice_events) = mpsc::unbounded_channel();
@@ -362,7 +788,10 @@ async fn voice(
                     Some(VoiceEvent::Ready { ssrc, video_ssrc, rtx_ssrc, mode, dave_version }) => {
                         println!("voice ready: ssrc={ssrc} video={video_ssrc:?} rtx={rtx_ssrc:?} mode={mode} dave={dave_version}");
                         if with_audio {
-                            match kc_media::audio::VoiceAudio::start(handle.clone()) {
+                            let on_speaking = |speaking: bool| {
+                                println!("microphone {}", if speaking { "speaking" } else { "quiet" });
+                            };
+                            match kc_media::audio::VoiceAudio::start(handle.clone(), on_speaking) {
                                 Ok(engine) => audio = Some(engine),
                                 Err(error) => eprintln!("audio unavailable: {error}"),
                             }
@@ -385,17 +814,18 @@ async fn voice(
                             }
                         }
                     }
-                    Some(VoiceEvent::Audio { user_id, opus, timestamp, .. }) => {
+                    Some(VoiceEvent::Audio { user_id, opus, sequence, .. }) => {
                         if let Some(audio) = &audio {
-                            audio.push_remote(user_id.get(), &opus, timestamp);
+                            audio.push_remote(user_id.get(), sequence, &opus);
                         }
                     }
                     Some(VoiceEvent::Video { user_id, frame, keyframe, .. }) => {
                         println!("video from {user_id}: {} bytes keyframe={keyframe}", frame.len());
                     }
                     Some(VoiceEvent::Speaking { user_id, speaking, .. }) => {
-                        if speaking { println!("{user_id} speaking"); }
+                        println!("{user_id} {}", if speaking { "speaking" } else { "stopped" });
                     }
+                    Some(VoiceEvent::VideoEnded { user_id }) => println!("video ended: {user_id}"),
                     Some(VoiceEvent::DaveReady) => println!("DAVE ready"),
                     Some(VoiceEvent::ForceKeyframe) => println!("force keyframe requested"),
                     Some(VoiceEvent::KeyframeRequest { user_id, .. }) => {
@@ -449,6 +879,7 @@ async fn voice(
                                 video: true,
                                 screen: true,
                                 dave_channel_id: Snowflake::new(rtc_id.get().saturating_sub(1)),
+                                receive_only: false,
                             };
                             let (stream_tx, mut stream_events) = mpsc::unbounded_channel();
                             match kc_voice::connect(params, stream_tx).await {
