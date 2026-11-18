@@ -15,6 +15,8 @@ pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 
 pub const KEYFRAME_INTERVALS: [u32; 4] = [2, 4, 6, 10];
 
+pub const DROP_AFTER_MS: [u32; 6] = [0, 100, 250, 500, 1000, 2000];
+
 pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
@@ -29,6 +31,11 @@ pub struct CapturePreferences {
     pub bitrate_kbps: Option<u32>,
     /// Seconds between IDR keyframes.
     pub keyframe_secs: u32,
+    /// Drop a frame when it has waited this long beyond the configured delay.
+    /// Zero disables dropping.
+    pub drop_frames_after_ms: u32,
+    /// Drop old frames in the capture queue instead of accumulating latency.
+    pub leaky_queue: bool,
     /// Fixed Go Live buffering delay in milliseconds.
     pub stream_delay_ms: u64,
     /// Force the software x264 encoder instead of trying VA-API first.
@@ -43,6 +50,8 @@ impl Default for CapturePreferences {
             fps: 30,
             bitrate_kbps: None,
             keyframe_secs: 2,
+            drop_frames_after_ms: 250,
+            leaky_queue: true,
             stream_delay_ms: 0,
             cpu_encoder: false,
         }
@@ -59,6 +68,8 @@ impl CapturePreferences {
                 .bitrate_kbps
                 .unwrap_or_else(|| VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)),
             keyframe_secs: self.keyframe_secs,
+            drop_frames_after_ms: self.drop_frames_after_ms,
+            leaky_queue: self.leaky_queue,
             preset: "ultrafast".into(),
             encoder: if self.cpu_encoder {
                 EncoderPreference::Cpu
@@ -112,6 +123,9 @@ impl CapturePreferences {
         if !KEYFRAME_INTERVALS.contains(&self.keyframe_secs) {
             self.keyframe_secs = 2;
         }
+        if !DROP_AFTER_MS.contains(&self.drop_frames_after_ms) {
+            self.drop_frames_after_ms = 250;
+        }
     }
 }
 
@@ -130,6 +144,8 @@ mod tests {
             settings.bitrate_kbps,
             VideoSettings::automatic_bitrate_kbps(1280, 720, 30)
         );
+        assert_eq!(settings.drop_frames_after_ms, 250);
+        assert!(settings.leaky_queue);
     }
 
     #[test]
@@ -140,10 +156,14 @@ mod tests {
             fps: 60,
             bitrate_kbps: Some(6000),
             keyframe_secs: 4,
+            drop_frames_after_ms: 500,
+            leaky_queue: false,
             stream_delay_ms: 1000,
             cpu_encoder: true,
         };
         let settings = prefs.video_settings();
         assert_eq!(settings.bitrate_kbps, 6000);
+        assert_eq!(settings.drop_frames_after_ms, 500);
+        assert!(!settings.leaky_queue);
     }
 }

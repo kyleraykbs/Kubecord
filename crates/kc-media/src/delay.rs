@@ -18,21 +18,37 @@ impl<T> Clone for DelayedSender<T> {
 }
 
 impl<T: Send + 'static> DelayedSender<T> {
-    pub fn start(
+    pub fn start(delay: Duration, send: impl FnMut(T, u32) + Send + 'static) -> Self {
+        Self::start_with_limit(delay, None, send)
+    }
+
+    /// Like [`start`](Self::start), but drops items whose queue latency
+    /// exceeds `max_extra_latency`. The configured stream delay itself does
+    /// not count against the limit.
+    pub fn start_with_limit(
         delay: Duration,
+        max_extra_latency: Option<Duration>,
         mut send: impl FnMut(T, u32) + Send + 'static,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<(Instant, T, u32)>();
         std::thread::spawn(move || {
             let mut next = Instant::now() + delay;
+            let mut dropped = 0u64;
+            let mut last_drop_log: Option<Instant> = None;
             while let Ok((queued, item, frame_ms)) = rx.recv() {
-                let latency = queued.elapsed();
-                if latency > Duration::from_millis(100) {
-                    tracing::debug!(
-                        latency_ms = latency.as_millis(),
-                        frame_ms,
-                        "video delay queue backlog"
-                    );
+                let excess = queued.elapsed().saturating_sub(delay);
+                if max_extra_latency.is_some_and(|limit| excess > limit) {
+                    dropped += 1;
+                    if last_drop_log.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)) {
+                        tracing::debug!(
+                            excess_ms = excess.as_millis(),
+                            dropped,
+                            "dropping late video frame"
+                        );
+                        dropped = 0;
+                        last_drop_log = Some(Instant::now());
+                    }
+                    continue;
                 }
                 let due = (queued + delay).max(next);
                 let now = Instant::now();

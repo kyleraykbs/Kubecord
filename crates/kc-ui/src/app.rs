@@ -18,7 +18,8 @@ use kc_state::{Channel, ChannelType, Message, StoreEvent};
 
 use crate::markdown::{format_size, format_timestamp, render_markdown};
 use crate::settings::{
-    BITRATES, CapturePreferences, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS, STREAM_DELAYS,
+    BITRATES, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS,
+    STREAM_DELAYS,
 };
 use crate::session::{
     self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
@@ -925,6 +926,56 @@ impl AppState {
         grid.attach(&note, 0, 6, 2, 1);
         dialog.content_area().append(&grid);
 
+        let advanced = gtk::Expander::new(Some("Advanced"));
+        let advanced_grid = gtk::Grid::new();
+        advanced_grid.set_row_spacing(10);
+        advanced_grid.set_column_spacing(16);
+        advanced_grid.set_margin_start(12);
+        advanced_grid.set_margin_end(12);
+        advanced_grid.set_margin_top(6);
+        advanced_grid.set_margin_bottom(12);
+
+        let drop_names: Vec<String> = DROP_AFTER_MS
+            .iter()
+            .map(|ms| {
+                if *ms == 0 {
+                    "Never".to_owned()
+                } else {
+                    format!("{ms} ms")
+                }
+            })
+            .collect();
+        let drop_refs: Vec<&str> = drop_names.iter().map(String::as_str).collect();
+        let drop_late = gtk::DropDown::from_strings(&drop_refs);
+        drop_late.set_selected(
+            DROP_AFTER_MS
+                .iter()
+                .position(|ms| *ms == current.drop_frames_after_ms)
+                .unwrap_or(2) as u32,
+        );
+        let drop_label = gtk::Label::new(Some("Drop late frames after"));
+        drop_label.set_xalign(0.0);
+        advanced_grid.attach(&drop_label, 0, 0, 1, 1);
+        advanced_grid.attach(&drop_late, 1, 0, 1, 1);
+
+        let leaky = gtk::CheckButton::with_label("Drop old frames in the capture queue");
+        leaky.set_active(current.leaky_queue);
+        leaky.set_tooltip_text(Some(
+            "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
+        ));
+        advanced_grid.attach(&leaky, 0, 1, 2, 1);
+
+        let advanced_note = gtk::Label::new(Some(
+            "Late-frame drops apply beyond the configured Go Live delay. Zero disables the limit.",
+        ));
+        advanced_note.set_xalign(0.0);
+        advanced_note.set_wrap(true);
+        advanced_note.add_css_class("dim-label");
+        advanced_note.add_css_class("caption");
+        advanced_grid.attach(&advanced_note, 0, 2, 2, 1);
+        advanced.set_child(Some(&advanced_grid));
+        dialog.content_area().append(&advanced);
+
         let app = self.clone();
         dialog.connect_response(move |dialog, response| {
             dialog.close();
@@ -943,6 +994,8 @@ impl AppState {
                 fps,
                 bitrate_kbps,
                 keyframe_secs: KEYFRAME_INTERVALS[keyframe.selected() as usize],
+                drop_frames_after_ms: DROP_AFTER_MS[drop_late.selected() as usize],
+                leaky_queue: leaky.is_active(),
                 stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
                 cpu_encoder: cpu_encoder.is_active(),
             };

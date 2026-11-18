@@ -1011,6 +1011,42 @@ impl SessionState {
         }
         let packet_type = cleartext[1];
         let fmt = cleartext[0] & 0x1F;
+        if packet_type == 201 {
+            let report_count = (cleartext[0] & 0x1F) as usize;
+            let mut offset = 8;
+            for _ in 0..report_count {
+                if offset + 24 > cleartext.len() {
+                    break;
+                }
+                let media = u32::from_be_bytes([
+                    cleartext[offset],
+                    cleartext[offset + 1],
+                    cleartext[offset + 2],
+                    cleartext[offset + 3],
+                ]);
+                let fraction_lost = cleartext[offset + 4];
+                let cumulative_lost = u32::from_be_bytes([
+                    cleartext[offset + 5],
+                    cleartext[offset + 6],
+                    cleartext[offset + 7],
+                    cleartext[offset + 8],
+                ]) & 0x00FF_FFFF;
+                let jitter = u32::from_be_bytes([
+                    cleartext[offset + 12],
+                    cleartext[offset + 13],
+                    cleartext[offset + 14],
+                    cleartext[offset + 15],
+                ]);
+                tracing::debug!(
+                    media,
+                    fraction_lost,
+                    cumulative_lost,
+                    jitter,
+                    "RTCP receiver report"
+                );
+                offset += 24;
+            }
+        }
         match packet_type {
             205 => tracing::debug!(
                 fmt,

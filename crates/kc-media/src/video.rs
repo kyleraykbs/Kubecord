@@ -43,6 +43,11 @@ pub struct VideoSettings {
     pub bitrate_kbps: u32,
     /// Seconds between IDR keyframes.
     pub keyframe_secs: u32,
+    /// Maximum extra delay before a captured frame is dropped instead of sent.
+    /// `0` disables dropping.
+    pub drop_frames_after_ms: u32,
+    /// Drop old buffers in the capture pipeline instead of building latency.
+    pub leaky_queue: bool,
     /// x264 preset; `zerolatency` tuning is always applied.
     pub preset: String,
     pub encoder: EncoderPreference,
@@ -64,6 +69,8 @@ impl Default for VideoSettings {
             fps: 30,
             bitrate_kbps: Self::automatic_bitrate_kbps(1280, 720, 30),
             keyframe_secs: 2,
+            drop_frames_after_ms: 250,
+            leaky_queue: true,
             preset: "ultrafast".into(),
             encoder: EncoderPreference::Auto,
         }
@@ -98,12 +105,20 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     }
 }
 
+fn queue_properties(settings: &VideoSettings) -> &'static str {
+    if settings.leaky_queue {
+        " leaky=downstream"
+    } else {
+        ""
+    }
+}
+
 fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
     format!(
         // Leave the source format unconstrained. Forcing I420 on pipewiresrc
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before the encoder.
-        "capsfilter caps=video/x-raw ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 \
+        "capsfilter caps=video/x-raw ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0{leaky} \
          ! videoconvert ! videoscale ! videorate \
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
          ! {encoder} \
@@ -115,6 +130,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         fps = settings.fps,
         format = if hardware { "NV12" } else { "I420" },
         encoder = encoder_chain(settings, hardware),
+        leaky = queue_properties(settings),
     )
 }
 
@@ -127,7 +143,7 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
         "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
          ! videorate skip-to-first=true \
          ! capsfilter caps=video/x-raw,framerate={fps}/1 \
-         ! queue \
+         ! queue{leaky} \
          ! videoconvert \
          ! videoscale \
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height} \
@@ -140,6 +156,7 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
         height = settings.height,
         format = if hardware { "NV12" } else { "I420" },
         encoder = encoder_chain(settings, hardware),
+        leaky = queue_properties(settings),
     )
 }
 

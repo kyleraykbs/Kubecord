@@ -1176,9 +1176,12 @@ async fn maybe_start_stream(
             let screen_parent = voice.stream_parent.clone();
             let video_settings = voice.stream_settings.clone();
             let stream_delay_ms = voice.stream_delay_ms;
+            let drop_after_ms = video_settings.drop_frames_after_ms;
+            let drop_after = (drop_after_ms > 0).then(|| Duration::from_millis(drop_after_ms as u64));
             let video_send = source_handle.clone();
-            let video_delay = DelayedSender::start(
+            let video_delay = DelayedSender::start_with_limit(
                 Duration::from_millis(stream_delay_ms),
+                drop_after,
                 move |data: Vec<u8>, frame_ms| video_send.send_video(data, frame_ms),
             );
             let last_frame = Arc::new(Mutex::new(Instant::now()));
