@@ -317,6 +317,23 @@ const CSS: &str = r#"
     opacity: 0.75;
 }
 
+/* A Discord-sized presence dot on the profile avatar, ringed in the card
+   colour where it overlaps the avatar's edge. */
+.kc-profile-status .kc-status-dot {
+    min-width: 22px;
+    min-height: 22px;
+    border-radius: 16px;
+    margin: 0 3px 3px 0;
+    box-shadow: 0 0 0 5px mix(@window_bg_color, @window_fg_color, 0.07);
+}
+
+.kc-status-bubble {
+    background-color: mix(@window_bg_color, @window_fg_color, 0.14);
+    border-radius: 10px;
+    padding: 0 10px;
+    box-shadow: 0 1px 4px alpha(black, 0.35);
+}
+
 .kc-profile-tabs {
     font-size: 0.85em;
 }

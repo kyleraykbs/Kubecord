@@ -21,11 +21,13 @@ use crate::members::friendly_date_ms;
 use crate::rich;
 use crate::shell::AppState;
 use crate::video_setup::spawn_local;
-use crate::widgets::{avatar_with_status, clear_box, hex_color};
+use crate::widgets::{avatar_with_status, clear_box, hex_color, status_label};
 
 const BANNER_HEIGHT: i32 = 120;
 const AVATAR_SIZE: i32 = 92;
 const CARD_WIDTH: i32 = 340;
+/// Height of the status bubble, centred on the banner's lower edge.
+const STATUS_HEIGHT: i32 = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -56,6 +58,8 @@ struct Model {
     server_nick: Option<String>,
     friend_nick: Option<String>,
     status: String,
+    /// The custom status, else the activity, else "Online" and the like.
+    status_text: String,
     is_me: bool,
     bot: bool,
     relationship: Option<u8>,
@@ -310,6 +314,10 @@ impl AppState {
                 server_nick: member.and_then(|member| member.nick.clone()),
                 friend_nick: relationship.and_then(|relationship| relationship.nickname.clone()),
                 status: state.status_of(user_id).to_owned(),
+                status_text: state
+                    .presence(user_id)
+                    .and_then(|presence| presence.summary())
+                    .unwrap_or_else(|| status_label(state.status_of(user_id)).to_owned()),
                 is_me: me == Some(user_id),
                 bot: user.bot == Some(true),
                 relationship: relationship.map(|relationship| relationship.kind),
@@ -422,54 +430,30 @@ impl Profile {
                 .avatar(AVATAR_SIZE, &model.shown_name(view), Some(&look.avatar));
         avatar.add_css_class("kc-profile-avatar");
         let ring = avatar_with_status(&avatar, &model.status);
+        ring.add_css_class("kc-profile-status");
         ring.set_halign(gtk::Align::Start);
         ring.set_valign(gtk::Align::Start);
         ring.set_margin_start(16);
         ring.set_margin_top(BANNER_HEIGHT - AVATAR_SIZE / 2);
         header.add_overlay(&ring);
 
-        // Server or global profile, beside the avatar.
-        if model.has_server_profile() {
-            let toggles = adw::ToggleGroup::new();
-            for (name, title) in [("server", "Server"), ("global", "Global")] {
-                let toggle = adw::Toggle::new();
-                toggle.set_name(Some(name));
-                toggle.set_label(Some(title));
-                toggles.add(toggle);
-            }
-            toggles.set_active_name(Some(if view == View::Server {
-                "server"
-            } else {
-                "global"
-            }));
-            toggles.set_tooltip_text(Some(&format!(
-                "Server: how {} shows them. Global: their profile everywhere else.",
-                model.guild_name
-            )));
-            toggles.set_halign(gtk::Align::End);
-            toggles.set_valign(gtk::Align::End);
-            toggles.set_margin_end(14);
-            toggles.set_margin_bottom(4);
-            let weak = Rc::downgrade(self);
-            toggles.connect_active_name_notify(move |toggles| {
-                let view = if toggles.active_name().as_deref() == Some("global") {
-                    View::Global
-                } else {
-                    View::Server
-                };
-                // Rebuild after the signal: the card holds this widget.
-                let weak = weak.clone();
-                glib::idle_add_local_once(move || {
-                    if let Some(profile) = weak.upgrade()
-                        && profile.view.get() != view
-                    {
-                        profile.view.set(view);
-                        profile.render();
-                    }
-                });
-            });
-            header.add_overlay(&toggles);
-        }
+        // The status in a bubble beside the avatar, centred on the line
+        // between the banner and the content.
+        let status = gtk::Label::new(Some(&model.status_text));
+        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        status.set_max_width_chars(18);
+        status.set_tooltip_text(Some(&model.status_text));
+        status.add_css_class("caption");
+        let bubble = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        bubble.add_css_class("kc-status-bubble");
+        bubble.set_size_request(-1, STATUS_HEIGHT);
+        status.set_valign(gtk::Align::Center);
+        bubble.append(&status);
+        bubble.set_halign(gtk::Align::Start);
+        bubble.set_valign(gtk::Align::Start);
+        bubble.set_margin_start(16 + AVATAR_SIZE + 10);
+        bubble.set_margin_top(BANNER_HEIGHT - STATUS_HEIGHT / 2);
+        header.add_overlay(&bubble);
         header
     }
 
@@ -509,6 +493,9 @@ impl Profile {
         }
 
         body.append(&self.actions(model));
+        if model.has_server_profile() {
+            body.append(&self.view_toggle(model, view));
+        }
 
         if !look.bio.is_empty() {
             let bio = gtk::Label::new(None);
@@ -609,6 +596,47 @@ impl Profile {
             body.append(&note);
         }
         body
+    }
+
+    /// Server or global profile.
+    fn view_toggle(self: &Rc<Self>, model: &Model, view: View) -> adw::ToggleGroup {
+        let toggles = adw::ToggleGroup::new();
+        for (name, title) in [("server", "Server"), ("global", "Global")] {
+            let toggle = adw::Toggle::new();
+            toggle.set_name(Some(name));
+            toggle.set_label(Some(title));
+            toggles.add(toggle);
+        }
+        toggles.set_active_name(Some(if view == View::Server {
+            "server"
+        } else {
+            "global"
+        }));
+        toggles.set_tooltip_text(Some(&format!(
+            "Server: how {} shows them. Global: their profile everywhere else.",
+            model.guild_name
+        )));
+        toggles.set_halign(gtk::Align::Start);
+        toggles.set_margin_top(4);
+        let weak = Rc::downgrade(self);
+        toggles.connect_active_name_notify(move |toggles| {
+            let view = if toggles.active_name().as_deref() == Some("global") {
+                View::Global
+            } else {
+                View::Server
+            };
+            // Rebuild after the signal: the card holds this widget.
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(profile) = weak.upgrade()
+                    && profile.view.get() != view
+                {
+                    profile.view.set(view);
+                    profile.render();
+                }
+            });
+        });
+        toggles
     }
 
     /// Message, friend, nickname and the "more" menu.
