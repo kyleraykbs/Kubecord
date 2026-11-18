@@ -367,6 +367,11 @@ pub enum UiEvent {
         account: AccountId,
         message: String,
     },
+    /// A DM call is ringing us; offer to join it.
+    IncomingCall {
+        account: AccountId,
+        channel_id: Snowflake,
+    },
     StreamStarted {
         account: AccountId,
     },
@@ -764,6 +769,36 @@ fn spawn_account(
                                         &ui,
                                     )
                                     .await;
+                                }
+                                "CALL_CREATE" => {
+                                    // Someone is ringing us in a DM we are not
+                                    // already in: surface it so we can join.
+                                    let channel_id: Option<Snowflake> =
+                                        serde_json::from_value(data["channel_id"].clone()).ok();
+                                    let ringing: Vec<Snowflake> = data["ringing"]
+                                        .as_array()
+                                        .map(|list| {
+                                            list.iter()
+                                                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    if let (Some(channel_id), Some(me)) =
+                                        (channel_id, voice.self_user_id)
+                                    {
+                                        let in_call = voice
+                                            .connection
+                                            .as_ref()
+                                            .is_some_and(|c| c.channel_id == channel_id);
+                                        if ringing.contains(&me) && !in_call {
+                                            let _ = ui
+                                                .send(UiEvent::IncomingCall {
+                                                    account,
+                                                    channel_id,
+                                                })
+                                                .await;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }

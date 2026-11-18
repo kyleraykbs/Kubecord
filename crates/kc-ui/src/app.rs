@@ -1445,6 +1445,39 @@ impl AppState {
                     self.set_status(&message);
                 }
             }
+            UiEvent::IncomingCall {
+                account,
+                channel_id,
+            } => {
+                if self.model.borrow().active == Some(account) {
+                    let name = self
+                        .with_session(|session| {
+                            session.store.read(|state| {
+                                state.channels.get(&channel_id).map(Channel::display_name)
+                            })
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| "Someone".to_owned());
+                    let toast = adw::Toast::new(&format!("Incoming call from {name}"));
+                    toast.set_button_label(Some("Join"));
+                    toast.set_timeout(20);
+                    let app = self.clone();
+                    toast.connect_button_clicked(move |_| {
+                        let channel = app
+                            .with_session(|session| {
+                                session
+                                    .store
+                                    .read(|state| state.channels.get(&channel_id).cloned())
+                            })
+                            .flatten();
+                        if let Some(channel) = channel {
+                            app.open_channel(channel.clone());
+                            app.join_call(&channel);
+                        }
+                    });
+                    self.toasts.add_toast(toast);
+                }
+            }
             UiEvent::VideoStarted {
                 account,
                 user_id,
