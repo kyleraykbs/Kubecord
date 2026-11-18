@@ -192,6 +192,7 @@ struct SessionState {
     sent_video: HashMap<u16, Vec<u8>>,
     sent_video_order: VecDeque<u16>,
     retransmits: VecDeque<Vec<u8>>,
+    first_video_logged: bool,
     srtcp_error_logged: bool,
     speaking: u8,
     video_enabled: bool,
@@ -393,6 +394,7 @@ async fn run(
         sent_video: HashMap::new(),
         sent_video_order: VecDeque::new(),
         retransmits: VecDeque::new(),
+        first_video_logged: false,
         srtcp_error_logged: false,
         speaking: 0,
         video_enabled: false,
@@ -537,7 +539,7 @@ impl SessionState {
                     ssrc = self.video_ssrc,
                     "queueing video frame"
                 );
-                if self.video_queue.is_empty() {
+                if !self.first_video_logged {
                     tracing::info!(
                         bytes = frame_size,
                         packets = packets.len(),
@@ -545,6 +547,7 @@ impl SessionState {
                         ssrc = self.video_ssrc,
                         "queueing first video frame"
                     );
+                    self.first_video_logged = true;
                 }
                 let timestamp = self.ts_video;
                 if self.video_queue.len() + packets.len() > 4096 {
