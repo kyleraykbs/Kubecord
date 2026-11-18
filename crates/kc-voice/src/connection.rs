@@ -448,7 +448,15 @@ async fn run(
                 if let Some(packet) = state.retransmits.pop_front() {
                     let _ = state.socket.send_to(&packet, state.remote).await;
                 }
-                if let Some((payload, marker, timestamp)) = state.video_queue.pop_front() {
+                // A 128 KiB IDR is over 100 RTP packets. At one packet per
+                // millisecond it occupies several 33 ms frame intervals, so
+                // the viewer receives the keyframe as a late burst. Drain
+                // backlog faster while leaving normal frames at 1 packet/ms.
+                let budget = if state.video_queue.len() > 32 { 4 } else { 1 };
+                for _ in 0..budget {
+                    let Some((payload, marker, timestamp)) = state.video_queue.pop_front() else {
+                        break;
+                    };
                     state.send_rtp_video(&payload, marker, timestamp).await?;
                 }
             }
