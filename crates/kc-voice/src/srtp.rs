@@ -93,6 +93,68 @@ impl Srtp {
         Ok(packet)
     }
 
+
+    /// Decrypts one SRTCP packet (AEAD `rtpsize`). The RTCP header and SRTCP
+    /// index are authenticated in the clear; the report/NACK payload is
+    /// encrypted. Returns the cleartext RTCP packet without the trailing index.
+    pub fn decrypt_rtcp(&self, packet: &[u8]) -> Result<Vec<u8>> {
+        if packet.len() < 8 + AUTH_TAG_LEN + 4 {
+            return Err(Error::Message("SRTCP packet too short".into()));
+        }
+        let index_offset = packet.len() - 4;
+        let index = u32::from_be_bytes([
+            packet[index_offset],
+            packet[index_offset + 1],
+            packet[index_offset + 2],
+            packet[index_offset + 3],
+        ]);
+        if index & 0x8000_0000 == 0 {
+            return Ok(packet[..index_offset].to_vec());
+        }
+        let encrypted = &packet[8..index_offset];
+        let mut nonce = [0u8; 12];
+        nonce[2..6].copy_from_slice(&packet[4..8]);
+        nonce[8..12].copy_from_slice(&(index & 0x7fff_ffff).to_be_bytes());
+        let mut aad = Vec::with_capacity(12);
+        aad.extend_from_slice(&packet[..8]);
+        aad.extend_from_slice(&packet[index_offset..]);
+
+        let plaintext = match self.mode {
+            Mode::Aes256GcmRtpsize => {
+                let cipher = Aes256Gcm::new_from_slice(&self.key)
+                    .map_err(|_| Error::Message("invalid AES key".into()))?;
+                cipher
+                    .decrypt(
+                        aes_gcm::Nonce::from_slice(&nonce),
+                        Payload {
+                            msg: encrypted,
+                            aad: &aad,
+                        },
+                    )
+                    .map_err(|_| Error::Message("SRTCP AES-GCM decryption failed".into()))?
+            }
+            Mode::XChaCha20Poly1305Rtpsize => {
+                let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+                    .map_err(|_| Error::Message("invalid XChaCha20 key".into()))?;
+                let mut nonce24 = [0u8; 24];
+                nonce24[..12].copy_from_slice(&nonce);
+                cipher
+                    .decrypt(
+                        &nonce24.into(),
+                        Payload {
+                            msg: encrypted,
+                            aad: &aad,
+                        },
+                    )
+                    .map_err(|_| Error::Message("SRTCP XChaCha20 decryption failed".into()))?
+            }
+        };
+        let mut result = Vec::with_capacity(8 + plaintext.len());
+        result.extend_from_slice(&packet[..8]);
+        result.extend_from_slice(&plaintext);
+        Ok(result)
+    }
+
     /// Decrypts a complete RTP packet, returning the plaintext payload.
     pub fn decrypt(&self, packet: &[u8]) -> Result<Vec<u8>> {
         if packet.len() < 12 + AUTH_TAG_LEN + NONCE_SUFFIX {

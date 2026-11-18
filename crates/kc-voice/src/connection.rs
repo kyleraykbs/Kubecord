@@ -189,6 +189,10 @@ struct SessionState {
     ts_audio: u32,
     ts_video: u32,
     video_queue: VecDeque<(Vec<u8>, bool, u32)>,
+    sent_video: HashMap<u16, Vec<u8>>,
+    sent_video_order: VecDeque<u16>,
+    retransmits: VecDeque<Vec<u8>>,
+    srtcp_error_logged: bool,
     speaking: u8,
     video_enabled: bool,
     last_binary_seq: u16,
@@ -386,6 +390,10 @@ async fn run(
         ts_audio: now_millis() as u32,
         ts_video: now_millis() as u32,
         video_queue: VecDeque::new(),
+        sent_video: HashMap::new(),
+        sent_video_order: VecDeque::new(),
+        retransmits: VecDeque::new(),
+        srtcp_error_logged: false,
         speaking: 0,
         video_enabled: false,
         last_binary_seq: 0,
@@ -435,6 +443,9 @@ async fn run(
                 let _ = state.socket.send_to(&[0x13, 0x37], state.remote).await;
             }
             _ = video_tick.tick() => {
+                if let Some(packet) = state.retransmits.pop_front() {
+                    let _ = state.socket.send_to(&packet, state.remote).await;
+                }
                 if let Some((payload, marker, timestamp)) = state.video_queue.pop_front() {
                     state.send_rtp_video(&payload, marker, timestamp).await?;
                 }
@@ -645,9 +656,17 @@ impl SessionState {
         timestamp: u32,
     ) -> Result<()> {
         let ssrc = self.video_ssrc.unwrap_or(self.audio_ssrc);
-        let header = RtpHeader::write(marker, PT_H264, self.seq_video, timestamp, ssrc);
+        let sequence = self.seq_video;
+        let header = RtpHeader::write(marker, PT_H264, sequence, timestamp, ssrc);
         self.seq_video = self.seq_video.wrapping_add(1);
         let packet = self.srtp.encrypt(&header, payload)?;
+        self.sent_video.insert(sequence, packet.clone());
+        self.sent_video_order.push_back(sequence);
+        while self.sent_video_order.len() > 1024 {
+            if let Some(old) = self.sent_video_order.pop_front() {
+                self.sent_video.remove(&old);
+            }
+        }
         self.socket
             .send_to(&packet, self.remote)
             .await
@@ -971,40 +990,71 @@ impl SessionState {
     }
 
     fn handle_rtcp(&mut self, packet: &[u8]) {
-        if packet.len() < 16 {
+        if packet.len() < 8 {
             return;
         }
-        // RTCP header: V/P/RC, PT, length. PT 206 = PSFB (PLI is FMT 1).
-        let packet_type = packet[1];
-        let fmt = packet[0] & 0x1F;
+        let cleartext = match self.srtp.decrypt_rtcp(packet) {
+            Ok(packet) => packet,
+            Err(error) => {
+                if !self.srtcp_error_logged {
+                    tracing::info!(%error, len = packet.len(), "SRTCP decrypt failed");
+                    self.srtcp_error_logged = true;
+                }
+                packet.to_vec()
+            }
+        };
+        if cleartext.len() < 8 {
+            return;
+        }
+        let packet_type = cleartext[1];
+        let fmt = cleartext[0] & 0x1F;
         match packet_type {
             205 => tracing::info!(
                 fmt,
-                len = packet.len(),
+                len = cleartext.len(),
+                media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video NACK/RTPFB received"
             ),
             206 => tracing::info!(
                 fmt,
-                len = packet.len(),
+                len = cleartext.len(),
+                media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video PSFB received"
             ),
             _ => {}
         }
-        if packet_type == 206 && (fmt == 1 || fmt == 4) {
-            // PSFB: header (8) + sender SSRC (4) + media source SSRC (4).
-            let ssrc = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
-            if self.video_ssrc == Some(ssrc) {
-                let _ = self.events.send(VoiceEvent::ForceKeyframe);
+        if packet_type == 205 && fmt == 1 && cleartext.len() >= 16 {
+            let media = u32::from_be_bytes([
+                cleartext[12],
+                cleartext[13],
+                cleartext[14],
+                cleartext[15],
+            ]);
+            if self.video_ssrc != Some(media) {
                 return;
             }
-            let Some(user_id) = self.video_ssrc_to_user.get(&ssrc).copied() else {
-                return;
-            };
-            let _ = self
-                .events
-                .send(VoiceEvent::KeyframeRequest { user_id, ssrc });
+            let mut offset = 16;
+            while offset + 4 <= cleartext.len() {
+                let pid = u16::from_be_bytes([cleartext[offset], cleartext[offset + 1]]);
+                let blp = u16::from_be_bytes([cleartext[offset + 2], cleartext[offset + 3]]);
+                offset += 4;
+                if let Some(packet) = self.sent_video.get(&pid).cloned() {
+                    self.retransmits.push_back(packet);
+                }
+                for bit in 1..=16u16 {
+                    if blp & (1 << (bit - 1)) != 0 {
+                        let sequence = pid.wrapping_add(bit);
+                        if let Some(packet) = self.sent_video.get(&sequence).cloned() {
+                            self.retransmits.push_back(packet);
+                        }
+                    }
+                }
+            }
         }
+        // PLI/FIR is left as a logged request. Our periodic keyframe remains
+        // the recovery mechanism until retransmission is validated.
     }
+
 }
 
 async fn wait_for_hello(read: &mut WsRead) -> Result<u64> {
