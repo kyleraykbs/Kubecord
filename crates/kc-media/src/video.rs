@@ -54,7 +54,7 @@ fn encoder_element() -> &'static str {
 
 fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
     format!(
-        "{source} ! videoconvert ! videoscale \
+        "{source} ! videoconvert ! videoscale ! videorate \
          ! video/x-raw,width={width},height={height},framerate={fps}/1 \
          ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
          ! h264parse config-interval=-1 \
@@ -88,9 +88,26 @@ impl VideoSource {
             .ok_or_else(|| Error::Message("video appsink missing".into()))?;
         appsink.set_sync(false);
         appsink.set_drop(true);
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|error| Error::Message(format!("video state: {error}")))?;
+        if let Err(error) = pipeline.set_state(gst::State::Playing) {
+            let detail = pipeline
+                .bus()
+                .and_then(|bus| {
+                    bus.timed_pop_filtered(
+                        gst::ClockTime::from_mseconds(500),
+                        &[gst::MessageType::Error],
+                    )
+                })
+                .and_then(|message| match message.view() {
+                    gst::MessageView::Error(error) => Some(format!(
+                        "{}: {}",
+                        error.error(),
+                        error.debug().unwrap_or_default()
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Err(Error::Message(format!("video state: {error} {detail}")));
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
@@ -339,6 +356,7 @@ mod tests {
         let element = gst::parse::launch(
             "videotestsrc num-buffers=5 \
              ! video/x-raw,width=320,height=240,framerate=30/1 \
+             ! videoconvert ! videoscale ! videorate \
              ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=500 key-int-max=30 bframes=0 \
              ! h264parse config-interval=-1 \
              ! video/x-h264,stream-format=byte-stream,alignment=au \

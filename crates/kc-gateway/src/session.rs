@@ -102,6 +102,24 @@ impl GatewayHandle {
     pub fn stream_pause(&self, stream_key: &str, paused: bool) {
         self.send(json!({"op": 22, "d": {"stream_key": stream_key, "paused": paused}}));
     }
+
+    /// Subscribes to a guild channel's member list. Discord user clients use
+    /// lazy guild subscriptions; without this, existing members (and their
+    /// voice states) in a channel are not delivered.
+    pub fn subscribe_channel(&self, guild_id: Snowflake, channel_id: Snowflake) {
+        let mut channels = serde_json::Map::new();
+        channels.insert(channel_id.to_string(), json!([[0, 99], [100, 199]]));
+        self.send(json!({
+            "op": 14,
+            "d": {
+                "guild_id": guild_id,
+                "channels": channels,
+                "typing": true,
+                "activities": true,
+                "threads": true,
+            }
+        }));
+    }
 }
 
 impl Gateway {

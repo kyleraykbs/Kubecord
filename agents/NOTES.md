@@ -120,3 +120,16 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
 - `READY_SUPPLEMENTAL` voice states and guild `voice_states` now index
   `member.user`; unknown occupants fall back to their snowflake so the channel
   list does not silently drop them.
+
+## Voice occupancy and camera pipeline (2026-11-18)
+
+- Existing members in a voice channel are not delivered until the client sends
+  gateway op 14 `GUILD_SUBSCRIPTIONS` for the channel. Opening a channel now
+  subscribes with member ranges `[[0,99],[100,199]]`; live cache output then
+  listed `voice General: kyleraykbs, Lambda Ignition`. This also feeds the
+  member list.
+- Camera/screen capture pipelines now include `videorate` before the
+  width/height/framerate capsfilter; pipewiresrc can emit 0/1 or 60 fps and the
+  old caps negotiation failed with "Element failed to change its state".
+- Pipeline state failures now surface the GStreamer error and debug string in
+  the UI status line.

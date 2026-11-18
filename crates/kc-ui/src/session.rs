@@ -117,6 +117,10 @@ pub enum VoiceCommand {
     SetCamera(bool),
     StartStream,
     StopStream,
+    Subscribe {
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+    },
 }
 
 /// Voice command senders for running accounts, filled by [`spawn_account`].
@@ -193,6 +197,11 @@ pub enum Command {
     },
     StopStream {
         account: AccountId,
+    },
+    SubscribeChannel {
+        account: AccountId,
+        guild_id: Snowflake,
+        channel_id: Snowflake,
     },
 }
 
@@ -398,6 +407,21 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         }
         Command::StopStream { account } => {
             forward_voice(account, VoiceCommand::StopStream, ui).await;
+        }
+        Command::SubscribeChannel {
+            account,
+            guild_id,
+            channel_id,
+        } => {
+            forward_voice(
+                account,
+                VoiceCommand::Subscribe {
+                    guild_id,
+                    channel_id,
+                },
+                ui,
+            )
+            .await;
         }
     }
 }
@@ -1355,6 +1379,12 @@ async fn apply_voice_command(
         }
         VoiceCommand::StopStream => {
             stop_stream(voice, account, ui, true).await;
+        }
+        VoiceCommand::Subscribe {
+            guild_id,
+            channel_id,
+        } => {
+            voice.handle.subscribe_channel(guild_id, channel_id);
         }
     }
 }

@@ -994,6 +994,13 @@ impl AppState {
             (fetch, last_message, http, store)
         };
 
+        if let Some(guild_id) = channel.guild_id {
+            let _ = self.cmd_tx.try_send(Command::SubscribeChannel {
+                account: active,
+                guild_id,
+                channel_id: channel.id,
+            });
+        }
         self.clear_typing();
         if is_voice {
             self.set_status("");

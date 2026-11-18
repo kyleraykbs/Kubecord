@@ -472,8 +472,30 @@ async fn cache(token: Token, guild_id: Snowflake) -> Result<()> {
     let (gateway, mut events, _task) = Gateway::new(token).start();
     let _ = gateway;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+    let mut channels_seen_at: Option<tokio::time::Instant> = None;
+    let mut subscribed = false;
     loop {
-        if store.read(|state| !state.guild_channels(guild_id).is_empty()) {
+        if !store.read(|state| state.guild_channels(guild_id).is_empty())
+            && channels_seen_at.is_none()
+        {
+            // Keep consuming for a moment after READY so READY_SUPPLEMENTAL
+            // voice states and member sync arrive before printing.
+            channels_seen_at = Some(tokio::time::Instant::now());
+        }
+        if !subscribed && channels_seen_at.is_some() {
+            let voice_channel = store.read(|state| {
+                state
+                    .guild_channels(guild_id)
+                    .into_iter()
+                    .find(|channel| channel.kind.is_voice() && !channel.kind.is_text())
+                    .map(|channel| channel.id)
+            });
+            if let Some(channel_id) = voice_channel {
+                gateway.subscribe_channel(guild_id, channel_id);
+                subscribed = true;
+            }
+        }
+        if channels_seen_at.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(3)) {
             break;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
