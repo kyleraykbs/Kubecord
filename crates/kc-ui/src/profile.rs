@@ -715,19 +715,26 @@ impl Profile {
                     let Some(profile) = weak.upgrade() else {
                         return;
                     };
-                    let next = if current == Some(Relationship::OUTGOING_REQUEST) {
+                    if current == Some(Relationship::OUTGOING_REQUEST) {
                         profile.app.remove_relationship(user_id);
-                        None
+                        profile.model.borrow_mut().relationship = None;
+                        profile.rerender();
+                        return;
+                    }
+                    let next = if current == Some(Relationship::INCOMING_REQUEST) {
+                        Relationship::FRIEND
                     } else {
-                        profile.app.befriend_user(user_id);
-                        Some(if current == Some(Relationship::INCOMING_REQUEST) {
-                            Relationship::FRIEND
-                        } else {
-                            Relationship::OUTGOING_REQUEST
-                        })
+                        Relationship::OUTGOING_REQUEST
                     };
-                    profile.model.borrow_mut().relationship = next;
-                    profile.rerender();
+                    // Only once Discord takes it: a captcha or error leaves
+                    // the button as it was.
+                    let weak = Rc::downgrade(&profile);
+                    profile.app.befriend_user_then(user_id, move |sent| {
+                        if sent && let Some(profile) = weak.upgrade() {
+                            profile.model.borrow_mut().relationship = Some(next);
+                            profile.render();
+                        }
+                    });
                 });
                 row.append(&button);
             }

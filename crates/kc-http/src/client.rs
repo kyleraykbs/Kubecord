@@ -205,17 +205,7 @@ impl HttpClient {
 
             if !status.is_success() {
                 let bytes = response.bytes().await.unwrap_or_default();
-                let parsed = serde_json::from_slice::<ApiErrorBody>(&bytes).ok();
-                return Err(Error::Api {
-                    status,
-                    code: parsed.as_ref().and_then(|body| body.code),
-                    message: parsed
-                        .as_ref()
-                        .map(|body| body.message.clone())
-                        .filter(|message| !message.is_empty())
-                        .unwrap_or_else(|| status.to_string()),
-                    retry_after: parsed.as_ref().and_then(|body| body.retry_after),
-                });
+                return Err(error_from_body(status, &bytes));
             }
 
             if status == StatusCode::NO_CONTENT {
@@ -1017,9 +1007,78 @@ fn encode_emoji(emoji: &str) -> String {
     out
 }
 
+/// The error for a failed response. A captcha challenge has its own shape
+/// (no `message` or `code`); other unexpected bodies are kept in the message
+/// rather than dropped.
+fn error_from_body(status: StatusCode, bytes: &[u8]) -> Error {
+    let value = serde_json::from_slice::<Value>(bytes).ok();
+    if let Some(value) = &value
+        && value.get("captcha_key").is_some()
+    {
+        let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+        return Error::Captcha {
+            service: text("captcha_service").unwrap_or_else(|| "hcaptcha".to_owned()),
+            sitekey: text("captcha_sitekey").unwrap_or_default(),
+            rqdata: text("captcha_rqdata"),
+            rqtoken: text("captcha_rqtoken"),
+        };
+    }
+    let parsed = value.and_then(|value| serde_json::from_value::<ApiErrorBody>(value).ok());
+    let message = parsed
+        .as_ref()
+        .map(|body| body.message.clone())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| {
+            let body = String::from_utf8_lossy(bytes);
+            let body: String = body.trim().chars().take(200).collect();
+            if body.is_empty() {
+                status.to_string()
+            } else {
+                format!("{status}: {body}")
+            }
+        });
+    Error::Api {
+        status,
+        code: parsed.as_ref().and_then(|body| body.code),
+        message,
+        retry_after: parsed.as_ref().and_then(|body| body.retry_after),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_captcha_challenge_is_its_own_error() {
+        let body = br#"{"captcha_key":["captcha-required"],"captcha_sitekey":"site","captcha_service":"hcaptcha","captcha_rqdata":"data","captcha_rqtoken":"token"}"#;
+        match error_from_body(StatusCode::BAD_REQUEST, body) {
+            Error::Captcha {
+                service,
+                sitekey,
+                rqdata,
+                rqtoken,
+            } => {
+                assert_eq!(service, "hcaptcha");
+                assert_eq!(sitekey, "site");
+                assert_eq!(rqdata.as_deref(), Some("data"));
+                assert_eq!(rqtoken.as_deref(), Some("token"));
+            }
+            other => panic!("expected a captcha error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_errors_keep_code_and_message_and_odd_bodies_are_shown() {
+        let body = br#"{"message":"Unknown User","code":10013}"#;
+        let error = error_from_body(StatusCode::NOT_FOUND, body);
+        assert!(
+            matches!(error, Error::Api { code: Some(10013), ref message, .. } if message == "Unknown User")
+        );
+        let error = error_from_body(StatusCode::BAD_REQUEST, b"something else");
+        assert!(error.to_string().contains("something else"), "{error}");
+        assert!(!error.is_captcha());
+    }
 
     #[test]
     fn request_carries_user_headers() {

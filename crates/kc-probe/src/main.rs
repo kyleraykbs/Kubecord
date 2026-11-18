@@ -93,6 +93,26 @@ async fn main() -> Result<()> {
                 .unwrap_or(41);
             video_test(lose_every).await?;
         }
+        "befriend" => {
+            // Sends a friend request to a DM recipient by username, the way
+            // the profile's Add Friend button does, and shows Discord's
+            // answer.
+            let name = filtered.get(1).context("usage: befriend <username>")?;
+            let channels = http.get_raw("/users/@me/channels").await?;
+            let id = channels
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|channel| channel["recipients"].as_array().into_iter().flatten())
+                .find(|user| user["username"].as_str() == Some(name.as_str()))
+                .and_then(|user| user["id"].as_str())
+                .and_then(|id| id.parse::<u64>().ok())
+                .context("no DM recipient with that username")?;
+            match http.accept_friend(kc_core::Snowflake(id)).await {
+                Ok(()) => println!("friend request sent"),
+                Err(error) => println!("failed: {error} (captcha: {})", error.is_captcha()),
+            }
+        }
         "raw" => {
             let path = filtered.get(1).context("usage: raw /api/path")?;
             let value = http.get_raw(path).await?;

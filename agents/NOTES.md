@@ -373,3 +373,9 @@ dispatch; contains account data).
 - Nicknames (pencil button): friend nickname via `PATCH /users/@me/relationships/{id} {nickname}` (`set_friend_nickname`); server nickname needs CHANGE_NICKNAME (self) or MANAGE_NICKNAMES plus a higher top role (others). Owner and administrator can always.
 - Widgets hold the `Profile` weakly; the dialog's `closed` handler holds the only strong ref, so a closed profile is freed. Rebuilds after a signal go through `idle_add_local_once`, because the card owns the widget emitting it.
 - Dev aids: `KYLECORD_POPUP=profile|profile-guild|profile-friend` (own; own inside the first server; first friend inside the first server).
+
+## Captchas (2026-11-18)
+
+- Friend requests can get a captcha challenge: a 400 whose body is `{"captcha_key": [...], "captcha_sitekey", "captcha_service": "hcaptcha", "captcha_rqdata", "captcha_rqtoken"}`, with no `message`/`code`. Confirmed with `kc-probe befriend <username>` (PUT relationships). kc-http turns it into `Error::Captcha`; other non-standard error bodies now show up in the message instead of being dropped.
+- kylecord cannot show an hCaptcha yet. The UI (`captcha_needed`) toasts with "Open in Browser" (the user's discord.com profile page, or the friends page for requests by username). Solving it in-app would need a WebKitGTK view loading the widget with base URI https://discord.com/, then a retry with `X-Captcha-Key` and `X-Captcha-Rqtoken`.
+- kc-probe takes the token from `KYLECORD_TOKEN`. Set it from `~/.config/kylecord/accounts.json` with jq, without printing it.

@@ -253,6 +253,10 @@ impl AppState {
             async move { http.add_friend(&username).await },
             move |app, result| match result {
                 Ok(()) => app.set_status(&format!("Friend request sent to {shown}")),
+                Err(error) if error.is_captcha() => app.captcha_needed(
+                    "Discord wants a captcha solved to send this friend request.",
+                    "https://discord.com/channels/@me",
+                ),
                 Err(error) => app.set_status(&format!("Could not send request: {error}")),
             },
         );

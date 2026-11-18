@@ -381,16 +381,60 @@ impl AppState {
 
     /// Sends a friend request to a user already known to the client.
     pub(crate) fn befriend_user(self: &Rc<Self>, user_id: Snowflake) {
+        self.befriend_user_then(user_id, |_| {});
+    }
+
+    /// Sends (or accepts) a friend request; `done` learns whether Discord
+    /// took it.
+    pub(crate) fn befriend_user_then(
+        self: &Rc<Self>,
+        user_id: Snowflake,
+        done: impl FnOnce(bool) + 'static,
+    ) {
         let Some((_, http, _)) = self.active() else {
             return;
         };
-        self.spawn(
+        crate::video_setup::spawn_local(
+            self,
             async move { http.accept_friend(user_id).await },
-            |app, result| match result {
-                Ok(()) => app.set_status("Friend request sent"),
-                Err(error) => app.set_status(&format!("Request failed: {error}")),
+            move |app, result| match result {
+                Ok(()) => {
+                    app.set_status("Friend request sent");
+                    done(true);
+                }
+                Err(error) => {
+                    if error.is_captcha() {
+                        app.captcha_needed(
+                            "Discord wants a captcha solved to send this friend request.",
+                            &format!("https://discord.com/users/{user_id}"),
+                        );
+                    } else {
+                        app.set_status(&format!("Friend request failed: {error}"));
+                    }
+                    done(false);
+                }
             },
         );
+    }
+
+    /// Says Discord wants a captcha, which kylecord cannot show, and offers
+    /// to finish in the browser where the user is signed in.
+    pub(crate) fn captcha_needed(&self, text: &str, url: &str) {
+        let toast = adw::Toast::builder()
+            .title(text)
+            .button_label("Open in Browser")
+            .timeout(10)
+            .build();
+        let window = self.window.clone();
+        let url = url.to_owned();
+        toast.connect_button_clicked(move |_| {
+            gtk::UriLauncher::new(&url).launch(
+                Some(&window),
+                None::<&gtk::gio::Cancellable>,
+                |_| {},
+            );
+        });
+        self.toasts.add_toast(toast);
     }
 
     /// Blocks a user.

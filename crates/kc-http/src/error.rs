@@ -21,6 +21,17 @@ pub enum Error {
         retry_after: Option<f64>,
     },
 
+    /// Discord wants a captcha solved before it does this (friend requests
+    /// often ask). The request can be retried with the solution in the
+    /// `X-Captcha-Key` header (and `X-Captcha-Rqtoken`).
+    #[error("discord wants a captcha solved first ({service})")]
+    Captcha {
+        service: String,
+        sitekey: String,
+        rqdata: Option<String>,
+        rqtoken: Option<String>,
+    },
+
     #[error("could not decode discord's response: {source}")]
     Decode {
         status: reqwest::StatusCode,
@@ -41,8 +52,13 @@ impl Error {
     pub fn status(&self) -> Option<reqwest::StatusCode> {
         match self {
             Self::Api { status, .. } | Self::Decode { status, .. } => Some(*status),
+            Self::Captcha { .. } => Some(reqwest::StatusCode::BAD_REQUEST),
             _ => None,
         }
+    }
+
+    pub fn is_captcha(&self) -> bool {
+        matches!(self, Self::Captcha { .. })
     }
 
     pub fn is_unauthorized(&self) -> bool {
