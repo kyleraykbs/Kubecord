@@ -37,6 +37,8 @@
 - [x] Go Live desktop audio via the default sink monitor (SOUNDSHARE)
 - [ ] receive/render camera and Go Live video
 - [x] camera portal fd lifetime fix
+- [x] camera self_video defaults and main-gateway toggle
+- [x] Go Live STREAM_SET_PAUSED(false) after create
 - [ ] stream watching (`STREAM_WATCH`, sink wants)
 - [ ] RTCP NACK/PLI handling beyond logging keyframe requests
 - [ ] live verification

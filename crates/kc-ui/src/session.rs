@@ -7,6 +7,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
@@ -815,7 +816,9 @@ async fn handle_stream_create(
     voice.stream_key = Some(key.to_owned());
     voice.stream_rtc_id = data["rtc_server_id"]
         .as_str()
-        .and_then(|id| id.parse().ok());
+        .and_then(|id| id.parse().ok())
+        .or_else(|| data["rtc_server_id"].as_u64().map(Snowflake::new));
+    tracing::info!(key, rtc = ?voice.stream_rtc_id, "STREAM_CREATE");
     maybe_start_stream(voice, account, ui, control_tx).await;
 }
 
@@ -905,6 +908,7 @@ async fn maybe_start_stream(
         screen: true,
         dave_channel_id,
     };
+    tracing::info!(%rtc_id, %key, endpoint = %params.endpoint, "stream connecting");
     voice.stream_pending = false;
     voice.stream_generation = voice.stream_generation.wrapping_add(1);
     let generation = voice.stream_generation;
@@ -939,11 +943,29 @@ async fn maybe_start_stream(
             tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     match event {
-                        VoiceEvent::Ready { .. } => {
+                        VoiceEvent::Ready {
+                            ssrc,
+                            video_ssrc,
+                            rtx_ssrc,
+                            mode,
+                            dave_version,
+                        } => {
+                            tracing::info!(
+                                ssrc,
+                                ?video_ssrc,
+                                ?rtx_ssrc,
+                                mode,
+                                dave_version,
+                                "stream voice ready"
+                            );
                             ready_handle.set_video(true);
                             let _ = control.send(VoiceControl::StreamReady { generation });
                         }
+                        VoiceEvent::DaveReady => {
+                            tracing::info!("stream DAVE ready");
+                        }
                         VoiceEvent::Error(message) => {
+                            tracing::warn!(%message, "stream voice error");
                             let _ = ui_events
                                 .send(UiEvent::StreamError { account, message })
                                 .await;
@@ -966,7 +988,14 @@ async fn maybe_start_stream(
             tokio::spawn(async move {
                 let result = match kc_media::portal::request().await {
                     Ok(portal) => {
+                        let first_frame = Arc::new(AtomicBool::new(false));
                         VideoSource::screen(portal, VideoSettings::default(), move |frame| {
+                            if !first_frame.swap(true, Ordering::Relaxed) {
+                                tracing::info!(
+                                    bytes = frame.data.len(),
+                                    "stream first encoded video frame"
+                                );
+                            }
                             source_handle.send_video(frame.data, frame.duration_ms);
                         })
                         .map_err(|error| error.to_string())
@@ -1167,9 +1196,17 @@ async fn apply_voice_command(
             voice.session_id = None;
             voice.server_token = None;
             voice.endpoint = None;
-            voice
-                .handle
-                .update_voice_state(guild_id, Some(channel_id), false, false, true);
+            // Do not announce a camera on join; Discord shows a camera tile
+            // for `self_video: true` even before any frames exist, and it
+            // fails with 2015 if no track follows.
+            let self_video = voice.camera;
+            voice.handle.update_voice_state(
+                guild_id,
+                Some(channel_id),
+                voice.muted,
+                voice.deafened,
+                self_video,
+            );
             maybe_connect(voice, account, ui, control_tx).await;
         }
         VoiceCommand::Leave => {
@@ -1210,26 +1247,47 @@ async fn apply_voice_command(
         }
         VoiceCommand::SetCamera(enabled) => {
             voice.camera = enabled;
+            let gateway = voice.handle.clone();
+            let (guild_id, channel_id) = match &voice.connection {
+                Some(connection) => (connection.guild_id, connection.channel_id),
+                None => (None, Snowflake::default()),
+            };
             match &mut voice.connection {
                 Some(connection) => {
-                    if enabled {
+                    let started = if enabled {
                         if connection.camera.is_none() {
-                            if let Err(error) = start_camera(connection).await {
-                                voice.camera = false;
-                                let _ = ui
-                                    .send(UiEvent::VoiceError {
-                                        account,
-                                        message: format!("camera: {error}"),
-                                    })
-                                    .await;
+                            match start_camera(connection).await {
+                                Ok(()) => true,
+                                Err(error) => {
+                                    voice.camera = false;
+                                    let _ = ui
+                                        .send(UiEvent::VoiceError {
+                                            account,
+                                            message: format!("camera: {error}"),
+                                        })
+                                        .await;
+                                    false
+                                }
                             }
                         } else {
                             connection.handle.set_video(true);
+                            true
                         }
                     } else {
                         connection.camera = None;
                         connection.handle.set_video(false);
-                    }
+                        false
+                    };
+                    // Camera is a main-gateway voice state, not only the
+                    // voice-server opcode 12. Without this the other side
+                    // shows a permanently loading camera tile.
+                    gateway.update_voice_state(
+                        guild_id,
+                        Some(channel_id),
+                        voice.muted,
+                        voice.deafened,
+                        started,
+                    );
                 }
                 None => {
                     if enabled {
@@ -1271,12 +1329,19 @@ async fn apply_voice_command(
                     .await;
                 return;
             };
+            tracing::info!(%guild_id, %channel_id, "creating go live stream");
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
             voice.stream_token = None;
             voice.stream_endpoint = None;
             voice.handle.stream_create(guild_id, channel_id);
+            // DVS sends STREAM_SET_PAUSED(false) immediately after create;
+            // without it the stream is announced but never actually starts.
+            if let Some(user_id) = voice.self_user_id {
+                let key = format!("guild:{guild_id}:{channel_id}:{user_id}");
+                voice.handle.stream_pause(&key, false);
+            }
         }
         VoiceCommand::StopStream => {
             stop_stream(voice, account, ui, true).await;

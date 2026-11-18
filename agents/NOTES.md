@@ -84,3 +84,18 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
 - Voice handshake for voice `General`: full endpoint, DAVE v1, key package and
   external sender; connection stayed up. Audio receive needs a second
   participant.
+
+## Camera / Go Live fixes from live test (2026-11-17)
+
+- Joining voice must not send `self_video: true` by default. Discord shows a
+  camera tile for the flag and then errors 2015 when no track follows. The join
+  now announces `voice.camera` (false unless the user toggled it); camera toggles
+  send a main-gateway op 4 update with the new `self_video` value, in addition
+  to voice op 12.
+- Go Live needs `STREAM_SET_PAUSED { paused: false }` immediately after
+  `STREAM_CREATE`, as DVS's `signalStream` does. Without it the stream is
+  announced (viewers see LIVE) but never starts, then errors 2012.
+- Keep the camera portal fd alive with the pipeline; dropping it made the
+  camera source produce no frames.
+- Stream/camera diagnostics now log stream voice READY (SSRCs, mode, DAVE),
+  first encoded stream frame, and DAVE readiness.
