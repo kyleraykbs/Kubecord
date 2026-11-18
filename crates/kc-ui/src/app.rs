@@ -93,6 +93,8 @@ pub fn run() -> glib::ExitCode {
             ui_tx_for_ui.clone(),
         );
         state.connect_signals();
+        // Apply any saved audio-device choices to the capture/playback paths.
+        state.capture.borrow().apply_devices();
 
         let receiver = ui_rx_slot
             .borrow_mut()
@@ -214,6 +216,10 @@ impl AppState {
         self.pins_button.connect_clicked(move |_| app.show_pins());
 
         let app = self.clone();
+        self.dm_call_button
+            .connect_clicked(move |_| app.toggle_dm_call());
+
+        let app = self.clone();
         self.members_toggle.connect_toggled(move |button| {
             if app.members_guard.get() {
                 return;
@@ -302,7 +308,7 @@ impl AppState {
     pub(crate) fn show_capture_settings(self: &Rc<Self>) {
         let current = self.capture.borrow().clone();
         let dialog = adw::Dialog::new();
-        dialog.set_title("Capture Quality");
+        dialog.set_title("Settings");
         dialog.set_content_width(480);
         let cancel = gtk::Button::with_label("Cancel");
         let save = gtk::Button::with_label("Save");
@@ -413,6 +419,61 @@ impl AppState {
         grid.attach(&note, 0, 5, 2, 1);
         body.append(&grid);
 
+        // -- audio devices -----------------------------------------------
+        let inputs = kc_media::devices::inputs();
+        let outputs = kc_media::devices::outputs();
+        let mut input_names = vec![String::new()];
+        input_names.extend(inputs.iter().map(|device| device.name.clone()));
+        let mut input_labels = vec!["Default".to_owned()];
+        input_labels.extend(inputs.iter().map(|device| device.label.clone()));
+        let input_label_refs: Vec<&str> = input_labels.iter().map(String::as_str).collect();
+        let input_dd = gtk::DropDown::from_strings(&input_label_refs);
+        input_dd.set_selected(
+            input_names
+                .iter()
+                .position(|name| *name == current.input_device)
+                .unwrap_or(0) as u32,
+        );
+
+        let mut output_names = vec![String::new()];
+        output_names.extend(outputs.iter().map(|device| device.name.clone()));
+        let mut output_labels = vec!["Default".to_owned()];
+        output_labels.extend(outputs.iter().map(|device| device.label.clone()));
+        let output_label_refs: Vec<&str> = output_labels.iter().map(String::as_str).collect();
+        let output_dd = gtk::DropDown::from_strings(&output_label_refs);
+        output_dd.set_selected(
+            output_names
+                .iter()
+                .position(|name| *name == current.output_device)
+                .unwrap_or(0) as u32,
+        );
+
+        let audio_grid = gtk::Grid::new();
+        audio_grid.set_row_spacing(10);
+        audio_grid.set_column_spacing(16);
+        audio_grid.set_margin_start(12);
+        audio_grid.set_margin_end(12);
+        audio_grid.set_margin_bottom(12);
+        let audio_title = gtk::Label::new(Some("Audio Devices"));
+        audio_title.set_xalign(0.0);
+        audio_title.add_css_class("heading");
+        audio_grid.attach(&audio_title, 0, 0, 2, 1);
+        for (row, text, dropdown) in [(1, "Microphone", &input_dd), (2, "Output", &output_dd)] {
+            let label = gtk::Label::new(Some(text));
+            label.set_xalign(0.0);
+            audio_grid.attach(&label, 0, row, 1, 1);
+            audio_grid.attach(dropdown, 1, row, 1, 1);
+        }
+        let audio_note = gtk::Label::new(Some(
+            "Device changes take effect the next time you join a call.",
+        ));
+        audio_note.set_xalign(0.0);
+        audio_note.set_wrap(true);
+        audio_note.add_css_class("dim-label");
+        audio_note.add_css_class("caption");
+        audio_grid.attach(&audio_note, 0, 3, 2, 1);
+        body.append(&audio_grid);
+
         let advanced = gtk::Expander::new(Some("Advanced"));
         advanced.set_margin_start(12);
         advanced.set_margin_end(12);
@@ -520,11 +581,20 @@ impl AppState {
                 retransmit_ms: RETRANSMIT_WINDOWS_MS[retransmit.selected() as usize],
                 stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
                 cpu_encoder: cpu_encoder.is_active(),
+                input_device: input_names
+                    .get(input_dd.selected() as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+                output_device: output_names
+                    .get(output_dd.selected() as usize)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             match prefs.save() {
                 Ok(()) => {
+                    prefs.apply_devices();
                     *app.capture.borrow_mut() = prefs;
-                    app.set_status("Capture quality saved for the next capture");
+                    app.set_status("Settings saved");
                 }
                 Err(error) => app.set_status(&format!("capture settings: {error}")),
             }
@@ -1354,8 +1424,12 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.clear_speaking();
+                    self.focused_video.set(None);
                     self.render_voice_panel();
                     self.queue_sidebar();
+                    // Leaving a DM call returns to its chat; a guild voice
+                    // channel redraws its (now emptier) tiles.
+                    self.render_messages();
                     self.refresh_voice_view();
                 }
             }
@@ -1406,6 +1480,9 @@ impl AppState {
                         let (received, decoded) = video.progress();
                         tracing::info!(%user_id, stream, received, decoded, "video stopped");
                     }
+                    if self.focused_video.get() == Some((user_id, stream)) {
+                        self.focused_video.set(None);
+                    }
                     if self.model.borrow().active == Some(account) {
                         self.refresh_voice_view();
                     }
@@ -1418,6 +1495,15 @@ impl AppState {
                         && let Some(voice) = &mut session.voice
                     {
                         voice.watching = user_id;
+                    }
+                }
+                // Watching opens the stream enlarged; stopping clears it.
+                match user_id {
+                    Some(owner) => self.focused_video.set(Some((owner, true))),
+                    None => {
+                        if matches!(self.focused_video.get(), Some((_, true))) {
+                            self.focused_video.set(None);
+                        }
                     }
                 }
                 if self.model.borrow().active == Some(account) {

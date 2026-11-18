@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod decode;
 pub mod delay;
+pub mod devices;
 pub mod error;
 pub mod portal;
 pub mod receive;

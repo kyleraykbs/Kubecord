@@ -179,6 +179,12 @@ pub enum VoiceCommand {
     Leave,
     SetMute(bool),
     SetDeafen(bool),
+    /// Local playback volume for one participant (and their stream audio):
+    /// `0.0` silences them, `1.0` is unchanged.
+    SetUserVolume {
+        user_id: Snowflake,
+        volume: f32,
+    },
     SetCamera(bool),
     SetCameraDevice {
         access: CameraAccess,
@@ -265,6 +271,11 @@ pub enum Command {
     SetDeafen {
         account: AccountId,
         deafened: bool,
+    },
+    SetUserVolume {
+        account: AccountId,
+        user_id: Snowflake,
+        volume: f32,
     },
     SetCamera {
         account: AccountId,
@@ -501,6 +512,13 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         Command::SetDeafen { account, deafened } => {
             forward_voice(account, VoiceCommand::SetDeafen(deafened), ui).await;
         }
+        Command::SetUserVolume {
+            account,
+            user_id,
+            volume,
+        } => {
+            forward_voice(account, VoiceCommand::SetUserVolume { user_id, volume }, ui).await;
+        }
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
@@ -680,6 +698,7 @@ fn spawn_account(
             stream_generation: 0,
             watch: None,
             watch_generation: 0,
+            user_volumes: HashMap::new(),
         };
 
         loop {
@@ -914,6 +933,8 @@ struct VoiceRuntime {
     /// Someone else's stream being watched.
     watch: Option<Watch>,
     watch_generation: u64,
+    /// Local per-user playback volumes, re-applied after each (re)connect.
+    user_volumes: HashMap<Snowflake, f32>,
 }
 
 /// Watching another participant's stream: its own connection, set up from
@@ -1099,6 +1120,15 @@ async fn handle_server_update(
 /// `guild:<guild>:<channel>:<user>` or `call:<channel>:<user>`.
 fn stream_key_owner(key: &str) -> Option<Snowflake> {
     key.rsplit(':').next().and_then(|id| id.parse().ok())
+}
+
+/// Builds a stream key: `guild:{guild}:{channel}:{owner}` in a guild, or
+/// `call:{channel}:{owner}` in a DM or group-DM call.
+fn stream_key(guild_id: Option<Snowflake>, channel_id: Snowflake, owner: Snowflake) -> String {
+    match guild_id {
+        Some(guild_id) => format!("guild:{guild_id}:{channel_id}:{owner}"),
+        None => format!("call:{channel_id}:{owner}"),
+    }
 }
 
 /// Splits a stream key into `(guild, channel, owner)`. The guild is absent for
@@ -1548,6 +1578,11 @@ async fn maybe_connect(
             if let Some(audio) = &audio {
                 audio.set_deafened(voice.deafened);
                 audio.set_mic_enabled(!voice.muted && !voice.deafened);
+                // Re-apply any per-user volumes chosen before this connect.
+                for (user_id, volume) in &voice.user_volumes {
+                    audio.set_volume(user_id.get(), *volume);
+                    audio.set_volume(stream_audio_key(*user_id), *volume);
+                }
             }
             if voice.muted {
                 handle.set_speaking(0);
@@ -1738,6 +1773,14 @@ async fn apply_voice_command(
                 }
             }
         }
+        VoiceCommand::SetUserVolume { user_id, volume } => {
+            voice.user_volumes.insert(user_id, volume);
+            if let Some(audio) = voice.connection.as_ref().and_then(|c| c.audio.as_ref()) {
+                audio.set_volume(user_id.get(), volume);
+                // The same person's shared stream sound rides a separate key.
+                audio.set_volume(stream_audio_key(user_id), volume);
+            }
+        }
         VoiceCommand::SetDeafen(deafened) => {
             voice.deafened = deafened;
             if let Some(connection) = &voice.connection {
@@ -1885,16 +1928,7 @@ async fn apply_voice_command(
             if voice.streaming || voice.stream_pending || voice.stream_connection.is_some() {
                 return;
             }
-            let Some(guild_id) = guild_id else {
-                let _ = ui
-                    .send(UiEvent::VoiceError {
-                        account,
-                        message: "screen sharing needs a guild voice channel".to_owned(),
-                    })
-                    .await;
-                return;
-            };
-            tracing::info!(%guild_id, %channel_id, "creating go live stream");
+            tracing::info!(?guild_id, %channel_id, "creating go live stream");
             voice.stream_camera = None;
             voice.stream_parent = parent;
             voice.stream_settings = settings;
@@ -1908,7 +1942,7 @@ async fn apply_voice_command(
             // DVS sends STREAM_SET_PAUSED(false) immediately after create;
             // without it the stream is announced but never actually starts.
             if let Some(user_id) = voice.self_user_id {
-                let key = format!("guild:{guild_id}:{channel_id}:{user_id}");
+                let key = stream_key(guild_id, channel_id, user_id);
                 voice.handle.stream_pause(&key, false);
             }
         }
@@ -1922,11 +1956,11 @@ async fn apply_voice_command(
                 .connection
                 .as_ref()
                 .map(|connection| (connection.guild_id, connection.channel_id));
-            let Some((Some(guild_id), channel_id)) = target else {
+            let Some((guild_id, channel_id)) = target else {
                 let _ = ui
                     .send(UiEvent::VoiceError {
                         account,
-                        message: "screen sharing needs a guild voice channel".to_owned(),
+                        message: "join a voice channel first".to_owned(),
                     })
                     .await;
                 return;
@@ -1934,7 +1968,7 @@ async fn apply_voice_command(
             if voice.streaming || voice.stream_pending || voice.stream_connection.is_some() {
                 return;
             }
-            tracing::info!(%guild_id, %channel_id, node_id, "creating camera go live stream");
+            tracing::info!(?guild_id, %channel_id, node_id, "creating camera go live stream");
             voice.stream_camera = Some((access, node_id));
             voice.stream_parent = None;
             voice.stream_settings = settings;
@@ -1946,7 +1980,7 @@ async fn apply_voice_command(
             voice.stream_endpoint = None;
             voice.handle.stream_create(guild_id, channel_id);
             if let Some(user_id) = voice.self_user_id {
-                let key = format!("guild:{guild_id}:{channel_id}:{user_id}");
+                let key = stream_key(guild_id, channel_id, user_id);
                 voice.handle.stream_pause(&key, false);
             }
         }
@@ -1957,10 +1991,7 @@ async fn apply_voice_command(
             let Some(connection) = &voice.connection else {
                 return;
             };
-            let key = match connection.guild_id {
-                Some(guild_id) => format!("guild:{guild_id}:{}:{user_id}", connection.channel_id),
-                None => format!("call:{}:{user_id}", connection.channel_id),
-            };
+            let key = stream_key(connection.guild_id, connection.channel_id, user_id);
             if voice.watch.as_ref().is_some_and(|watch| watch.key == key) {
                 return;
             }
@@ -2269,6 +2300,7 @@ mod tests {
             stream_generation: 0,
             watch: None,
             watch_generation: 0,
+            user_volumes: HashMap::new(),
         }
     }
 

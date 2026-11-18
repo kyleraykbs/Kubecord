@@ -42,6 +42,9 @@ pub(crate) struct AppState {
     // Server rail and channel sidebar.
     pub guild_box: gtk::Box,
     pub guild_name_label: gtk::Label,
+    /// The server-name dropdown in the sidebar header.
+    pub guild_menu: gtk::MenuButton,
+    pub guild_menu_arrow: gtk::Image,
     pub channel_box: gtk::Box,
 
     // User bar.
@@ -72,6 +75,7 @@ pub(crate) struct AppState {
     pub search_entry: gtk::SearchEntry,
     pub pins_button: gtk::Button,
     pub members_toggle: gtk::ToggleButton,
+    pub dm_call_button: gtk::Button,
 
     // Content.
     pub content_stack: gtk::Stack,
@@ -90,6 +94,12 @@ pub(crate) struct AppState {
     /// Cameras and streams being received, by account, person and whether
     /// it is their stream (`true`) or their camera.
     pub videos: RefCell<HashMap<(AccountId, Snowflake, bool), crate::live::LiveVideo>>,
+    /// The enlarged video in the voice view: `(user, is_stream)`. Clicking a
+    /// tile focuses it; clicking the big one again clears this.
+    pub focused_video: Cell<Option<(Snowflake, bool)>>,
+    /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
+    /// slider to reopen at the chosen level.
+    pub user_volumes: RefCell<HashMap<Snowflake, f32>>,
     /// The last voice channel clicked and when, to recognise double-clicks.
     pub last_channel_click: Cell<Option<(Snowflake, std::time::Instant)>>,
     pub typing_label: gtk::Label,
@@ -217,10 +227,21 @@ impl AppState {
         guild_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         guild_name_label.add_css_class("heading");
 
+        // The server name is a dropdown: in a guild it opens the server
+        // menu, in DMs it is just a title.
+        let guild_menu_arrow = gtk::Image::from_icon_name("pan-down-symbolic");
+        let guild_menu_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        guild_menu_box.append(&guild_name_label);
+        guild_menu_box.append(&guild_menu_arrow);
+        let guild_menu = gtk::MenuButton::new();
+        guild_menu.add_css_class("flat");
+        guild_menu.add_css_class("kc-guild-menu");
+        guild_menu.set_child(Some(&guild_menu_box));
+
         let sidebar_header = adw::HeaderBar::new();
         sidebar_header.set_show_end_title_buttons(false);
         sidebar_header.set_show_start_title_buttons(false);
-        sidebar_header.set_title_widget(Some(&guild_name_label));
+        sidebar_header.set_title_widget(Some(&guild_menu));
 
         let channel_box = gtk::Box::new(gtk::Orientation::Vertical, 1);
         channel_box.set_margin_top(6);
@@ -262,7 +283,7 @@ impl AppState {
 
         let voice_camera = toggle_icon_button("camera-video-symbolic", "Turn On Camera");
         let voice_screen = toggle_icon_button("video-display-symbolic", "Share Your Screen");
-        let capture_button = icon_button("emblem-system-symbolic", "Capture Quality");
+        let capture_button = icon_button("emblem-system-symbolic", "Settings");
         let voice_leave = icon_button("call-stop-symbolic", "Disconnect");
         voice_leave.add_css_class("error");
 
@@ -400,12 +421,17 @@ impl AppState {
         let members_toggle = toggle_icon_button("system-users-symbolic", "Member List");
         members_toggle.set_active(true);
 
+        // Start/join a call in a DM, shown only for DM and group-DM channels.
+        let dm_call_button = icon_button("call-start-symbolic", "Start Voice Call");
+        dm_call_button.set_visible(false);
+
         let content_header = adw::HeaderBar::new();
         content_header.set_show_title(false);
         content_header.pack_start(&title_box);
         content_header.pack_end(&search_entry);
         content_header.pack_end(&members_toggle);
         content_header.pack_end(&pins_button);
+        content_header.pack_end(&dm_call_button);
 
         let banner = adw::Banner::new("");
         banner.set_revealed(false);
@@ -515,8 +541,12 @@ impl AppState {
 
         let composer_overlay = gtk::Overlay::new();
         composer_overlay.set_hexpand(true);
+        // Centre the text vertically: the round buttons beside it are taller
+        // than a single line, so a top-aligned entry looked lifted.
+        composer_overlay.set_valign(gtk::Align::Center);
         composer_overlay.set_child(Some(&composer_scroll));
         composer_overlay.add_overlay(&composer_hint);
+        composer_hint.set_valign(gtk::Align::Center);
 
         let attach_button = icon_button("list-add-symbolic", "Attach Files");
         attach_button.set_valign(gtk::Align::End);
@@ -674,6 +704,8 @@ impl AppState {
             login_cancel,
             guild_box,
             guild_name_label,
+            guild_menu,
+            guild_menu_arrow,
             channel_box,
             account_button,
             account_popover,
@@ -698,6 +730,7 @@ impl AppState {
             search_entry,
             pins_button,
             members_toggle,
+            dm_call_button,
             content_stack,
             split,
             messages_scroll,
@@ -711,6 +744,8 @@ impl AppState {
             voice_view,
             voice_tiles: RefCell::new(HashMap::new()),
             videos: RefCell::new(HashMap::new()),
+            focused_video: Cell::new(None),
+            user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),
             typing_label,
             composer_area,

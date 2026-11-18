@@ -45,6 +45,10 @@ pub struct CapturePreferences {
     pub stream_delay_ms: u64,
     /// Force the software x264 encoder instead of trying VA-API first.
     pub cpu_encoder: bool,
+    /// Microphone device node name; empty for the system default.
+    pub input_device: String,
+    /// Output (speaker/headphone) device node name; empty for the default.
+    pub output_device: String,
 }
 
 impl Default for CapturePreferences {
@@ -60,6 +64,8 @@ impl Default for CapturePreferences {
             retransmit_ms: 2000,
             stream_delay_ms: 0,
             cpu_encoder: false,
+            input_device: String::new(),
+            output_device: String::new(),
         }
     }
 }
@@ -96,6 +102,16 @@ impl CapturePreferences {
         let mut prefs: Self = serde_json::from_slice(&bytes).unwrap_or_default();
         prefs.normalize();
         prefs
+    }
+
+    /// Pushes the chosen audio devices into the capture/playback pipelines.
+    pub fn apply_devices(&self) {
+        kc_media::devices::set_input_device(
+            (!self.input_device.is_empty()).then(|| self.input_device.clone()),
+        );
+        kc_media::devices::set_output_device(
+            (!self.output_device.is_empty()).then(|| self.output_device.clone()),
+        );
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -171,6 +187,8 @@ mod tests {
             retransmit_ms: 5000,
             stream_delay_ms: 1000,
             cpu_encoder: true,
+            input_device: String::new(),
+            output_device: String::new(),
         };
         let settings = prefs.video_settings();
         assert_eq!(settings.bitrate_kbps, 6000);

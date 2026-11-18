@@ -29,12 +29,17 @@ pub struct Capture {
 
 impl Capture {
     pub fn start(on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
-        Self::start_with_source(
-            "autoaudiosrc ! audioconvert ! audioresample \
+        // The chosen microphone, or the system default.
+        let source = match crate::devices::input_device() {
+            Some(device) => format!("pulsesrc device=\"{device}\""),
+            None => "autoaudiosrc".to_owned(),
+        };
+        let pipeline = format!(
+            "{source} ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-             ! appsink name=sink sync=false max-buffers=8 drop=true",
-            on_frame,
-        )
+             ! appsink name=sink sync=false max-buffers=8 drop=true"
+        );
+        Self::start_with_source(&pipeline, on_frame)
     }
 
     /// Captures the default output's monitor, for Go Live system audio. The

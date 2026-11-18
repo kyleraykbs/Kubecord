@@ -3,6 +3,8 @@
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use kc_core::Snowflake;
 use kc_http::cdn;
@@ -73,6 +75,32 @@ impl AppState {
                 let text_channel = kind.is_text();
                 self.search_entry.set_visible(text_channel);
                 self.pins_button.set_visible(text_channel);
+                // A call button for DMs and group DMs; reflects whether a
+                // call in this channel is already up.
+                let is_dm = matches!(kind, ChannelType::Dm | ChannelType::GroupDm);
+                self.dm_call_button.set_visible(is_dm);
+                if is_dm {
+                    let in_call = self
+                        .with_session(|session| {
+                            let channel = session.selected_channel;
+                            session
+                                .voice
+                                .as_ref()
+                                .map(|voice| Some(voice.channel_id) == channel)
+                        })
+                        .flatten()
+                        .unwrap_or(false);
+                    self.dm_call_button.set_tooltip_text(Some(if in_call {
+                        "Disconnect"
+                    } else {
+                        "Start Voice Call"
+                    }));
+                    self.dm_call_button.set_icon_name(if in_call {
+                        "call-stop-symbolic"
+                    } else {
+                        "call-start-symbolic"
+                    });
+                }
                 self.window.set_title(Some(&match guild {
                     Some(guild) => format!("{title} — {guild}"),
                     None => title,
@@ -375,6 +403,7 @@ impl AppState {
                     button.set_child(Some(&content));
                     let app = self.clone();
                     button.connect_clicked(move |button| app.show_profile(id, button.upcast_ref()));
+                    self.attach_user_menu(&button, id);
                     self.members_box.append(&button);
                 }
             }
@@ -430,10 +459,12 @@ impl AppState {
             return;
         };
 
-        let popover = gtk::Popover::new();
-        popover.set_parent(anchor);
-        popover.set_position(gtk::PositionType::Left);
-        popover.connect_closed(|popover| popover.unparent());
+        // A floating profile card, like Discord's user popout.
+        let popover = adw::Dialog::new();
+        popover.set_title("Profile");
+        popover.set_content_width(360);
+        popover.add_css_class("kc-profile");
+        let _ = anchor;
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.set_width_request(280);
@@ -499,6 +530,46 @@ impl AppState {
             content.append(&wrap);
         }
 
+        // Member since: the guild join date in a guild, else account age.
+        let since = store.read(|state| {
+            guild
+                .and_then(|guild| state.member(guild, user_id)?.joined_at.clone())
+                .and_then(|iso| kc_state::time::iso_to_unix_millis(&iso))
+                .unwrap_or_else(|| user_id.timestamp())
+        });
+        content.append(&label("MEMBER SINCE", &["kc-category"]));
+        content.append(&label(&friendly_date_ms(since), &["caption"]));
+
+        // Mutual servers and friends, filled in once the profile arrives.
+        let mutuals = label("", &["caption", "dim-label"]);
+        mutuals.set_xalign(0.0);
+        mutuals.set_visible(false);
+        content.append(&mutuals);
+
+        // A personal note, saved on Enter.
+        let note = gtk::Entry::new();
+        note.set_placeholder_text(Some("Click to add a note"));
+        note.add_css_class("kc-note");
+        if !is_me {
+            content.append(&label("NOTE", &["kc-category"]));
+            content.append(&note);
+            let app = self.clone();
+            note.connect_activate(move |note| {
+                let text = note.text().to_string();
+                let Some((_, http, _)) = app.active() else {
+                    return;
+                };
+                app.spawn(
+                    async move { http.set_note(user_id, &text).await },
+                    |app, result| {
+                        if let Err(error) = result {
+                            app.set_status(&format!("Could not save note: {error}"));
+                        }
+                    },
+                );
+            });
+        }
+
         if !is_me && !bot {
             let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             actions.set_margin_top(4);
@@ -508,7 +579,7 @@ impl AppState {
             let app = self.clone();
             let parent = popover.clone();
             message.connect_clicked(move |_| {
-                parent.popdown();
+                parent.close();
                 app.open_dm_with(user_id);
             });
             actions.append(&message);
@@ -525,7 +596,7 @@ impl AppState {
             let app = self.clone();
             let parent = popover.clone();
             friend.connect_clicked(move |_| {
-                parent.popdown();
+                parent.close();
                 if add {
                     let Some((_, http, _)) = app.active() else {
                         return;
@@ -545,14 +616,77 @@ impl AppState {
             content.append(&actions);
         }
 
-        popover.set_child(Some(&content));
-        popover.popup();
+        if is_me {
+            let edit = gtk::Button::with_label("Edit Profile");
+            edit.add_css_class("suggested-action");
+            edit.set_margin_top(4);
+            let app = self.clone();
+            let parent = popover.clone();
+            edit.connect_clicked(move |_| {
+                parent.close();
+                app.edit_profile_dialog();
+            });
+            content.append(&edit);
+        }
+
+        let scroller = gtk::ScrolledWindow::new();
+        scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroller.set_propagate_natural_height(true);
+        scroller.set_max_content_height(640);
+        scroller.set_child(Some(&content));
+        popover.set_child(Some(&scroller));
+        popover.present(Some(&self.window));
 
         let about = glib::SendWeakRef::from(about.downgrade());
+        let mutuals = glib::SendWeakRef::from(mutuals.downgrade());
+        let note_ref = glib::SendWeakRef::from(note.downgrade());
         self.spawn(
             async move { http.user_profile(user_id, guild).await },
             move |_, result| {
-                let (Ok(profile), Some(about)) = (result, about.upgrade()) else {
+                let Ok(profile) = result else {
+                    return;
+                };
+                // Mutual servers and friends.
+                if let Some(mutuals) = mutuals.upgrade() {
+                    let servers = profile
+                        .get("mutual_guilds")
+                        .and_then(|value| value.as_array())
+                        .map(|list| list.len())
+                        .unwrap_or(0);
+                    let friends = profile
+                        .get("mutual_friends")
+                        .and_then(|value| value.as_array())
+                        .map(|list| list.len())
+                        .unwrap_or(0);
+                    let mut parts = Vec::new();
+                    if friends > 0 {
+                        parts.push(format!(
+                            "{friends} mutual friend{}",
+                            if friends == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if servers > 0 {
+                        parts.push(format!(
+                            "{servers} mutual server{}",
+                            if servers == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if !parts.is_empty() {
+                        mutuals.set_label(&parts.join(" · "));
+                        mutuals.set_visible(true);
+                    }
+                }
+                // Prefill the saved note.
+                if let (Some(note), Some(text)) = (
+                    note_ref.upgrade(),
+                    profile
+                        .pointer("/notes/note")
+                        .or_else(|| profile.pointer("/note/note"))
+                        .and_then(|value| value.as_str()),
+                ) {
+                    note.set_text(text);
+                }
+                let Some(about) = about.upgrade() else {
                     return;
                 };
                 let bio = profile
@@ -582,4 +716,131 @@ impl AppState {
             },
         );
     }
+
+    /// Edits the account's own profile: display name, pronouns and bio.
+    pub(crate) fn edit_profile_dialog(self: &Rc<Self>) {
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        let (my_id, current_name) = store.read(|state| {
+            let user = state.me.clone();
+            (
+                user.as_ref().map(|user| user.id),
+                user.map(|user| user.display_name().to_owned())
+                    .unwrap_or_default(),
+            )
+        });
+        let Some(my_id) = my_id else {
+            return;
+        };
+
+        let dialog = adw::Dialog::new();
+        dialog.set_title("Edit Profile");
+        dialog.set_content_width(380);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+
+        content.append(&label("DISPLAY NAME", &["kc-category"]));
+        let name = gtk::Entry::new();
+        name.set_text(&current_name);
+        content.append(&name);
+
+        content.append(&label("PRONOUNS", &["kc-category"]));
+        let pronouns = gtk::Entry::new();
+        pronouns.set_placeholder_text(Some("e.g. they/them"));
+        content.append(&pronouns);
+
+        content.append(&label("ABOUT ME", &["kc-category"]));
+        let bio_view = gtk::TextView::new();
+        bio_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        bio_view.set_size_request(-1, 90);
+        bio_view.add_css_class("kc-bio-edit");
+        let bio_scroll = gtk::ScrolledWindow::new();
+        bio_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        bio_scroll.set_child(Some(&bio_view));
+        content.append(&bio_scroll);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        buttons.set_halign(gtk::Align::End);
+        buttons.set_margin_top(8);
+        let cancel = gtk::Button::with_label("Cancel");
+        let parent = dialog.clone();
+        cancel.connect_clicked(move |_| {
+            parent.close();
+        });
+        let save = gtk::Button::with_label("Save");
+        save.add_css_class("suggested-action");
+        buttons.append(&cancel);
+        buttons.append(&save);
+        content.append(&buttons);
+
+        dialog.set_child(Some(&content));
+        dialog.present(Some(&self.window));
+
+        // Prefill pronouns and bio from the live profile.
+        let pronouns_ref = glib::SendWeakRef::from(pronouns.downgrade());
+        let bio_ref = glib::SendWeakRef::from(bio_view.downgrade());
+        self.spawn(
+            async move { http.user_profile(my_id, None).await },
+            move |_, result| {
+                let Ok(profile) = result else {
+                    return;
+                };
+                if let Some(entry) = pronouns_ref.upgrade() {
+                    let value = profile
+                        .pointer("/user_profile/pronouns")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    entry.set_text(value);
+                }
+                if let Some(view) = bio_ref.upgrade() {
+                    let value = profile
+                        .pointer("/user_profile/bio")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    view.buffer().set_text(value);
+                }
+            },
+        );
+
+        let app = self.clone();
+        save.connect_clicked(move |_| {
+            let new_name = name.text().trim().to_string();
+            let new_pronouns = pronouns.text().trim().to_string();
+            let buffer = bio_view.buffer();
+            let new_bio = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .trim()
+                .to_string();
+            dialog.close();
+            let Some((_, http, _)) = app.active() else {
+                return;
+            };
+            let rename = (new_name != current_name && !new_name.is_empty()).then_some(new_name);
+            app.spawn(
+                async move {
+                    if let Some(name) = rename {
+                        http.set_global_name(&name).await?;
+                    }
+                    http.set_profile(&new_bio, &new_pronouns).await
+                },
+                |app, result| match result {
+                    Ok(()) => app.set_status("Profile updated"),
+                    Err(error) => app.set_status(&format!("Could not update profile: {error}")),
+                },
+            );
+        });
+    }
+}
+
+/// Formats a Unix-millisecond instant like `Nov 11, 2026`.
+fn friendly_date_ms(millis: u64) -> String {
+    glib::DateTime::from_unix_utc((millis / 1000) as i64)
+        .and_then(|date| date.format("%b %e, %Y"))
+        .map(|date| date.trim().replace("  ", " "))
+        .unwrap_or_default()
 }

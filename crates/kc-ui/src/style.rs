@@ -242,6 +242,37 @@ const CSS: &str = r#"
     background-color: alpha(@window_fg_color, 0.06);
 }
 
+/* Right-click context menu. */
+.kc-menu {
+    padding: 4px;
+}
+
+.kc-menu button {
+    padding: 5px 10px;
+    min-height: 0;
+}
+
+.kc-menu button label {
+    margin: 0;
+}
+
+.kc-menu button.kc-danger label {
+    color: @error_color;
+}
+
+.kc-menu-sep {
+    margin: 4px 6px;
+    opacity: 0.5;
+}
+
+.kc-guild-menu {
+    padding: 2px 8px;
+}
+
+.kc-guild-menu image {
+    opacity: 0.6;
+}
+
 .kc-voice-tile avatar {
     transition: box-shadow 120ms ease;
 }

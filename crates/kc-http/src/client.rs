@@ -325,6 +325,107 @@ impl HttpClient {
         Ok(())
     }
 
+    // -- calls -----------------------------------------------------------
+
+    /// Rings a DM or group DM so its other members get an incoming call.
+    pub async fn ring_call(&self, channel_id: Snowflake) -> Result<()> {
+        self.post(&format!("/channels/{channel_id}/call/ring"), json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// Stops ringing a DM call (hanging up before anyone answers).
+    pub async fn stop_ringing(&self, channel_id: Snowflake) -> Result<()> {
+        self.post(
+            &format!("/channels/{channel_id}/call/stop-ringing"),
+            json!({ "recipients": null }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // -- members ---------------------------------------------------------
+
+    /// Sets a guild nickname. `me` picks the `@me` route (always allowed);
+    /// otherwise the member route, which needs Manage Nicknames.
+    pub async fn set_nickname(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        me: bool,
+        nick: &str,
+    ) -> Result<()> {
+        let path = if me {
+            format!("/guilds/{guild_id}/members/@me")
+        } else {
+            format!("/guilds/{guild_id}/members/{user_id}")
+        };
+        self.patch(&path, json!({ "nick": nick })).await?;
+        Ok(())
+    }
+
+    // -- guild management ------------------------------------------------
+
+    /// Creates a channel, or a category when `kind` is `GuildCategory` (4).
+    pub async fn create_channel(
+        &self,
+        guild_id: Snowflake,
+        name: &str,
+        kind: u8,
+        parent_id: Option<Snowflake>,
+    ) -> Result<Channel> {
+        let mut body = json!({ "name": name, "type": kind });
+        if let Some(parent) = parent_id {
+            body["parent_id"] = json!(parent.to_string());
+        }
+        let value = self
+            .request_json_in(
+                Method::POST,
+                &format!("/guilds/{guild_id}/channels"),
+                Some(&body),
+                Some(&json!({})),
+            )
+            .await?;
+        Self::parse(value, StatusCode::CREATED)
+    }
+
+    /// Creates an invite to a channel and returns its code.
+    pub async fn create_invite(&self, channel_id: Snowflake) -> Result<String> {
+        let value = self
+            .request_json_in(
+                Method::POST,
+                &format!("/channels/{channel_id}/invites"),
+                Some(&json!({ "max_age": 86_400, "max_uses": 0, "unique": false })),
+                Some(&json!({})),
+            )
+            .await?;
+        Ok(value
+            .get("code")
+            .and_then(|code| code.as_str())
+            .unwrap_or_default()
+            .to_owned())
+    }
+
+    /// Leaves a guild.
+    pub async fn leave_guild(&self, guild_id: Snowflake) -> Result<()> {
+        self.delete(&format!("/users/@me/guilds/{guild_id}"))
+            .await?;
+        Ok(())
+    }
+
+    /// Edits a guild (e.g. rename). Needs Manage Server.
+    pub async fn edit_guild(&self, guild_id: Snowflake, payload: Value) -> Result<Guild> {
+        let value = self.patch(&format!("/guilds/{guild_id}"), payload).await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// Overrides the account's per-guild settings, e.g. `{"muted": true}`.
+    pub async fn patch_guild_settings(&self, guild_id: Snowflake, payload: Value) -> Result<()> {
+        self.patch(&format!("/users/@me/guild-settings/{guild_id}"), payload)
+            .await?;
+        Ok(())
+    }
+
     // -- relationships ---------------------------------------------------
 
     /// Sends a friend request by unique username.
@@ -396,6 +497,23 @@ impl HttpClient {
             Method::PUT,
             &format!("/users/@me/notes/{user_id}"),
             Some(&json!({ "note": note })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sets the account's display (global) name.
+    pub async fn set_global_name(&self, name: &str) -> Result<()> {
+        self.patch("/users/@me", json!({ "global_name": name }))
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the account's bio and pronouns (the user profile).
+    pub async fn set_profile(&self, bio: &str, pronouns: &str) -> Result<()> {
+        self.patch(
+            "/users/@me/profile",
+            json!({ "bio": bio, "pronouns": pronouns }),
         )
         .await?;
         Ok(())

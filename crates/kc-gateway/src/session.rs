@@ -79,16 +79,23 @@ impl GatewayHandle {
         }));
     }
 
-    pub fn stream_create(&self, guild_id: Snowflake, channel_id: Snowflake) {
-        self.send(json!({
-            "op": 18,
-            "d": {
+    /// Starts a Go Live stream. In a guild voice channel pass the guild id;
+    /// in a DM or group-DM call pass `None`, which starts a `call` stream.
+    pub fn stream_create(&self, guild_id: Option<Snowflake>, channel_id: Snowflake) {
+        let data = match guild_id {
+            Some(guild_id) => json!({
                 "type": "guild",
                 "guild_id": guild_id,
                 "channel_id": channel_id,
                 "preferred_region": null,
-            }
-        }));
+            }),
+            None => json!({
+                "type": "call",
+                "channel_id": channel_id,
+                "preferred_region": null,
+            }),
+        };
+        self.send(json!({ "op": 18, "d": data }));
     }
 
     pub fn stream_delete(&self, stream_key: &str) {

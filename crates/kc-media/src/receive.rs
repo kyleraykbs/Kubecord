@@ -303,8 +303,14 @@ impl Output {
 
         // A short device buffer keeps the delay low; the jitter buffer, not
         // the sink, is what absorbs network timing.
-        let sink = match std::env::var("KYLECORD_PLAYBACK_DEVICE") {
-            Ok(device) if !device.is_empty() => {
+        // The chosen output: an explicit env override, then the configured
+        // device, then the default sink.
+        let configured = std::env::var("KYLECORD_PLAYBACK_DEVICE")
+            .ok()
+            .filter(|device| !device.is_empty())
+            .or_else(crate::devices::output_device);
+        let sink = match configured {
+            Some(device) => {
                 format!("pulsesink device=\"{device}\" buffer-time=60000 latency-time=10000")
             }
             _ if gst::ElementFactory::find("pulsesink").is_some() => {

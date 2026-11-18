@@ -73,8 +73,16 @@ impl AppState {
 
         if dm_mode || guild_id.is_none() {
             self.guild_name_label.set_label("Direct Messages");
+            // No server menu in the DM view.
+            self.guild_menu.set_popover(gtk::Popover::NONE);
+            self.guild_menu.set_sensitive(false);
+            self.guild_menu_arrow.set_visible(false);
             self.render_dm_list(selected);
         } else if let Some(guild_id) = guild_id {
+            self.guild_menu.set_sensitive(true);
+            self.guild_menu_arrow.set_visible(true);
+            let menu = self.build_server_menu(guild_id);
+            self.guild_menu.set_popover(Some(&menu));
             self.render_guild_channels(guild_id, selected);
         }
     }
@@ -191,6 +199,10 @@ impl AppState {
             let app = self.clone();
             let channel = row.channel.clone();
             button.connect_clicked(move |_| app.open_channel(channel.clone()));
+            // Right-click a one-to-one DM for the usual user menu.
+            if let Some(recipient) = row.channel.dm_recipient().map(|user| user.id) {
+                self.attach_user_menu(&button, recipient);
+            }
             self.channel_box.append(&button);
         }
     }
@@ -365,9 +377,9 @@ impl AppState {
         let app = self.clone();
         let anchor = button.clone();
         let target = channel.clone();
-        menu.connect_pressed(move |_, _, _, _| {
+        menu.connect_pressed(move |_, _, x, y| {
             let popover = gtk::Popover::new();
-            popover.set_parent(&anchor);
+            app.anchor_popover(&popover, &anchor, x, y);
             let item = if voice {
                 let connected = app
                     .with_session(|session| {
@@ -407,7 +419,6 @@ impl AppState {
             };
             item.add_css_class("flat");
             popover.set_child(Some(&item));
-            popover.connect_closed(|popover| popover.unparent());
             popover.popup();
         });
         button.add_controller(menu);
@@ -449,6 +460,18 @@ impl AppState {
                 row.append(&image);
             }
         }
+        // Left-click opens the profile, right-click the full user menu.
+        let click = gtk::GestureClick::new();
+        let app = self.clone();
+        let id = user.id;
+        click.connect_released(move |gesture, _, _, _| {
+            if let Some(widget) = gesture.widget() {
+                app.show_profile(id, &widget);
+            }
+        });
+        row.add_controller(click);
+        row.set_cursor_from_name(Some("pointer"));
+        self.attach_user_menu(&row, user.id);
         row
     }
 

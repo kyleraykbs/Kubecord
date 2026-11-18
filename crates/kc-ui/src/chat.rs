@@ -160,17 +160,24 @@ impl AppState {
         };
         self.content_stack.set_visible_child_name("chat");
 
-        let voice_only = self
+        // Voice channels, and DMs while a call is up, show the call tiles
+        // instead of a message list.
+        let show_call = self
             .with_session(|session| {
-                session.store.read(|state| {
+                let in_call = session
+                    .voice
+                    .as_ref()
+                    .is_some_and(|voice| voice.channel_id == channel_id);
+                let voice_only = session.store.read(|state| {
                     state
                         .channels
                         .get(&channel_id)
                         .is_some_and(|channel| channel.kind.is_voice() && !channel.kind.is_text())
-                })
+                });
+                voice_only || in_call
             })
             .unwrap_or(false);
-        if voice_only {
+        if show_call {
             self.chat.borrow_mut().channel = None;
             self.render_voice_view(channel_id);
             return;
@@ -730,6 +737,7 @@ impl AppState {
             });
             avatar.add_controller(click);
             avatar.set_cursor_from_name(Some("pointer"));
+            self.attach_user_menu(&avatar, user_id);
             row.append(&avatar);
 
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);

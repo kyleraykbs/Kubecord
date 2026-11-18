@@ -798,7 +798,7 @@ async fn voice(
                         }
                         if stream {
                             println!("creating go-live stream");
-                            gateway.stream_create(guild_id, channel_id);
+                            gateway.stream_create(Some(guild_id), channel_id);
                         } else if camera {
                             let settings = kc_media::video::VideoSettings::default();
                             match kc_media::video::VideoSource::camera(None, settings, {
