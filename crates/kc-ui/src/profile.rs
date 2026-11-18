@@ -26,8 +26,10 @@ use crate::widgets::{avatar_with_status, clear_box, hex_color, status_label};
 const BANNER_HEIGHT: i32 = 120;
 const AVATAR_SIZE: i32 = 92;
 const CARD_WIDTH: i32 = 340;
-/// Height of the status bubble, centred on the banner's lower edge.
+/// Least height of the status bubble, centred on the banner's lower edge.
 const STATUS_HEIGHT: i32 = 30;
+/// The status wraps to at most this many lines before it is shortened.
+const STATUS_MAX_LINES: i32 = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -437,23 +439,42 @@ impl Profile {
         ring.set_margin_top(BANNER_HEIGHT - AVATAR_SIZE / 2);
         header.add_overlay(&ring);
 
-        // The status in a bubble beside the avatar, centred on the line
-        // between the banner and the content.
+        // The status in a bubble beside the avatar. It wraps and grows up
+        // and down alike, so it stays centred on the line between the
+        // banner and the content.
         let status = gtk::Label::new(Some(&model.status_text));
+        status.set_xalign(0.0);
+        status.set_wrap(true);
+        status.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        status.set_lines(STATUS_MAX_LINES);
         status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        status.set_max_width_chars(18);
-        status.set_tooltip_text(Some(&model.status_text));
+        status.set_valign(gtk::Align::Center);
         status.add_css_class("caption");
         let bubble = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         bubble.add_css_class("kc-status-bubble");
         bubble.set_size_request(-1, STATUS_HEIGHT);
-        status.set_valign(gtk::Align::Center);
         bubble.append(&status);
-        bubble.set_halign(gtk::Align::Start);
-        bubble.set_valign(gtk::Align::Start);
-        bubble.set_margin_start(16 + AVATAR_SIZE + 10);
-        bubble.set_margin_top(BANNER_HEIGHT - STATUS_HEIGHT / 2);
         header.add_overlay(&bubble);
+        let target = bubble.downgrade();
+        header.connect_get_child_position(move |overlay, widget| {
+            let bubble = target.upgrade()?;
+            if widget != bubble.upcast_ref::<gtk::Widget>() {
+                return None;
+            }
+            let x = 16 + AVATAR_SIZE + 10;
+            let card = if overlay.width() > 0 {
+                overlay.width()
+            } else {
+                CARD_WIDTH
+            };
+            let room = (card - x - 14).max(40);
+            let (least, natural, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
+            let width = natural.min(room).max(least);
+            let (least, natural, _, _) = widget.measure(gtk::Orientation::Vertical, width);
+            let height = natural.max(least);
+            let y = (BANNER_HEIGHT - height / 2).max(4);
+            Some(gtk::gdk::Rectangle::new(x, y, width, height))
+        });
         header
     }
 

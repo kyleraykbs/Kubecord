@@ -330,7 +330,7 @@ const CSS: &str = r#"
 .kc-status-bubble {
     background-color: mix(@window_bg_color, @window_fg_color, 0.14);
     border-radius: 10px;
-    padding: 0 10px;
+    padding: 5px 10px;
     box-shadow: 0 1px 4px alpha(black, 0.35);
 }
 
