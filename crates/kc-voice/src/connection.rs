@@ -1015,28 +1015,28 @@ impl SessionState {
             205 => tracing::debug!(
                 fmt,
                 len = cleartext.len(),
-                media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
+                media = cleartext.get(8..12).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video NACK/RTPFB received"
             ),
             206 => tracing::debug!(
                 fmt,
                 len = cleartext.len(),
-                media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
+                media = cleartext.get(8..12).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video PSFB received"
             ),
             _ => {}
         }
         if packet_type == 205 && fmt == 1 && cleartext.len() >= 16 {
             let media = u32::from_be_bytes([
-                cleartext[12],
-                cleartext[13],
-                cleartext[14],
-                cleartext[15],
+                cleartext[8],
+                cleartext[9],
+                cleartext[10],
+                cleartext[11],
             ]);
             if self.video_ssrc != Some(media) {
                 return;
             }
-            let mut offset = 16;
+            let mut offset = 12;
             while offset + 4 <= cleartext.len() {
                 let pid = u16::from_be_bytes([cleartext[offset], cleartext[offset + 1]]);
                 let blp = u16::from_be_bytes([cleartext[offset + 2], cleartext[offset + 3]]);
