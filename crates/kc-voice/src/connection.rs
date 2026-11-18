@@ -1012,13 +1012,13 @@ impl SessionState {
         let packet_type = cleartext[1];
         let fmt = cleartext[0] & 0x1F;
         match packet_type {
-            205 => tracing::info!(
+            205 => tracing::debug!(
                 fmt,
                 len = cleartext.len(),
                 media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video NACK/RTPFB received"
             ),
-            206 => tracing::info!(
+            206 => tracing::debug!(
                 fmt,
                 len = cleartext.len(),
                 media = cleartext.get(12..16).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
