@@ -463,6 +463,17 @@ impl HttpClient {
         Ok(())
     }
 
+    /// Sets the private nickname shown for a friend; empty clears it.
+    pub async fn set_friend_nickname(&self, user_id: Snowflake, nickname: &str) -> Result<()> {
+        let nickname = (!nickname.is_empty()).then_some(nickname);
+        self.patch(
+            &format!("/users/@me/relationships/{user_id}"),
+            json!({ "nickname": nickname }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Removes a friend, declines or cancels a request, or unblocks.
     pub async fn remove_relationship(&self, user_id: Snowflake) -> Result<()> {
         self.request_json_in(

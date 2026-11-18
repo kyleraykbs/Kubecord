@@ -364,3 +364,12 @@ dispatch; contains account data).
 - Clicking outside the visible `adw::Dialog` closes it (capture-phase `GestureClick` on the window in `connect_signals`).
 - A wrapping label in a horizontal box needs `max_width_chars(1)` + hexpand, otherwise its height is measured at full width and GTK logs "Allocation height too small".
 - Dev aid: `KYLECORD_POPUP=camera|share|profile` opens that popout 4 s after launch.
+
+## Profile popout (2026-11-18)
+
+- `kc-ui/src/profile.rs` replaces the old card in members.rs; `show_profile(user_id, anchor)` keeps its signature. Left: a banner (image, else the theme/accent colour, else a colour picked from the user id) with the avatar over it; name, original names, the actions, bio (rendered with `rich`), member/friends since, roles, note. Right: Activity / Mutual Friends / Mutual Servers in an `adw::InlineViewSwitcher`.
+- Server/Global (`adw::ToggleGroup`) shows only when they are a member of the current server: cached, or the profile response has `guild_member`. Server look = `guild_member_profile` / `guild_member`, each field falling back to the global one.
+- The name on top is server nick > friend nick > global name; the username line is always shown, plus the global name when it differs.
+- Nicknames (pencil button): friend nickname via `PATCH /users/@me/relationships/{id} {nickname}` (`set_friend_nickname`); server nickname needs CHANGE_NICKNAME (self) or MANAGE_NICKNAMES plus a higher top role (others). Owner and administrator can always.
+- Widgets hold the `Profile` weakly; the dialog's `closed` handler holds the only strong ref, so a closed profile is freed. Rebuilds after a signal go through `idle_add_local_once`, because the card owns the widget emitting it.
+- Dev aids: `KYLECORD_POPUP=profile|profile-guild|profile-friend` (own; own inside the first server; first friend inside the first server).

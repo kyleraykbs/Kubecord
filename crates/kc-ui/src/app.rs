@@ -151,6 +151,37 @@ pub fn run() -> glib::ExitCode {
                 match popup.as_str() {
                     "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
                     "share" => app_state.show_share_popup(account),
+                    "profile-guild" => {
+                        let guild = store.read(|state| state.guilds.keys().next().copied());
+                        if let Some(guild) = guild {
+                            app_state.select_guild(guild);
+                        }
+                        if let Some(me) = store.read(|state| state.my_id()) {
+                            let anchor = app_state.window.clone().upcast::<gtk::Widget>();
+                            app_state.show_profile(me, &anchor);
+                        }
+                    }
+                    "profile-friend" => {
+                        let (guild, friend) = store.read(|state| {
+                            (
+                                state.guilds.keys().next().copied(),
+                                state
+                                    .relationships
+                                    .values()
+                                    .find(|relationship| {
+                                        relationship.kind == kc_state::Relationship::FRIEND
+                                    })
+                                    .map(|relationship| relationship.id),
+                            )
+                        });
+                        if let Some(guild) = guild {
+                            app_state.select_guild(guild);
+                        }
+                        if let Some(friend) = friend {
+                            let anchor = app_state.window.clone().upcast::<gtk::Widget>();
+                            app_state.show_profile(friend, &anchor);
+                        }
+                    }
                     _ => {
                         if let Some(me) = store.read(|state| state.my_id()) {
                             let anchor = app_state.window.clone().upcast::<gtk::Widget>();

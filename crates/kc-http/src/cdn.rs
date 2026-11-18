@@ -87,6 +87,14 @@ pub fn user_banner(user_id: Snowflake, hash: &str, pixels: u32) -> String {
     )
 }
 
+/// A member's server-specific profile banner.
+pub fn member_banner(guild_id: Snowflake, user_id: Snowflake, hash: &str, pixels: u32) -> String {
+    format!(
+        "{CDN_BASE}/guilds/{guild_id}/users/{user_id}/banners/{hash}.png?size={}",
+        cdn_size(pixels)
+    )
+}
+
 /// A custom emoji. `animated` selects the GIF; otherwise a static PNG.
 pub fn emoji(emoji_id: Snowflake, animated: bool, pixels: u32) -> String {
     let extension = if animated { "gif" } else { "png" };

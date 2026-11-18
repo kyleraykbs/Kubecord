@@ -11,6 +11,7 @@ mod markdown;
 mod members;
 mod menu;
 mod player;
+mod profile;
 mod rail;
 mod rich;
 mod server;

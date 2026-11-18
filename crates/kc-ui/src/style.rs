@@ -299,6 +299,33 @@ const CSS: &str = r#"
     outline-color: @success_bg_color;
 }
 
+/* Profile card: an opaque surface so the ring around the avatar, in the
+   same colour, cuts cleanly into the banner. */
+.kc-profile-card {
+    background-color: mix(@window_bg_color, @window_fg_color, 0.07);
+    border-radius: 14px;
+}
+
+.kc-profile-avatar {
+    border-radius: 9999px;
+    box-shadow: 0 0 0 6px mix(@window_bg_color, @window_fg_color, 0.07);
+}
+
+.kc-profile-heading {
+    font-weight: bold;
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+.kc-profile-tabs {
+    font-size: 0.85em;
+}
+
+.kc-profile-row {
+    padding: 6px 8px;
+    border-radius: 8px;
+}
+
 .kc-preview {
     border-radius: 12px;
     background-color: black;
