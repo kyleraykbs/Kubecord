@@ -515,6 +515,22 @@ async fn cache(token: Token, guild_id: Snowflake) -> Result<()> {
                 channel.kind
             );
         }
+        for channel in state.guild_channels(guild_id) {
+            if channel.kind.is_voice() && !channel.kind.is_text() {
+                let users = state.users_in_channel_voice(guild_id, channel.id);
+                if !users.is_empty() {
+                    println!(
+                        "voice {}: {}",
+                        channel.display_name(),
+                        users
+                            .iter()
+                            .map(|user| user.display_name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+        }
     });
     Ok(())
 }

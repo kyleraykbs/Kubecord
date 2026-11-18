@@ -109,3 +109,14 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   Now a null self state tears down only when a voice connection already exists.
 - Guild `VOICE_STATE_UPDATE` carries a `member.user`; the reducer indexes it so
   voice-channel occupants have names even when they were not in READY.
+
+## DAVE roster race (2026-11-17)
+
+- With a second user already in the channel, the gateway sent an MLS add
+  proposal before `CLIENT_CONNECT`; passing a local expected-user roster to
+  `davey` rejected it (`unexpected user in add proposal`), closing the voice
+  connection. Proposals now pass `None`: the voice gateway is the authenticated
+  MLS delivery service. Live test with a second participant reached `DAVE ready`.
+- `READY_SUPPLEMENTAL` voice states and guild `voice_states` now index
+  `member.user`; unknown occupants fall back to their snowflake so the channel
+  list does not silently drop them.
