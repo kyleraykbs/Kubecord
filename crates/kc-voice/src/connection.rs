@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
@@ -187,7 +187,7 @@ struct SessionState {
     seq_audio: u16,
     seq_video: u16,
     ts_audio: u32,
-    video_epoch: Instant,
+    ts_video: u32,
     video_queue: VecDeque<(Vec<u8>, bool, u32)>,
     speaking: u8,
     video_enabled: bool,
@@ -384,7 +384,7 @@ async fn run(
         seq_audio: (now_millis() & 0xFFFF) as u16,
         seq_video: (now_millis() & 0xFFFF) as u16,
         ts_audio: now_millis() as u32,
-        video_epoch: Instant::now(),
+        ts_video: now_millis() as u32,
         video_queue: VecDeque::new(),
         speaking: 0,
         video_enabled: false,
@@ -527,10 +527,7 @@ impl SessionState {
                         "queueing first video frame"
                     );
                 }
-                // RTP timestamps follow wall time, not a received-frame counter;
-                // capture stalls or dropped frames must not stall the receiver's
-                // jitter buffer.
-                let timestamp = self.video_epoch.elapsed().as_millis() as u32 * 90;
+                let timestamp = self.ts_video;
                 if self.video_queue.len() + packets.len() > 4096 {
                     tracing::warn!(
                         queued = self.video_queue.len(),
@@ -542,6 +539,7 @@ impl SessionState {
                         self.video_queue.push_back((payload, marker, timestamp));
                     }
                 }
+                self.ts_video = self.ts_video.wrapping_add(frame_ms * 90);
             }
             Command::SetSpeaking(flags) => {
                 self.set_speaking(flags).await?;
@@ -965,15 +963,7 @@ impl SessionState {
         let packet_type = packet[1];
         let fmt = packet[0] & 0x1F;
         if packet_type == 206 && (fmt == 1 || fmt == 4) {
-            // The RTCP header is clear even when the rest is SRTCP. We have at
-            // most one outgoing video stream, so any PLI/FIR on this socket is
-            // a request for that stream and does not require decrypting the
-            // media-source SSRC.
-            if self.video_ssrc.is_some() {
-                let _ = self.events.send(VoiceEvent::ForceKeyframe);
-                return;
-            }
-            // Fall back to the clear/decrypted media SSRC if one is available.
+            // PSFB: header (8) + sender SSRC (4) + media source SSRC (4).
             let ssrc = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
             if self.video_ssrc == Some(ssrc) {
                 let _ = self.events.send(VoiceEvent::ForceKeyframe);

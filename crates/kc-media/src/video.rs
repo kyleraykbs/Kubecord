@@ -86,7 +86,7 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
         )
     } else {
         format!(
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 vbv-buf-capacity=250",
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
@@ -121,7 +121,7 @@ fn pipeline_description(source: &str, settings: &VideoSettings, hardware: bool) 
 
 fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
     format!(
-        "pipewiresrc name=src do-timestamp=true keepalive-time=33 resend-last=true \
+        "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
          ! videorate skip-to-first=true \
          ! capsfilter caps=video/x-raw,framerate={fps}/1 \
          ! queue \
