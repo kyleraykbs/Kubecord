@@ -1465,3 +1465,69 @@ async fn send_http_error(
         })
         .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn runtime(handle: GatewayHandle) -> VoiceRuntime {
+        VoiceRuntime {
+            handle,
+            self_user_id: Some(Snowflake(1)),
+            pending_join: Some((Some(Snowflake(5)), Snowflake(12))),
+            session_id: None,
+            server_token: None,
+            endpoint: None,
+            connection: None,
+            muted: false,
+            deafened: false,
+            camera: false,
+            generation: 0,
+            stream_key: None,
+            stream_rtc_id: None,
+            stream_token: None,
+            stream_endpoint: None,
+            stream_connection: None,
+            stream_pending: false,
+            streaming: false,
+            stream_generation: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_null_voice_state_does_not_cancel_a_pending_join() {
+        let (handle, _events, task) = Gateway::new(Token::new("test")).start();
+        task.abort();
+        let (ui_tx, _ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let mut voice = runtime(handle);
+
+        // Discord sends the old state as channel_id: null before the target
+        // state. This must not clear pending_join.
+        handle_voice_state(
+            &mut voice,
+            &json!({"user_id": "1", "channel_id": null}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+
+        assert_eq!(
+            voice.pending_join,
+            Some((Some(Snowflake(5)), Snowflake(12)))
+        );
+
+        // The target state records the session id.
+        handle_voice_state(
+            &mut voice,
+            &json!({"user_id": "1", "channel_id": "12", "session_id": "abc"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.session_id.as_deref(), Some("abc"));
+    }
+}

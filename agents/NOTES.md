@@ -99,3 +99,13 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   camera source produce no frames.
 - Stream/camera diagnostics now log stream voice READY (SSRCs, mode, DAVE),
   first encoded stream frame, and DAVE readiness.
+
+## Join UI stuck on "Join Voice" (2026-11-17)
+
+- Discord sends a self `VOICE_STATE_UPDATE` with `channel_id: null` for the
+  previous state while a join is pending. The account loop used to treat that
+  as a real leave, clear `pending_join`, and never connect; the user appeared in
+  the channel but the UI stayed on Join Voice and no microphone path started.
+  Now a null self state tears down only when a voice connection already exists.
+- Guild `VOICE_STATE_UPDATE` carries a `member.user`; the reducer indexes it so
+  voice-channel occupants have names even when they were not in READY.
