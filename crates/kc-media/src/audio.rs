@@ -360,13 +360,19 @@ impl VoiceAudio {
 
         let mic_enabled = Arc::new(AtomicBool::new(true));
         let capture_enabled = mic_enabled.clone();
+        let first_packet = Arc::new(AtomicBool::new(true));
         let capture = Capture::start(move |frame| {
             if !capture_enabled.load(Ordering::Relaxed) {
                 return;
             }
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
-                Ok(packet) => voice.send_audio(packet, 20),
+                Ok(packet) => {
+                    if first_packet.swap(false, Ordering::Relaxed) {
+                        tracing::info!(bytes = packet.len(), "first microphone opus frame");
+                    }
+                    voice.send_audio(packet, 20)
+                }
                 Err(error) => debug!(%error, "opus encode failed"),
             }
         })?;
