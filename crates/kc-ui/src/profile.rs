@@ -25,7 +25,7 @@ use crate::widgets::{avatar_with_status, clear_box, hex_color, status_label};
 
 const BANNER_HEIGHT: i32 = 120;
 const AVATAR_SIZE: i32 = 92;
-const CARD_WIDTH: i32 = 340;
+const CARD_WIDTH: i32 = 400;
 /// Least height of the status bubble, centred on the banner's lower edge.
 const STATUS_HEIGHT: i32 = 30;
 /// The status wraps to at most this many lines before it is shortened.
@@ -208,7 +208,7 @@ impl AppState {
         overlay.set_child(Some(&body));
         overlay.add_overlay(&close);
         dialog.set_child(Some(&overlay));
-        dialog.set_content_width(if has_side { 980 } else { CARD_WIDTH + 32 });
+        dialog.set_content_width(if has_side { 1040 } else { CARD_WIDTH + 32 });
         dialog.set_content_height(640);
 
         // The widgets hold the profile weakly; this keeps it until closed.
