@@ -480,6 +480,9 @@ impl State {
 
         if let Some(voice_states) = data["voice_states"].as_array() {
             for voice_state in voice_states {
+                if let Some(user) = voice_state.pointer("/member/user") {
+                    self.upsert_user_from_value(user);
+                }
                 if let Ok(voice_state) = serde_json::from_value::<VoiceState>(voice_state.clone()) {
                     self.voice_states.insert(voice_state.key(), voice_state);
                 }
@@ -743,6 +746,9 @@ impl State {
                     continue;
                 };
                 for state in states {
+                    if let Some(user) = state.pointer("/member/user") {
+                        self.upsert_user_from_value(user);
+                    }
                     let Ok(mut voice_state) = serde_json::from_value::<VoiceState>(state.clone())
                     else {
                         continue;

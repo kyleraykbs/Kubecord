@@ -78,9 +78,14 @@ impl Dave {
             }
         };
 
+        // The voice gateway is the authenticated MLS delivery service. It can
+        // send a proposal for a user before CLIENT_CONNECT reaches us, so
+        // enforcing a local roster here drops valid groups (observed with a
+        // second participant already in the channel).
+        let _ = expected_users;
         let Some(result) = self
             .session
-            .process_proposals(op_type, data, Some(expected_users))
+            .process_proposals(op_type, data, None)
             .map_err(|error| Error::Message(format!("DAVE proposals: {error}")))?
         else {
             return Ok(None);
