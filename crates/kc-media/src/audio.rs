@@ -1,7 +1,8 @@
 //! Voice audio: mic capture and Opus encode. Receiving is in [`crate::receive`].
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use gstreamer as gst;
 use gstreamer_app::prelude::*;
@@ -238,7 +239,8 @@ impl VoiceAudio {
         let capture_enabled = mic_enabled.clone();
         let first_packet = Arc::new(AtomicBool::new(true));
         let mut detector = SpeechDetector::default();
-        let capture = Capture::start(move |frame| {
+        let capture = Capture::start(move |mut frame| {
+            crate::devices::apply_gain(&mut frame, crate::devices::input_gain());
             if !capture_enabled.load(Ordering::Relaxed) {
                 if let Some(speaking) = detector.silence() {
                     on_speaking(speaking);
@@ -298,6 +300,55 @@ impl VoiceAudio {
     /// What has happened to received packets so far.
     pub fn receive_stats(&self) -> ReceiveStats {
         self.remote.stats()
+    }
+}
+
+/// Frames of microphone audio queued for the mic test's playback; more and
+/// the loopback lags, so the oldest are dropped.
+const MIC_TEST_QUEUE: usize = 4;
+
+/// The settings' mic test: plays the microphone back on the chosen output,
+/// with the configured volumes, and reports how loud it is.
+pub struct MicTest {
+    _capture: Capture,
+    _output: crate::receive::Output,
+    peak: Arc<AtomicU32>,
+}
+
+impl MicTest {
+    pub fn start() -> Result<Self> {
+        let queue = Arc::new(Mutex::new(VecDeque::<Vec<i16>>::new()));
+        let peak = Arc::new(AtomicU32::new(0));
+        let captured = queue.clone();
+        let level = peak.clone();
+        let capture = Capture::start(move |mut frame| {
+            crate::devices::apply_gain(&mut frame, crate::devices::input_gain());
+            let loudest = frame.iter().map(|sample| sample.unsigned_abs()).max();
+            level.fetch_max(u32::from(loudest.unwrap_or(0)), Ordering::Relaxed);
+            let mut queue = captured.lock();
+            if queue.len() >= MIC_TEST_QUEUE {
+                queue.pop_front();
+            }
+            queue.push_back(frame);
+        })?;
+        let output = crate::receive::Output::start(move || {
+            let mut frame = queue
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| vec![0; FRAME_INTERLEAVED]);
+            crate::devices::apply_gain(&mut frame, crate::devices::output_gain());
+            frame
+        })?;
+        Ok(Self {
+            _capture: capture,
+            _output: output,
+            peak,
+        })
+    }
+
+    /// The loudest sample since the last call, from 0.0 to 1.0.
+    pub fn take_peak(&self) -> f32 {
+        self.peak.swap(0, Ordering::Relaxed) as f32 / 32_768.0
     }
 }
 

@@ -49,7 +49,25 @@ pub struct CapturePreferences {
     pub input_device: String,
     /// Output (speaker/headphone) device node name; empty for the default.
     pub output_device: String,
+    /// Microphone volume, 0.0 to 2.0.
+    pub input_volume: f32,
+    /// Speaker volume, 0.0 to 2.0.
+    pub output_volume: f32,
+    /// Name of the camera the camera button uses; empty to ask each time.
+    pub camera: String,
+    /// What the screen-share picker offers: 0 screens and windows, 1
+    /// screens, 2 windows.
+    pub share_source: u32,
+    /// Width of the channel sidebar in pixels.
+    pub sidebar_width: i32,
 }
+
+/// Default and limits of the resizable channel sidebar.
+pub const SIDEBAR_WIDTH: i32 = 340;
+pub const SIDEBAR_MIN: i32 = 220;
+pub const SIDEBAR_MAX: i32 = 480;
+
+pub const SHARE_SOURCES: [&str; 3] = ["Screen or Window", "Entire Screen", "Window"];
 
 impl Default for CapturePreferences {
     fn default() -> Self {
@@ -66,6 +84,11 @@ impl Default for CapturePreferences {
             cpu_encoder: false,
             input_device: String::new(),
             output_device: String::new(),
+            input_volume: 1.0,
+            output_volume: 1.0,
+            camera: String::new(),
+            share_source: 0,
+            sidebar_width: SIDEBAR_WIDTH,
         }
     }
 }
@@ -104,7 +127,7 @@ impl CapturePreferences {
         prefs
     }
 
-    /// Pushes the chosen audio devices into the capture/playback pipelines.
+    /// Pushes the chosen devices and volumes into the media pipelines.
     pub fn apply_devices(&self) {
         kc_media::devices::set_input_device(
             (!self.input_device.is_empty()).then(|| self.input_device.clone()),
@@ -112,6 +135,29 @@ impl CapturePreferences {
         kc_media::devices::set_output_device(
             (!self.output_device.is_empty()).then(|| self.output_device.clone()),
         );
+        kc_media::devices::set_input_gain(self.input_volume);
+        kc_media::devices::set_output_gain(self.output_volume);
+        kc_media::portal::set_share_sources(match self.share_source {
+            1 => kc_media::portal::ShareSources::Screen,
+            2 => kc_media::portal::ShareSources::Window,
+            _ => kc_media::portal::ShareSources::ScreenOrWindow,
+        });
+    }
+
+    /// Puts the stream quality settings (and the advanced ones) back to
+    /// their defaults, keeping devices, volumes and layout.
+    pub fn reset_video(&mut self) {
+        let defaults = Self::default();
+        self.width = defaults.width;
+        self.height = defaults.height;
+        self.fps = defaults.fps;
+        self.bitrate_kbps = defaults.bitrate_kbps;
+        self.keyframe_secs = defaults.keyframe_secs;
+        self.drop_frames_after_ms = defaults.drop_frames_after_ms;
+        self.leaky_queue = defaults.leaky_queue;
+        self.retransmit_ms = defaults.retransmit_ms;
+        self.stream_delay_ms = defaults.stream_delay_ms;
+        self.cpu_encoder = defaults.cpu_encoder;
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -152,6 +198,15 @@ impl CapturePreferences {
         if !RETRANSMIT_WINDOWS_MS.contains(&self.retransmit_ms) {
             self.retransmit_ms = 2000;
         }
+        for volume in [&mut self.input_volume, &mut self.output_volume] {
+            if !volume.is_finite() || !(0.0..=2.0).contains(volume) {
+                *volume = 1.0;
+            }
+        }
+        if self.share_source > 2 {
+            self.share_source = 0;
+        }
+        self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
     }
 }
 
@@ -187,12 +242,38 @@ mod tests {
             retransmit_ms: 5000,
             stream_delay_ms: 1000,
             cpu_encoder: true,
-            input_device: String::new(),
-            output_device: String::new(),
+            ..CapturePreferences::default()
         };
         let settings = prefs.video_settings();
         assert_eq!(settings.bitrate_kbps, 6000);
         assert_eq!(settings.drop_frames_after_ms, 500);
         assert!(!settings.leaky_queue);
+    }
+
+    #[test]
+    fn reset_video_keeps_devices_and_layout() {
+        let mut prefs = CapturePreferences {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: Some(8000),
+            cpu_encoder: true,
+            leaky_queue: false,
+            input_device: "mic".into(),
+            output_volume: 0.5,
+            camera: "Webcam".into(),
+            sidebar_width: 400,
+            ..CapturePreferences::default()
+        };
+        prefs.reset_video();
+        let defaults = CapturePreferences::default();
+        assert_eq!((prefs.width, prefs.height, prefs.fps), (1280, 720, 30));
+        assert_eq!(prefs.bitrate_kbps, None);
+        assert_eq!(prefs.cpu_encoder, defaults.cpu_encoder);
+        assert_eq!(prefs.leaky_queue, defaults.leaky_queue);
+        assert_eq!(prefs.input_device, "mic");
+        assert_eq!(prefs.output_volume, 0.5);
+        assert_eq!(prefs.camera, "Webcam");
+        assert_eq!(prefs.sidebar_width, 400);
     }
 }

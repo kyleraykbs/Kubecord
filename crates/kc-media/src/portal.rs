@@ -2,6 +2,7 @@
 
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use ashpd::desktop::Session;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
@@ -23,6 +24,29 @@ impl ScreenCast {
     }
 }
 
+/// What the screen-share picker offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareSources {
+    ScreenOrWindow = 0,
+    Screen = 1,
+    Window = 2,
+}
+
+static SHARE_SOURCES: AtomicU8 = AtomicU8::new(0);
+
+/// Sets what the screen-share picker offers from now on.
+pub fn set_share_sources(sources: ShareSources) {
+    SHARE_SOURCES.store(sources as u8, Ordering::Relaxed);
+}
+
+fn source_types() -> SourceType {
+    match SHARE_SOURCES.load(Ordering::Relaxed) {
+        1 => SourceType::MONITOR,
+        2 => SourceType::WINDOW,
+        _ => SourceType::MONITOR | SourceType::WINDOW,
+    }
+}
+
 /// Shows the portal picker and returns a stream for the selected monitor or
 /// window. This must be called from a Tokio runtime with a running portal.
 pub async fn request(parent: Option<&ashpd::WindowIdentifier>) -> Result<ScreenCast> {
@@ -34,7 +58,7 @@ pub async fn request(parent: Option<&ashpd::WindowIdentifier>) -> Result<ScreenC
         .await
         .map_err(|error| Error::Message(format!("screencast session: {error}")))?;
     let options = SelectSourcesOptions::default()
-        .set_sources(SourceType::MONITOR | SourceType::WINDOW)
+        .set_sources(source_types())
         .set_multiple(false)
         .set_cursor_mode(CursorMode::EMBEDDED);
     proxy

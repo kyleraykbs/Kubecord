@@ -17,10 +17,7 @@ use kc_state::{Channel, StoreEvent};
 use crate::session::{
     self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
 };
-use crate::settings::{
-    BITRATES, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS,
-    RETRANSMIT_WINDOWS_MS, STREAM_DELAYS,
-};
+use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN};
 use crate::shell::AppState;
 use crate::widgets::{clear_box, label, status_dot};
 
@@ -93,8 +90,6 @@ pub fn run() -> glib::ExitCode {
             ui_tx_for_ui.clone(),
         );
         state.connect_signals();
-        // Apply any saved audio-device choices to the capture/playback paths.
-        state.capture.borrow().apply_devices();
 
         let receiver = ui_rx_slot
             .borrow_mut()
@@ -145,6 +140,12 @@ pub fn run() -> glib::ExitCode {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
                 app_state.show_video_demo();
+            });
+        }
+        if let Ok(page) = std::env::var("KYLECORD_SETTINGS") {
+            let app_state = state.clone();
+            glib::timeout_add_local_once(Duration::from_millis(4000), move || {
+                app_state.show_settings_page(&page);
             });
         }
         if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
@@ -276,7 +277,20 @@ impl AppState {
             .connect_toggled(move |_| app.on_screen_toggled());
         let app = self.clone();
         self.capture_button
-            .connect_clicked(move |_| app.show_capture_settings());
+            .connect_clicked(move |_| app.show_settings());
+
+        // The sidebar width is kept between launches.
+        let app = self.clone();
+        self.sidebar_paned.connect_position_notify(move |paned| {
+            let width = paned.position();
+            if width > SIDEBAR_MAX {
+                paned.set_position(SIDEBAR_MAX);
+                return;
+            }
+            if width >= SIDEBAR_MIN && width != app.capture.borrow().sidebar_width {
+                app.update_prefs(|prefs| prefs.sidebar_width = width);
+            }
+        });
     }
 
     /// Opens the previous or next channel in the sidebar.
@@ -303,303 +317,6 @@ impl AppState {
         if let Some(channel) = channel {
             self.open_channel(channel);
         }
-    }
-
-    pub(crate) fn show_capture_settings(self: &Rc<Self>) {
-        let current = self.capture.borrow().clone();
-        let dialog = adw::Dialog::new();
-        dialog.set_title("Settings");
-        dialog.set_content_width(480);
-        let cancel = gtk::Button::with_label("Cancel");
-        let save = gtk::Button::with_label("Save");
-        save.add_css_class("suggested-action");
-        let header = adw::HeaderBar::new();
-        header.set_show_start_title_buttons(false);
-        header.set_show_end_title_buttons(false);
-        header.pack_start(&cancel);
-        header.pack_end(&save);
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        body.set_margin_bottom(6);
-        let view = adw::ToolbarView::new();
-        view.add_top_bar(&header);
-        view.set_content(Some(&body));
-        dialog.set_child(Some(&view));
-        let target = dialog.clone();
-        cancel.connect_clicked(move |_| {
-            target.close();
-        });
-
-        let grid = gtk::Grid::new();
-        grid.set_row_spacing(10);
-        grid.set_column_spacing(16);
-        grid.set_margin_top(12);
-        grid.set_margin_bottom(12);
-        grid.set_margin_start(12);
-        grid.set_margin_end(12);
-
-        let resolution_names: Vec<&str> = RESOLUTIONS.iter().map(|(_, _, name)| *name).collect();
-        let resolution = gtk::DropDown::from_strings(&resolution_names);
-        let resolution_index = RESOLUTIONS
-            .iter()
-            .position(|(width, height, _)| *width == current.width && *height == current.height)
-            .unwrap_or(1) as u32;
-        resolution.set_selected(resolution_index);
-
-        let framerate_names: Vec<String> =
-            FRAMERATES.iter().map(|fps| format!("{fps} fps")).collect();
-        let framerate_refs: Vec<&str> = framerate_names.iter().map(String::as_str).collect();
-        let framerate = gtk::DropDown::from_strings(&framerate_refs);
-        framerate.set_selected(
-            FRAMERATES
-                .iter()
-                .position(|fps| *fps == current.fps)
-                .unwrap_or(1) as u32,
-        );
-
-        let mut bitrate_names = vec!["Automatic".to_owned()];
-        bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
-        let bitrate_refs: Vec<&str> = bitrate_names.iter().map(String::as_str).collect();
-        let bitrate = gtk::DropDown::from_strings(&bitrate_refs);
-        let bitrate_index = current
-            .bitrate_kbps
-            .and_then(|kbps| BITRATES.iter().position(|value| *value == kbps))
-            .map(|index| index + 1)
-            .unwrap_or(0) as u32;
-        bitrate.set_selected(bitrate_index);
-
-        let delay_names = ["None", "0.5 s", "1 s", "2 s", "3 s"];
-        let delay = gtk::DropDown::from_strings(&delay_names);
-        delay.set_selected(
-            STREAM_DELAYS
-                .iter()
-                .position(|delay| *delay == current.stream_delay_ms)
-                .unwrap_or(0) as u32,
-        );
-
-        let keyframe_names: Vec<String> = KEYFRAME_INTERVALS
-            .iter()
-            .map(|seconds| format!("{seconds} s"))
-            .collect();
-        let keyframe_refs: Vec<&str> = keyframe_names.iter().map(String::as_str).collect();
-        let keyframe = gtk::DropDown::from_strings(&keyframe_refs);
-        keyframe.set_selected(
-            KEYFRAME_INTERVALS
-                .iter()
-                .position(|seconds| *seconds == current.keyframe_secs)
-                .unwrap_or(0) as u32,
-        );
-
-        let cpu_encoder = gtk::CheckButton::with_label("Use software CPU encoder (x264)");
-        cpu_encoder.set_active(current.cpu_encoder);
-
-        for (row, label_text, dropdown) in [
-            (0, "Resolution", &resolution),
-            (1, "Framerate", &framerate),
-            (2, "Bitrate", &bitrate),
-            (3, "Go Live delay", &delay),
-        ] {
-            let label = gtk::Label::new(Some(label_text));
-            label.set_xalign(0.0);
-            grid.attach(&label, 0, row, 1, 1);
-            grid.attach(dropdown, 1, row, 1, 1);
-        }
-
-        let encoder_label = gtk::Label::new(Some("Encoder"));
-        encoder_label.set_xalign(0.0);
-        grid.attach(&encoder_label, 0, 4, 1, 1);
-        grid.attach(&cpu_encoder, 1, 4, 1, 1);
-
-        let note = gtk::Label::new(Some(
-            "Automatic bitrate is derived from resolution and framerate. Hardware encoding is used when available and falls back to x264. Changes apply to the next capture.",
-        ));
-        note.set_xalign(0.0);
-        note.set_wrap(true);
-        note.add_css_class("dim-label");
-        note.add_css_class("caption");
-        grid.attach(&note, 0, 5, 2, 1);
-        body.append(&grid);
-
-        // -- audio devices -----------------------------------------------
-        let inputs = kc_media::devices::inputs();
-        let outputs = kc_media::devices::outputs();
-        let mut input_names = vec![String::new()];
-        input_names.extend(inputs.iter().map(|device| device.name.clone()));
-        let mut input_labels = vec!["Default".to_owned()];
-        input_labels.extend(inputs.iter().map(|device| device.label.clone()));
-        let input_label_refs: Vec<&str> = input_labels.iter().map(String::as_str).collect();
-        let input_dd = gtk::DropDown::from_strings(&input_label_refs);
-        input_dd.set_selected(
-            input_names
-                .iter()
-                .position(|name| *name == current.input_device)
-                .unwrap_or(0) as u32,
-        );
-
-        let mut output_names = vec![String::new()];
-        output_names.extend(outputs.iter().map(|device| device.name.clone()));
-        let mut output_labels = vec!["Default".to_owned()];
-        output_labels.extend(outputs.iter().map(|device| device.label.clone()));
-        let output_label_refs: Vec<&str> = output_labels.iter().map(String::as_str).collect();
-        let output_dd = gtk::DropDown::from_strings(&output_label_refs);
-        output_dd.set_selected(
-            output_names
-                .iter()
-                .position(|name| *name == current.output_device)
-                .unwrap_or(0) as u32,
-        );
-
-        let audio_grid = gtk::Grid::new();
-        audio_grid.set_row_spacing(10);
-        audio_grid.set_column_spacing(16);
-        audio_grid.set_margin_start(12);
-        audio_grid.set_margin_end(12);
-        audio_grid.set_margin_bottom(12);
-        let audio_title = gtk::Label::new(Some("Audio Devices"));
-        audio_title.set_xalign(0.0);
-        audio_title.add_css_class("heading");
-        audio_grid.attach(&audio_title, 0, 0, 2, 1);
-        for (row, text, dropdown) in [(1, "Microphone", &input_dd), (2, "Output", &output_dd)] {
-            let label = gtk::Label::new(Some(text));
-            label.set_xalign(0.0);
-            audio_grid.attach(&label, 0, row, 1, 1);
-            audio_grid.attach(dropdown, 1, row, 1, 1);
-        }
-        let audio_note = gtk::Label::new(Some(
-            "Device changes take effect the next time you join a call.",
-        ));
-        audio_note.set_xalign(0.0);
-        audio_note.set_wrap(true);
-        audio_note.add_css_class("dim-label");
-        audio_note.add_css_class("caption");
-        audio_grid.attach(&audio_note, 0, 3, 2, 1);
-        body.append(&audio_grid);
-
-        let advanced = gtk::Expander::new(Some("Advanced"));
-        advanced.set_margin_start(12);
-        advanced.set_margin_end(12);
-        let advanced_grid = gtk::Grid::new();
-        advanced_grid.set_row_spacing(10);
-        advanced_grid.set_column_spacing(16);
-        advanced_grid.set_margin_start(12);
-        advanced_grid.set_margin_end(12);
-        advanced_grid.set_margin_top(6);
-        advanced_grid.set_margin_bottom(12);
-
-        let drop_names: Vec<String> = DROP_AFTER_MS
-            .iter()
-            .map(|ms| {
-                if *ms == 0 {
-                    "Never".to_owned()
-                } else {
-                    format!("{ms} ms")
-                }
-            })
-            .collect();
-        let drop_refs: Vec<&str> = drop_names.iter().map(String::as_str).collect();
-        let drop_late = gtk::DropDown::from_strings(&drop_refs);
-        drop_late.set_selected(
-            DROP_AFTER_MS
-                .iter()
-                .position(|ms| *ms == current.drop_frames_after_ms)
-                .unwrap_or(2) as u32,
-        );
-        let drop_label = gtk::Label::new(Some("Drop late frames after"));
-        drop_label.set_xalign(0.0);
-        let keyframe_label = gtk::Label::new(Some("Keyframe interval"));
-        keyframe_label.set_xalign(0.0);
-        keyframe.set_tooltip_text(Some(
-            "How often a full frame is sent unprompted. Viewers that lose the picture request one themselves, so longer intervals give a steadier stream; shorter ones recover sooner if a request is missed.",
-        ));
-        advanced_grid.attach(&keyframe_label, 0, 0, 1, 1);
-        advanced_grid.attach(&keyframe, 1, 0, 1, 1);
-
-        let retransmit_names: Vec<String> = RETRANSMIT_WINDOWS_MS
-            .iter()
-            .map(|ms| {
-                if *ms == 0 {
-                    "Off".to_owned()
-                } else {
-                    format!("{} s", ms / 1000)
-                }
-            })
-            .collect();
-        let retransmit_refs: Vec<&str> = retransmit_names.iter().map(String::as_str).collect();
-        let retransmit = gtk::DropDown::from_strings(&retransmit_refs);
-        retransmit.set_selected(
-            RETRANSMIT_WINDOWS_MS
-                .iter()
-                .position(|ms| *ms == current.retransmit_ms)
-                .unwrap_or(2) as u32,
-        );
-        retransmit.set_tooltip_text(Some(
-            "How much recently sent audio and video is kept so it can be resent after a network dropout. Longer windows repair longer dropouts; Off never resends.",
-        ));
-        let retransmit_label = gtk::Label::new(Some("Dropout recovery window"));
-        retransmit_label.set_xalign(0.0);
-        advanced_grid.attach(&retransmit_label, 0, 1, 1, 1);
-        advanced_grid.attach(&retransmit, 1, 1, 1, 1);
-
-        advanced_grid.attach(&drop_label, 0, 2, 1, 1);
-        advanced_grid.attach(&drop_late, 1, 2, 1, 1);
-
-        let leaky = gtk::CheckButton::with_label("Drop old frames in the capture queue");
-        leaky.set_active(current.leaky_queue);
-        leaky.set_tooltip_text(Some(
-            "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
-        ));
-        advanced_grid.attach(&leaky, 0, 3, 2, 1);
-
-        let advanced_note = gtk::Label::new(Some(
-            "Late-frame drops apply beyond the configured Go Live delay. Zero disables the limit.",
-        ));
-        advanced_note.set_xalign(0.0);
-        advanced_note.set_wrap(true);
-        advanced_note.add_css_class("dim-label");
-        advanced_note.add_css_class("caption");
-        advanced_grid.attach(&advanced_note, 0, 4, 2, 1);
-        advanced.set_child(Some(&advanced_grid));
-        body.append(&advanced);
-
-        let app = self.clone();
-        let target = dialog.clone();
-        save.connect_clicked(move |_| {
-            target.close();
-            let (width, height, _) = RESOLUTIONS[resolution.selected() as usize];
-            let fps = FRAMERATES[framerate.selected() as usize];
-            let bitrate_kbps = match bitrate.selected() as usize {
-                0 => None,
-                index => BITRATES.get(index - 1).copied(),
-            };
-            let prefs = CapturePreferences {
-                width,
-                height,
-                fps,
-                bitrate_kbps,
-                keyframe_secs: KEYFRAME_INTERVALS[keyframe.selected() as usize],
-                drop_frames_after_ms: DROP_AFTER_MS[drop_late.selected() as usize],
-                leaky_queue: leaky.is_active(),
-                retransmit_ms: RETRANSMIT_WINDOWS_MS[retransmit.selected() as usize],
-                stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
-                cpu_encoder: cpu_encoder.is_active(),
-                input_device: input_names
-                    .get(input_dd.selected() as usize)
-                    .cloned()
-                    .unwrap_or_default(),
-                output_device: output_names
-                    .get(output_dd.selected() as usize)
-                    .cloned()
-                    .unwrap_or_default(),
-            };
-            match prefs.save() {
-                Ok(()) => {
-                    prefs.apply_devices();
-                    *app.capture.borrow_mut() = prefs;
-                    app.set_status("Settings saved");
-                }
-                Err(error) => app.set_status(&format!("capture settings: {error}")),
-            }
-        });
-        dialog.present(Some(&self.window));
     }
 
     // -- account lifecycle -----------------------------------------------
@@ -884,6 +601,21 @@ impl AppState {
         if cameras.is_empty() {
             self.reset_camera_ui(purpose);
             self.set_status("No camera available");
+            return;
+        }
+        // The camera chosen in Settings is used without asking.
+        let preferred = self.capture.borrow().camera.clone();
+        if purpose == CameraPurpose::Camera
+            && let Some(camera) = cameras.iter().find(|camera| camera.name == preferred)
+        {
+            let settings = self.capture.borrow().video_settings();
+            let _ = self.cmd_tx.try_send(Command::SetCameraDevice {
+                account,
+                access,
+                node_id: camera.node_id,
+                settings,
+            });
+            self.set_status("Turning on camera…");
             return;
         }
 

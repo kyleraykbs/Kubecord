@@ -21,6 +21,13 @@ pub struct User {
     /// current user and in profiles.
     #[serde(default)]
     pub premium_type: Option<u8>,
+    /// Account details, only sent for the current user.
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub mfa_enabled: Option<bool>,
 }
 
 impl User {

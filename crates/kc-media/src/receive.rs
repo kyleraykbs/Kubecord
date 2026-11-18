@@ -281,7 +281,7 @@ impl Mixer {
         if voiced {
             self.stats.frames_with_voice += 1;
         }
-        let master = self.master;
+        let master = self.master * crate::devices::output_gain();
         sum.into_iter()
             .map(|sample| {
                 (sample as f32 * master).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
@@ -293,12 +293,12 @@ impl Mixer {
 /// Plays a stream that is generated on demand. The sound device's own clock
 /// decides when the next frame is needed, so playback cannot drift against it
 /// the way a timer would.
-struct Output {
+pub(crate) struct Output {
     pipeline: gst::Pipeline,
 }
 
 impl Output {
-    fn start(mut next_frame: impl FnMut() -> Vec<i16> + Send + 'static) -> Result<Self> {
+    pub(crate) fn start(mut next_frame: impl FnMut() -> Vec<i16> + Send + 'static) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
 
         // A short device buffer keeps the delay low; the jitter buffer, not

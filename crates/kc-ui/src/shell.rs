@@ -16,10 +16,8 @@ use crate::chat::ChatView;
 use crate::images::ImageCache;
 use crate::player::LoopingVideo;
 use crate::session::{AccountId, Command, Session, UiEvent};
-use crate::settings::CapturePreferences;
+use crate::settings::{CapturePreferences, SIDEBAR_MAX, SIDEBAR_MIN};
 use crate::widgets::{icon_available, icon_button, toggle_icon_button};
-
-const SIDEBAR_WIDTH: i32 = 248;
 
 pub(crate) struct Model {
     pub accounts: AccountStore,
@@ -65,7 +63,10 @@ pub(crate) struct AppState {
     pub voice_deafen: gtk::ToggleButton,
     pub voice_camera: gtk::ToggleButton,
     pub voice_screen: gtk::ToggleButton,
+    /// The settings gear in the user bar, always visible.
     pub capture_button: gtk::Button,
+    /// Splits the channel sidebar from the content; dragging resizes it.
+    pub sidebar_paned: gtk::Paned,
 
     // Content header.
     pub banner: adw::Banner,
@@ -283,7 +284,6 @@ impl AppState {
 
         let voice_camera = toggle_icon_button("camera-video-symbolic", "Turn On Camera");
         let voice_screen = toggle_icon_button("video-display-symbolic", "Share Your Screen");
-        let capture_button = icon_button("emblem-system-symbolic", "Settings");
         let voice_leave = icon_button("call-stop-symbolic", "Disconnect");
         voice_leave.add_css_class("error");
 
@@ -299,7 +299,6 @@ impl AppState {
         voice_buttons.set_homogeneous(true);
         voice_buttons.append(&voice_camera);
         voice_buttons.append(&voice_screen);
-        voice_buttons.append(&capture_button);
 
         let voice_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
         voice_content.set_margin_top(8);
@@ -318,8 +317,13 @@ impl AppState {
         let user_avatar_slot = gtk::Overlay::new();
         user_avatar_slot.set_child(Some(&user_avatar));
 
+        // Names wrap at spaces onto a second line; a single word too long
+        // for the bar is cut with an ellipsis instead of broken.
         let user_name_label = gtk::Label::new(None);
         user_name_label.set_xalign(0.0);
+        user_name_label.set_wrap(true);
+        user_name_label.set_wrap_mode(gtk::pango::WrapMode::Word);
+        user_name_label.set_lines(2);
         user_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         user_name_label.add_css_class("heading");
 
@@ -358,10 +362,11 @@ impl AppState {
         voice_mute.set_sensitive(false);
         let voice_deafen = toggle_icon_button("audio-volume-muted-symbolic", "Deafen");
         voice_deafen.set_sensitive(false);
+        let capture_button = icon_button("emblem-system-symbolic", "User Settings");
 
         let user_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         user_bar.add_css_class("kc-userbar");
-        let user_bar_inner = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let user_bar_inner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         user_bar_inner.set_margin_start(4);
         user_bar_inner.set_margin_end(6);
         user_bar_inner.set_margin_top(4);
@@ -370,6 +375,7 @@ impl AppState {
         user_bar_inner.append(&account_button);
         user_bar_inner.append(&voice_mute);
         user_bar_inner.append(&voice_deafen);
+        user_bar_inner.append(&capture_button);
         user_bar.append(&user_bar_inner);
 
         let sidebar_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -380,14 +386,9 @@ impl AppState {
         let channel_sidebar = adw::ToolbarView::new();
         channel_sidebar.add_top_bar(&sidebar_header);
         channel_sidebar.set_content(Some(&sidebar_body));
-        // Ellipsised labels still report their full text as natural width,
-        // so the sidebar is clamped to a fixed width.
-        let sidebar_clamp = adw::Clamp::new();
-        sidebar_clamp.set_maximum_size(SIDEBAR_WIDTH);
-        sidebar_clamp.set_tightening_threshold(SIDEBAR_WIDTH);
-        sidebar_clamp.set_width_request(SIDEBAR_WIDTH);
-        sidebar_clamp.set_hexpand(false);
-        sidebar_clamp.set_child(Some(&channel_sidebar));
+        // The paned below sets the width; the minimum keeps the user bar's
+        // buttons on screen.
+        channel_sidebar.set_width_request(SIDEBAR_MIN);
         channel_sidebar.add_css_class("sidebar-pane");
 
         // -- content header ----------------------------------------------
@@ -679,11 +680,23 @@ impl AppState {
         content.set_content(Some(&content_stack));
         content.set_hexpand(true);
 
+        // The sidebar keeps its width when the window resizes; dragging the
+        // handle changes it.
+        let capture = CapturePreferences::load();
+        capture.apply_devices();
+        let sidebar_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+        sidebar_paned.set_start_child(Some(&channel_sidebar));
+        sidebar_paned.set_end_child(Some(&content));
+        sidebar_paned.set_resize_start_child(false);
+        sidebar_paned.set_shrink_start_child(false);
+        sidebar_paned.set_resize_end_child(true);
+        sidebar_paned.set_shrink_end_child(false);
+        sidebar_paned.set_position(capture.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX));
+        sidebar_paned.set_hexpand(true);
+
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&guild_scroll);
-        body.append(&sidebar_clamp);
-        body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        body.append(&content);
+        body.append(&sidebar_paned);
         stack.add_named(&body, Some("chat"));
 
         let toasts = adw::ToastOverlay::new();
@@ -723,6 +736,7 @@ impl AppState {
             voice_camera,
             voice_screen,
             capture_button,
+            sidebar_paned,
             banner,
             header_icon,
             channel_title_label,
@@ -775,7 +789,7 @@ impl AppState {
             runtime,
             ui_tx,
             images,
-            capture: RefCell::new(CapturePreferences::load()),
+            capture: RefCell::new(capture),
             window_identifier: RefCell::new(None),
             chat: RefCell::new(ChatView::default()),
             show_members: Cell::new(true),

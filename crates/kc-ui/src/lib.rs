@@ -16,6 +16,7 @@ mod rich;
 mod server;
 mod session;
 mod settings;
+mod settings_panel;
 mod shell;
 mod sidebar;
 mod style;

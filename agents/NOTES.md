@@ -346,3 +346,12 @@ dispatch; contains account data).
   default. Takes effect on the next call.
 - Server header is a dropdown (`server.rs`): Invite, Create Channel/Category,
   Server Settings (rename), Mute/Unmute, Copy ID, Leave — gated by perms.
+
+## Settings panel and user bar (2026-11-18)
+
+- Settings is a two-pane `adw::Dialog` (`kc-ui/src/settings_panel.rs`): My Account and Voice & Video. Changes apply immediately via `AppState::update_prefs`, which saves to `settings.json` after a 400 ms debounce.
+- Mic/speaker volume are process-global gains in `kc_media::devices` (`set_input_gain`/`set_output_gain`), applied live in the capture callback and the playback mixer. `audio::MicTest` loops the mic back to the chosen output and reports the peak level.
+- Camera/screenshare tests run the real encode pipeline into a `VideoFeed` and decode it with `LiveVideo`, so they show what viewers get at the current quality settings. Use `spawn_local` there, not `AppState::spawn`: its callback must be `Send`, and GTK objects are not.
+- Audio devices are listed via `pulsedeviceprovider`; a general `DeviceMonitor` also probes cameras and floods the log with GstFractionRange criticals.
+- The channel sidebar is a `gtk::Paned` (default 340px, 220–480, persisted as `sidebar_width`). The settings gear sits in the user bar beside Deafen.
+- Dev aid: `KYLECORD_SETTINGS=account|voice` opens the panel 4 s after launch (pair with `KYLECORD_SCREENSHOT`).

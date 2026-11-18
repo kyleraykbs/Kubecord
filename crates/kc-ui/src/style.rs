@@ -235,6 +235,17 @@ const CSS: &str = r#"
     background-color: alpha(black, 0.12);
 }
 
+/* Compact controls, as in Discord, so the name gets the room. */
+.kc-userbar button.image-button {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 2px;
+}
+
+.kc-userbar menubutton > button {
+    padding: 2px 4px;
+}
+
 .kc-voice-tile {
     padding: 20px 16px 12px 16px;
     min-width: 168px;
@@ -286,6 +297,26 @@ const CSS: &str = r#"
 
 .kc-voice-tile.kc-speaking .kc-video {
     outline-color: @success_bg_color;
+}
+
+.kc-preview {
+    border-radius: 12px;
+    background-color: black;
+}
+
+.kc-meter block {
+    min-width: 4px;
+    min-height: 26px;
+    margin: 0 1px;
+    border-radius: 2px;
+}
+
+.kc-meter block.filled {
+    background-color: @success_bg_color;
+}
+
+.kc-meter block.empty {
+    background-color: alpha(currentColor, 0.15);
 }
 
 .kc-watch {
