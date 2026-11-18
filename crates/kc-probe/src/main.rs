@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
             watch(token, false).await?;
         }
         "screen" => {
-            let portal = kc_media::portal::request().await?;
+            let portal = kc_media::portal::request(None).await?;
             let (tx, rx) = std::sync::mpsc::channel();
             match kc_media::video::VideoSource::screen(
                 portal,
@@ -472,7 +472,7 @@ async fn voice(
 
                                     let settings = kc_media::video::VideoSettings::default();
                                     let source = if screen {
-                                        match kc_media::portal::request().await {
+                                        match kc_media::portal::request(None).await {
                                             Ok(portal) => kc_media::video::VideoSource::screen(
                                                 portal,
                                                 settings,

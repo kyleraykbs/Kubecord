@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ashpd.workspace = true
 anyhow.workspace = true
 async-channel = "2"
 glib.workspace = true

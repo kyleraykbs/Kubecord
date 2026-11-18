@@ -52,16 +52,16 @@ fn encoder_element() -> &'static str {
     "x264enc"
 }
 
-fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
+fn pipeline_downstream(settings: &VideoSettings) -> String {
     format!(
         // Leave the source format unconstrained. Forcing I420 on pipewiresrc
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before x264enc.
-        "{source} ! video/x-raw ! videoconvert ! videoscale ! videorate \
-         ! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
+        "capsfilter caps=video/x-raw ! videoconvert ! videoscale ! videorate \
+         ! capsfilter caps=video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
          ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
          ! h264parse config-interval=-1 \
-         ! video/x-h264,stream-format=byte-stream,alignment=au \
+         ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
          ! appsink name=sink sync=false max-buffers=4 drop=true",
         width = settings.width,
         height = settings.height,
@@ -71,6 +71,28 @@ fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
         bitrate = settings.bitrate_kbps,
         keyint = settings.fps * 2,
     )
+}
+
+fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
+    format!("{source} ! {}", pipeline_downstream(settings))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PipeWireProperty {
+    Path,
+    TargetObject,
+}
+
+/// Loads GStreamer and the PipeWire source plugin on the caller's thread.
+/// Doing this lazily from a Tokio worker inside the GTK app deadlocked while
+/// the plugin registry was loading; camera pipelines use v4l2 and were not
+/// affected.
+pub fn preload_pipewire() -> Result<()> {
+    gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
+    gst::ElementFactory::make("pipewiresrc")
+        .build()
+        .map_err(|error| Error::Message(format!("pipewiresrc plugin: {error}")))?;
+    Ok(())
 }
 
 impl VideoSource {
@@ -190,14 +212,7 @@ impl VideoSource {
         settings: VideoSettings,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
-        let node_id = portal.node_id;
-        let fd = portal.fd();
-        // The screen portal fd can expose multiple nodes; path selects the
-        // display the user picked. Without it pipewiresrc defaults to the
-        // camera node, which made Go Live show the camera instead.
-        let mut source = Self::from_pipewire(node_id, fd, &settings, true, on_frame)?;
-        source._portal = Some(portal);
-        Ok(source)
+        Self::from_screen_portal(portal, settings, on_frame)
     }
 
     /// Captures a camera selected through the XDG camera portal.
@@ -206,57 +221,125 @@ impl VideoSource {
         settings: VideoSettings,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
+        if let Some(device) = camera.device_path.clone() {
+            return Self::camera(Some(device), settings, on_frame);
+        }
         let node_id = camera.node_id;
         let fd = camera.fd();
-        let mut source = Self::from_pipewire(node_id, fd, &settings, false, on_frame)?;
+        let mut targets = vec![vec![(PipeWireProperty::Path, node_id.to_string())]];
+        if !camera.node_name.is_empty() {
+            targets.push(vec![(
+                PipeWireProperty::TargetObject,
+                camera.node_name.clone(),
+            )]);
+        }
+        if !camera.serial.is_empty() {
+            targets.push(vec![(
+                PipeWireProperty::TargetObject,
+                camera.serial.clone(),
+            )]);
+        }
+        let mut source =
+            Self::from_pipewire(node_id, fd, true, &settings, targets, on_frame)?;
         // The portal owns the PipeWire fd; keep it alive with the pipeline.
         source._camera = Some(camera);
+        Ok(source)
+    }
+
+
+    fn from_screen_portal(
+        portal: crate::portal::ScreenCast,
+        settings: VideoSettings,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self> {
+        gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
+        tracing::debug!(
+            node_id = portal.node_id,
+            fd = portal.fd(),
+            "screen capture source starting"
+        );
+        if gst::ElementFactory::find("pipewiresrc").is_none() {
+            return Err(Error::Message(
+                "pipewiresrc plugin unavailable; start kylecord from `nix develop` or the packaged Nix build"
+                    .into(),
+            ));
+        }
+        let fd = portal.fd();
+        let node_id = portal.node_id;
+        let description = format!(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
+             ! videorate skip-to-first=true \
+             ! capsfilter caps=video/x-raw,framerate={fps}/1 \
+             ! queue \
+             ! videoconvert \
+             ! videoscale \
+             ! capsfilter caps=video/x-raw,format=I420,width={width},height={height} \
+             ! x264enc tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
+             ! h264parse config-interval=-1 \
+             ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
+             ! appsink name=sink sync=false max-buffers=4 drop=true",
+            fps = settings.fps,
+            width = settings.width,
+            height = settings.height,
+            preset = settings.preset,
+            bitrate = settings.bitrate_kbps,
+            keyint = settings.fps * 2,
+        );
+        tracing::debug!("screen capture parsing pipeline");
+        let mut source = Self::start_pipeline_with(
+            &description,
+            1000 / settings.fps.max(1),
+            on_frame,
+            move |pipeline| {
+                let element = pipeline
+                    .by_name("src")
+                    .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
+                element.set_property("fd", fd);
+                element.set_property("path", node_id.to_string());
+                Ok(())
+            },
+        )?;
+        tracing::debug!("screen capture pipeline started");
+        source._portal = Some(portal);
         Ok(source)
     }
 
     fn from_pipewire(
         node_id: u32,
         fd: std::os::fd::RawFd,
+        use_fd: bool,
         settings: &VideoSettings,
-        prefer_path: bool,
+        targets: Vec<Vec<(PipeWireProperty, String)>>,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
         let on_frame = Arc::new(std::sync::Mutex::new(on_frame));
         // Set properties on the element directly. Passing fd/path through
         // gst_parse_launch failed state setup on the camera; the gtk4
         // paintable example sets fd and path as properties.
-        #[derive(Clone, Copy, Debug)]
-        enum Variant {
-            FdOnly,
-            Path,
-            Target,
-        }
-        let variants: Vec<Variant> = if prefer_path {
-            // Never fall back to fd-only for a screen: that selects the
-            // portal's first node, which is usually the camera, steals it from
-            // the camera path, and shows the camera in the stream.
-            vec![Variant::Path, Variant::Target]
-        } else {
-            vec![Variant::FdOnly, Variant::Path, Variant::Target]
-        };
         let source = "pipewiresrc name=src do-timestamp=true";
         let mut last_error = None;
-        for variant in variants {
+        for properties in targets {
             let callback = on_frame.clone();
             let callback = move |frame| {
                 if let Ok(mut callback) = callback.lock() {
                     callback(frame);
                 }
             };
+            let properties_for_log = properties.clone();
             let configure = move |pipeline: &gst::Pipeline| -> Result<()> {
                 let element = pipeline
                     .by_name("src")
                     .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
-                element.set_property("fd", fd);
-                match variant {
-                    Variant::FdOnly => {}
-                    Variant::Path => element.set_property("path", node_id.to_string()),
-                    Variant::Target => element.set_property("target-object", node_id.to_string()),
+                if use_fd {
+                    element.set_property("fd", fd);
+                }
+                for (property, value) in &properties {
+                    match property {
+                        PipeWireProperty::Path => element.set_property("path", value),
+                        PipeWireProperty::TargetObject => {
+                            element.set_property("target-object", value)
+                        }
+                    }
                 }
                 Ok(())
             };
@@ -268,14 +351,25 @@ impl VideoSource {
             ) {
                 Ok(video_source) => {
                     tracing::info!(
-                        variant = ?variant,
+                        ?properties_for_log,
                         node_id,
                         fd,
+                        use_fd,
                         "pipewire capture source selected"
                     );
                     return Ok(video_source);
                 }
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    tracing::warn!(
+                        ?properties_for_log,
+                        node_id,
+                        fd,
+                        use_fd,
+                        %error,
+                        "pipewire capture variant failed"
+                    );
+                    last_error = Some(error);
+                }
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Message("no pipewire source variant".into())))

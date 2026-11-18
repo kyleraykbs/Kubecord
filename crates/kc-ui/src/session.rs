@@ -7,7 +7,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
@@ -16,6 +16,7 @@ use kc_gateway::session::GatewayHandle;
 use kc_gateway::{Gateway, GatewayEvent};
 use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
+use kc_media::portal::CameraAccess;
 use kc_media::video::{VideoSettings, VideoSource};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
@@ -105,6 +106,13 @@ impl Session {
     }
 }
 
+/// Why the UI asked for the camera list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraPurpose {
+    Camera,
+    Stream,
+}
+
 /// Voice work for one account, processed by its account loop.
 pub enum VoiceCommand {
     Join {
@@ -115,7 +123,17 @@ pub enum VoiceCommand {
     SetMute(bool),
     SetDeafen(bool),
     SetCamera(bool),
-    StartStream,
+    SetCameraDevice {
+        access: CameraAccess,
+        node_id: u32,
+    },
+    StartStream {
+        parent: Option<Arc<ashpd::WindowIdentifier>>,
+    },
+    StartStreamCamera {
+        access: CameraAccess,
+        node_id: u32,
+    },
     StopStream,
     Subscribe {
         guild_id: Snowflake,
@@ -192,8 +210,19 @@ pub enum Command {
         account: AccountId,
         camera: bool,
     },
+    SetCameraDevice {
+        account: AccountId,
+        access: CameraAccess,
+        node_id: u32,
+    },
     StartStream {
         account: AccountId,
+        parent: Option<Arc<ashpd::WindowIdentifier>>,
+    },
+    StartStreamCamera {
+        account: AccountId,
+        access: CameraAccess,
+        node_id: u32,
     },
     StopStream {
         account: AccountId,
@@ -268,6 +297,26 @@ pub enum UiEvent {
     StreamError {
         account: AccountId,
         message: String,
+    },
+    CameraChoices {
+        account: AccountId,
+        purpose: CameraPurpose,
+        access: CameraAccess,
+        cameras: Vec<kc_media::portal::CameraChoice>,
+    },
+    CameraUnavailable {
+        account: AccountId,
+        purpose: CameraPurpose,
+        message: String,
+    },
+    CameraFailed {
+        account: AccountId,
+    },
+    CameraStarted {
+        account: AccountId,
+    },
+    CameraStopped {
+        account: AccountId,
     },
     Error {
         account: Option<AccountId>,
@@ -402,8 +451,32 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
-        Command::StartStream { account } => {
-            forward_voice(account, VoiceCommand::StartStream, ui).await;
+        Command::StartStream { account, parent } => {
+            forward_voice(account, VoiceCommand::StartStream { parent }, ui).await;
+        }
+        Command::SetCameraDevice {
+            account,
+            access,
+            node_id,
+        } => {
+            forward_voice(
+                account,
+                VoiceCommand::SetCameraDevice { access, node_id },
+                ui,
+            )
+            .await;
+        }
+        Command::StartStreamCamera {
+            account,
+            access,
+            node_id,
+        } => {
+            forward_voice(
+                account,
+                VoiceCommand::StartStreamCamera { access, node_id },
+                ui,
+            )
+            .await;
         }
         Command::StopStream { account } => {
             forward_voice(account, VoiceCommand::StopStream, ui).await;
@@ -510,6 +583,8 @@ fn spawn_account(
             stream_token: None,
             stream_endpoint: None,
             stream_connection: None,
+            stream_camera: None,
+            stream_parent: None,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -646,7 +721,10 @@ fn spawn_account(
                             match result {
                                 Ok(source) => {
                                     if let Some(connection) = &mut voice.stream_connection {
+                                        tracing::info!("stream source ready");
                                         connection.source = Some(source);
+                                    } else {
+                                        tracing::warn!("stream source ready but no stream connection");
                                     }
                                 }
                                 Err(message) => {
@@ -686,6 +764,8 @@ struct VoiceRuntime {
     stream_token: Option<String>,
     stream_endpoint: Option<String>,
     stream_connection: Option<StreamConnection>,
+    stream_camera: Option<(CameraAccess, u32)>,
+    stream_parent: Option<Arc<ashpd::WindowIdentifier>>,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -1013,25 +1093,80 @@ async fn maybe_start_stream(
             });
 
             // The portal picker may block on user input; keep the account loop
-            // responsive while it runs.
+            // responsive while it runs. A Go Live can use the selected camera
+            // instead of the screen-cast portal.
             let source_control = control_tx.clone();
             let source_handle = handle.clone();
+            let source_ui = ui.clone();
+            let camera_source = voice.stream_camera.clone();
+            let screen_parent = voice.stream_parent.clone();
             tokio::spawn(async move {
-                let result = match kc_media::portal::request().await {
-                    Ok(portal) => {
-                        let first_frame = Arc::new(AtomicBool::new(false));
-                        VideoSource::screen(portal, VideoSettings::default(), move |frame| {
-                            if !first_frame.swap(true, Ordering::Relaxed) {
-                                tracing::info!(
-                                    bytes = frame.data.len(),
-                                    "stream first encoded video frame"
-                                );
-                            }
-                            source_handle.send_video(frame.data, frame.duration_ms);
+                let result = if let Some((access, node_id)) = camera_source {
+                    access
+                        .select(node_id)
+                        .ok_or_else(|| "selected camera is no longer available".to_owned())
+                        .and_then(|camera| {
+                            VideoSource::camera_portal(
+                                camera,
+                                VideoSettings::default(),
+                                move |frame| {
+                                    source_handle.send_video(frame.data, frame.duration_ms);
+                                },
+                            )
+                            .map_err(|error| error.to_string())
                         })
-                        .map_err(|error| error.to_string())
+                } else {
+                    let request = tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        kc_media::portal::request(screen_parent.as_deref()),
+                    )
+                    .await;
+                    match request {
+                        Ok(Ok(portal)) => {
+                            let first_frame = Arc::new(AtomicBool::new(false));
+                            let frame_count = Arc::new(AtomicUsize::new(0));
+                            let watchdog_frames = frame_count.clone();
+                            let result = VideoSource::screen(
+                                portal,
+                                VideoSettings::default(),
+                                move |frame| {
+                                    frame_count.fetch_add(1, Ordering::Relaxed);
+                                    if !first_frame.swap(true, Ordering::Relaxed) {
+                                        tracing::info!(
+                                            bytes = frame.data.len(),
+                                            "stream first encoded video frame"
+                                        );
+                                    }
+                                    source_handle.send_video(frame.data, frame.duration_ms);
+                                },
+                            )
+                            .map_err(|error| error.to_string());
+                            if result.is_ok() {
+                                let ui_events = source_ui.clone();
+                                let control = source_control.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                                    if watchdog_frames.load(Ordering::Relaxed) == 0 {
+                                        let _ = ui_events
+                                            .send(UiEvent::StreamError {
+                                                account,
+                                                message: "screen capture produced no frames"
+                                                    .to_owned(),
+                                            })
+                                            .await;
+                                        let _ = control
+                                            .send(VoiceControl::StreamClosed { generation });
+                                    }
+                                });
+                            }
+                            result
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "screen capture source failed");
+                            Err(error.to_string())
+                        }
+                        Err(_) => Err("screen picker timed out".to_owned()),
                     }
-                    Err(error) => Err(error.to_string()),
                 };
                 let _ = source_control.send(VoiceControl::StreamSource { generation, result });
             });
@@ -1111,24 +1246,13 @@ async fn maybe_connect(
                 handle.set_speaking(0);
             }
 
-            let mut connection = VoiceConnection {
+            let connection = VoiceConnection {
                 handle: handle.clone(),
                 audio: audio.clone(),
                 camera: None,
                 guild_id,
                 channel_id,
             };
-            if voice.camera
-                && let Err(error) = start_camera(&mut connection).await
-            {
-                voice.camera = false;
-                let _ = ui
-                    .send(UiEvent::VoiceError {
-                        account,
-                        message: format!("camera: {error}"),
-                    })
-                    .await;
-            }
             voice.connection = Some(connection);
             let _ = ui
                 .send(UiEvent::VoiceJoined {
@@ -1195,11 +1319,14 @@ async fn maybe_connect(
     }
 }
 
-async fn start_camera(connection: &mut VoiceConnection) -> Result<(), String> {
-    let camera = kc_media::portal::request_camera()
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no camera available".to_owned())?;
+async fn start_camera(
+    connection: &mut VoiceConnection,
+    access: &CameraAccess,
+    node_id: u32,
+) -> Result<(), String> {
+    let camera = access
+        .select(node_id)
+        .ok_or_else(|| "selected camera is no longer available".to_owned())?;
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
     let source = VideoSource::camera_portal(camera, VideoSettings::default(), move |frame| {
@@ -1279,6 +1406,56 @@ async fn apply_voice_command(
                 }
             }
         }
+        VoiceCommand::SetCameraDevice { access, node_id } => {
+            voice.camera = true;
+            let gateway = voice.handle.clone();
+            let (guild_id, channel_id) = match &voice.connection {
+                Some(connection) => (connection.guild_id, connection.channel_id),
+                None => (None, Snowflake::default()),
+            };
+            match &mut voice.connection {
+                Some(connection) => match start_camera(connection, &access, node_id).await {
+                    Ok(()) => {
+                        gateway.update_voice_state(
+                            guild_id,
+                            Some(channel_id),
+                            voice.muted,
+                            voice.deafened,
+                            true,
+                        );
+                        let _ = ui.send(UiEvent::CameraStarted { account }).await;
+                    }
+                    Err(error) => {
+                        voice.camera = false;
+                        let _ = ui
+                            .send(UiEvent::VoiceError {
+                                account,
+                                message: format!("camera: {error}"),
+                            })
+                            .await;
+                        let _ = ui.send(UiEvent::CameraFailed { account }).await;
+                        gateway.update_voice_state(
+                            guild_id,
+                            Some(channel_id),
+                            voice.muted,
+                            voice.deafened,
+                            false,
+                        );
+                    }
+                },
+                None => {
+                    voice.camera = false;
+                    let _ = ui
+                        .send(UiEvent::VoiceError {
+                            account,
+                            message: "join a voice channel before enabling the camera"
+                                .to_owned(),
+                        })
+                        .await;
+                    let _ = ui.send(UiEvent::CameraFailed { account }).await;
+                }
+            }
+        }
         VoiceCommand::SetCamera(enabled) => {
             voice.camera = enabled;
             let gateway = voice.handle.clone();
@@ -1290,19 +1467,14 @@ async fn apply_voice_command(
                 Some(connection) => {
                     let started = if enabled {
                         if connection.camera.is_none() {
-                            match start_camera(connection).await {
-                                Ok(()) => true,
-                                Err(error) => {
-                                    voice.camera = false;
-                                    let _ = ui
-                                        .send(UiEvent::VoiceError {
-                                            account,
-                                            message: format!("camera: {error}"),
-                                        })
-                                        .await;
-                                    false
-                                }
-                            }
+                            voice.camera = false;
+                            let _ = ui
+                                .send(UiEvent::VoiceError {
+                                    account,
+                                    message: "choose a camera first".to_owned(),
+                                })
+                                .await;
+                            false
                         } else {
                             connection.handle.set_video(true);
                             true
@@ -1322,6 +1494,12 @@ async fn apply_voice_command(
                         voice.deafened,
                         started,
                     );
+                    let event = if started {
+                        UiEvent::CameraStarted { account }
+                    } else {
+                        UiEvent::CameraStopped { account }
+                    };
+                    let _ = ui.send(event).await;
                 }
                 None => {
                     if enabled {
@@ -1337,7 +1515,7 @@ async fn apply_voice_command(
                 }
             }
         }
-        VoiceCommand::StartStream => {
+        VoiceCommand::StartStream { parent } => {
             let target = voice
                 .connection
                 .as_ref()
@@ -1364,6 +1542,8 @@ async fn apply_voice_command(
                 return;
             };
             tracing::info!(%guild_id, %channel_id, "creating go live stream");
+            voice.stream_camera = None;
+            voice.stream_parent = parent;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1372,6 +1552,37 @@ async fn apply_voice_command(
             voice.handle.stream_create(guild_id, channel_id);
             // DVS sends STREAM_SET_PAUSED(false) immediately after create;
             // without it the stream is announced but never actually starts.
+            if let Some(user_id) = voice.self_user_id {
+                let key = format!("guild:{guild_id}:{channel_id}:{user_id}");
+                voice.handle.stream_pause(&key, false);
+            }
+        }
+        VoiceCommand::StartStreamCamera { access, node_id } => {
+            let target = voice
+                .connection
+                .as_ref()
+                .map(|connection| (connection.guild_id, connection.channel_id));
+            let Some((Some(guild_id), channel_id)) = target else {
+                let _ = ui
+                    .send(UiEvent::VoiceError {
+                        account,
+                        message: "screen sharing needs a guild voice channel".to_owned(),
+                    })
+                    .await;
+                return;
+            };
+            if voice.streaming || voice.stream_pending || voice.stream_connection.is_some() {
+                return;
+            }
+            tracing::info!(%guild_id, %channel_id, node_id, "creating camera go live stream");
+            voice.stream_camera = Some((access, node_id));
+            voice.stream_parent = None;
+            voice.stream_pending = true;
+            voice.stream_key = None;
+            voice.stream_rtc_id = None;
+            voice.stream_token = None;
+            voice.stream_endpoint = None;
+            voice.handle.stream_create(guild_id, channel_id);
             if let Some(user_id) = voice.self_user_id {
                 let key = format!("guild:{guild_id}:{channel_id}:{user_id}");
                 voice.handle.stream_pause(&key, false);
@@ -1436,6 +1647,8 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
         || key.is_some();
     voice.stream_pending = false;
     voice.streaming = false;
+    voice.stream_camera = None;
+    voice.stream_parent = None;
     if let Some(connection) = voice.stream_connection.take() {
         drop(connection.source);
         drop(connection.audio);
@@ -1519,6 +1732,8 @@ mod tests {
             stream_token: None,
             stream_endpoint: None,
             stream_connection: None,
+            stream_camera: None,
+            stream_parent: None,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,

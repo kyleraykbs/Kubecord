@@ -29,7 +29,7 @@ kc-media = { path = "crates/kc-media" }
 kc-ui = { path = "crates/kc-ui" }
 
 aes-gcm = "0.10"
-ashpd = { version = "0.14", features = ["screencast", "camera", "pipewire"] }
+ashpd = { version = "0.14", features = ["screencast", "camera", "pipewire", "gtk4"] }
 anyhow = "1"
 base64 = "0.22"
 bytes = "1"

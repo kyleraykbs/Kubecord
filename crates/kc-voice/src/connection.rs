@@ -496,7 +496,9 @@ impl SessionState {
                 }
             }
             Command::SendVideo { frame, frame_ms } => {
+                let frame_size = frame.len();
                 if self.video_ssrc.is_none() {
+                    tracing::debug!(bytes = frame_size, "dropping video frame: no video ssrc");
                     return Ok(true);
                 }
                 let encrypted = match &mut self.dave {
@@ -504,6 +506,15 @@ impl SessionState {
                     None => frame,
                 };
                 let packets = rtp::packetize(&encrypted, MAX_PAYLOAD);
+                if self.ts_video == 0 {
+                    tracing::info!(
+                        bytes = frame_size,
+                        packets = packets.len(),
+                        frame_ms,
+                        ssrc = self.video_ssrc,
+                        "sending first video frame"
+                    );
+                }
                 for (payload, marker) in packets {
                     self.send_rtp_video(&payload, marker).await?;
                 }
@@ -513,6 +524,7 @@ impl SessionState {
                 self.set_speaking(flags).await?;
             }
             Command::SetVideo(enabled) => {
+                tracing::info!(enabled, video_ssrc = self.video_ssrc, "set video state");
                 self.video_enabled = enabled;
                 self.send_video_state().await?;
             }

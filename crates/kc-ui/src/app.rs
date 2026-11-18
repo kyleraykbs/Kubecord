@@ -4,6 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gtk::gdk::prelude::*;
@@ -12,10 +13,13 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use kc_core::{Account, AccountStore, Snowflake, Token};
+use kc_media::portal::{CameraAccess, CameraChoice};
 use kc_state::{Channel, ChannelType, Message, StoreEvent};
 
 use crate::markdown::{format_size, format_timestamp, render_markdown};
-use crate::session::{self, AccountId, Command, ConnState, Session, UiEvent, VoiceUiState};
+use crate::session::{
+    self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
+};
 
 const TYPING_TIMEOUT_SECS: u32 = 8;
 const TYPING_THROTTLE: Duration = Duration::from_secs(8);
@@ -29,6 +33,10 @@ pub fn build_app() -> adw::Application {
 
 /// Runs the GTK main loop with a background Tokio runtime.
 pub fn run() -> glib::ExitCode {
+    match kc_media::video::preload_pipewire() {
+        Ok(()) => tracing::info!("gstreamer pipewire plugin preloaded"),
+        Err(error) => tracing::warn!(%error, "could not preload pipewire plugin"),
+    }
     let app = build_app();
 
     let runtime = std::sync::Arc::new(
@@ -39,7 +47,9 @@ pub fn run() -> glib::ExitCode {
     );
     let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
-    session::spawn_dispatcher(&runtime, cmd_rx, ui_tx);
+    session::spawn_dispatcher(&runtime, cmd_rx, ui_tx.clone());
+    let runtime_for_ui = runtime.clone();
+    let ui_tx_for_ui = ui_tx.clone();
 
     let state_slot: Rc<RefCell<Option<Rc<AppState>>>> = Rc::new(RefCell::new(None));
     let ui_rx_slot = Rc::new(RefCell::new(Some(ui_rx)));
@@ -64,7 +74,13 @@ pub fn run() -> glib::ExitCode {
             .default_width(1100)
             .default_height(720)
             .build();
-        let state = AppState::new(window, accounts, cmd_tx_for_activate.clone());
+        let state = AppState::new(
+            window,
+            accounts,
+            cmd_tx_for_activate.clone(),
+            runtime_for_ui.clone(),
+            ui_tx_for_ui.clone(),
+        );
         state.connect_signals();
 
         let receiver = ui_rx_slot
@@ -80,6 +96,17 @@ pub fn run() -> glib::ExitCode {
 
         state.start_existing();
         state.window.present();
+
+        let identifier_state = state.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let identifier =
+                ashpd::WindowIdentifier::from_native(&identifier_state.window).await;
+            tracing::info!(
+                available = identifier.is_some(),
+                "portal parent window identifier"
+            );
+            *identifier_state.window_identifier.borrow_mut() = identifier.map(Arc::new);
+        });
 
         if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
             let window = state.window.clone();
@@ -182,6 +209,9 @@ struct AppState {
 
     model: RefCell<Model>,
     cmd_tx: async_channel::Sender<Command>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    ui_tx: async_channel::Sender<UiEvent>,
+    window_identifier: RefCell<Option<Arc<ashpd::WindowIdentifier>>>,
     typing_generation: Rc<Cell<u64>>,
     last_rendered_channel: Cell<Option<Snowflake>>,
     message_filter: RefCell<String>,
@@ -197,6 +227,8 @@ impl AppState {
         window: adw::ApplicationWindow,
         accounts: AccountStore,
         cmd_tx: async_channel::Sender<Command>,
+        runtime: Arc<tokio::runtime::Runtime>,
+        ui_tx: async_channel::Sender<UiEvent>,
     ) -> Rc<Self> {
         let stack = gtk::Stack::new();
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -672,6 +704,9 @@ impl AppState {
                 active: None,
             }),
             cmd_tx,
+            runtime,
+            ui_tx,
+            window_identifier: RefCell::new(None),
             typing_generation: Rc::new(Cell::new(0)),
             last_rendered_channel: Cell::new(None),
             message_filter: RefCell::new(String::new()),
@@ -1100,44 +1135,254 @@ impl AppState {
 
     fn on_camera_toggled(self: &Rc<Self>) {
         let desired = self.voice_camera.is_active();
-        let account = self.update_voice_flag(|voice| {
-            if voice.camera == desired {
-                None
-            } else {
-                voice.camera = desired;
-                Some(desired)
-            }
-        });
-        if let Some(account) = account {
-            let _ = self.cmd_tx.try_send(Command::SetCamera {
-                account,
-                camera: desired,
+        let camera_on = {
+            let model = self.model.borrow();
+            model
+                .active
+                .and_then(|account| model.sessions.get(&account))
+                .and_then(|session| session.voice.as_ref())
+                .is_some_and(|voice| voice.camera)
+        };
+        // A programmatic set_active follows this same signal. Only act when
+        // the widget and the model disagree; in particular, a click while the
+        // camera is running must stop it instead of reopening the picker.
+        if camera_on == desired {
+            return;
+        }
+        if desired {
+            let account = self.update_voice_flag(|voice| {
+                if voice.camera {
+                    None
+                } else {
+                    voice.camera = true;
+                    Some(())
+                }
             });
+            if let Some(account) = account {
+                self.request_cameras(account, CameraPurpose::Camera);
+            }
+        } else {
+            let account = self.update_voice_flag(|voice| {
+                if voice.camera {
+                    voice.camera = false;
+                    Some(())
+                } else {
+                    None
+                }
+            });
+            if let Some(account) = account {
+                let _ = self.cmd_tx.try_send(Command::SetCamera {
+                    account,
+                    camera: false,
+                });
+            }
         }
     }
 
     fn on_screen_toggled(self: &Rc<Self>) {
         let desired = self.voice_screen.is_active();
+        if !desired {
+            let account = self.update_voice_flag(|voice| {
+                if voice.streaming {
+                    voice.streaming = false;
+                    Some(())
+                } else {
+                    None
+                }
+            });
+            if let Some(account) = account {
+                let _ = self.cmd_tx.try_send(Command::StopStream { account });
+            }
+            return;
+        }
+
         let account = self.update_voice_flag(|voice| {
-            if voice.streaming == desired {
+            if voice.streaming {
                 None
             } else {
-                voice.streaming = desired;
-                Some(desired)
+                voice.streaming = true;
+                Some(())
             }
         });
         if let Some(account) = account {
-            let command = if desired {
-                Command::StartStream { account }
+            self.show_share_source_dialog(account);
+        }
+    }
+
+    /// Asks the account's Tokio side to open the camera portal and enumerate
+    /// devices. The response comes back as `UiEvent::CameraChoices`.
+    fn request_cameras(self: &Rc<Self>, account: AccountId, purpose: CameraPurpose) {
+        self.set_status("Requesting camera access…");
+        let runtime = self.runtime.clone();
+        let ui = self.ui_tx.clone();
+        runtime.spawn(async move {
+            match kc_media::portal::request_cameras().await {
+                Ok(Some(access)) => {
+                    let cameras = access.cameras.clone();
+                    let _ = ui
+                        .send(UiEvent::CameraChoices {
+                            account,
+                            purpose,
+                            access,
+                            cameras,
+                        })
+                        .await;
+                }
+                Ok(None) => {
+                    let _ = ui
+                        .send(UiEvent::CameraUnavailable {
+                            account,
+                            purpose,
+                            message: "no camera available".to_owned(),
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    let _ = ui
+                        .send(UiEvent::CameraUnavailable {
+                            account,
+                            purpose,
+                            message: format!("camera portal: {error}"),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    fn show_camera_dialog(
+        self: &Rc<Self>,
+        account: AccountId,
+        purpose: CameraPurpose,
+        access: CameraAccess,
+        cameras: Vec<CameraChoice>,
+    ) {
+        if cameras.is_empty() {
+            self.reset_camera_ui(purpose);
+            self.set_status("No camera available");
+            return;
+        }
+
+        let dialog = gtk::Dialog::builder()
+            .title("Choose camera")
+            .transient_for(&self.window)
+            .modal(true)
+            .build();
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Use Camera", gtk::ResponseType::Accept);
+
+        let names: Vec<String> = cameras.iter().map(|camera| camera.name.clone()).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let dropdown = gtk::DropDown::from_strings(&name_refs);
+        drop(name_refs);
+        dialog.content_area().append(&dropdown);
+        let label = gtk::Label::new(Some(match purpose {
+            CameraPurpose::Camera => "Select a camera for your camera tile.",
+            CameraPurpose::Stream => "Select a camera to use as the Go Live source.",
+        }));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        dialog.content_area().prepend(&label);
+
+        let app = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            if response == gtk::ResponseType::Accept {
+                let Some(camera) = cameras.get(dropdown.selected() as usize) else {
+                    app.reset_camera_ui(purpose);
+                    return;
+                };
+                match purpose {
+                    CameraPurpose::Camera => {
+                        let _ = app.cmd_tx.try_send(Command::SetCameraDevice {
+                            account,
+                            access: access.clone(),
+                            node_id: camera.node_id,
+                        });
+                        app.set_status("Turning on camera…");
+                    }
+                    CameraPurpose::Stream => {
+                        let _ = app.cmd_tx.try_send(Command::StartStreamCamera {
+                            account,
+                            access: access.clone(),
+                            node_id: camera.node_id,
+                        });
+                        app.set_status("Starting camera stream…");
+                    }
+                }
             } else {
-                Command::StopStream { account }
-            };
-            let _ = self.cmd_tx.try_send(command);
-            self.set_status(if desired {
-                "Starting screen share…"
-            } else {
-                ""
+                app.reset_camera_ui(purpose);
+            }
+        });
+        dialog.present();
+    }
+
+    fn show_share_source_dialog(self: &Rc<Self>, account: AccountId) {
+        let dialog = gtk::Dialog::builder()
+            .title("Share")
+            .transient_for(&self.window)
+            .modal(true)
+            .build();
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Share Screen", gtk::ResponseType::Accept);
+        dialog.add_button("Share Camera", gtk::ResponseType::Other(1));
+
+        let label = gtk::Label::new(Some(
+            "Choose a screen-cast portal source, or stream from a camera.",
+        ));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        dialog.content_area().append(&label);
+
+        let app = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            match response {
+                gtk::ResponseType::Accept => {
+                    let parent = app.window_identifier.borrow().clone();
+                    let _ = app
+                        .cmd_tx
+                        .try_send(Command::StartStream { account, parent });
+                    app.set_status("Starting screen share…");
+                }
+                gtk::ResponseType::Other(1) => {
+                    app.request_cameras(account, CameraPurpose::Stream);
+                }
+                _ => app.reset_stream_ui(),
+            }
+        });
+        dialog.present();
+    }
+
+    fn reset_camera_ui(self: &Rc<Self>, purpose: CameraPurpose) {
+        if purpose == CameraPurpose::Camera {
+            let changed = self.update_voice_flag(|voice| {
+                if voice.camera {
+                    voice.camera = false;
+                    Some(())
+                } else {
+                    None
+                }
             });
+            if changed.is_some() {
+                self.render_voice_panel();
+            }
+        } else {
+            self.reset_stream_ui();
+        }
+    }
+
+    fn reset_stream_ui(self: &Rc<Self>) {
+        let changed = self.update_voice_flag(|voice| {
+            if voice.streaming {
+                voice.streaming = false;
+                Some(())
+            } else {
+                None
+            }
+        });
+        if changed.is_some() {
+            self.render_voice_panel();
         }
     }
 
@@ -2392,6 +2637,69 @@ impl AppState {
                 if self.model.borrow().active == Some(account) {
                     self.set_status(&message);
                     self.render_voice_panel();
+                }
+            }
+            UiEvent::CameraChoices {
+                account,
+                purpose,
+                access,
+                cameras,
+            } => {
+                self.show_camera_dialog(account, purpose, access, cameras);
+            }
+            UiEvent::CameraUnavailable {
+                account,
+                purpose,
+                message,
+            } => {
+                self.reset_camera_ui(purpose);
+                if self.model.borrow().active == Some(account) {
+                    self.set_status(&message);
+                }
+            }
+            UiEvent::CameraStarted { account } => {
+                if self.model.borrow().active == Some(account) {
+                    if self.update_voice_flag(|voice| {
+                        if voice.camera {
+                            None
+                        } else {
+                            voice.camera = true;
+                            Some(())
+                        }
+                    }).is_some()
+                    {
+                        self.render_voice_panel();
+                    }
+                }
+            }
+            UiEvent::CameraStopped { account } => {
+                if self.model.borrow().active == Some(account) {
+                    if self.update_voice_flag(|voice| {
+                        if voice.camera {
+                            voice.camera = false;
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }).is_some()
+                    {
+                        self.render_voice_panel();
+                    }
+                }
+            }
+            UiEvent::CameraFailed { account } => {
+                if self.model.borrow().active == Some(account) {
+                    if self.update_voice_flag(|voice| {
+                        if voice.camera {
+                            voice.camera = false;
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }).is_some()
+                    {
+                        self.render_voice_panel();
+                    }
                 }
             }
             UiEvent::Error { account, message } => {
