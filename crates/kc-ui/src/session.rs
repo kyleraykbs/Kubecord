@@ -126,13 +126,16 @@ pub enum VoiceCommand {
     SetCameraDevice {
         access: CameraAccess,
         node_id: u32,
+        settings: VideoSettings,
     },
     StartStream {
         parent: Option<Arc<ashpd::WindowIdentifier>>,
+        settings: VideoSettings,
     },
     StartStreamCamera {
         access: CameraAccess,
         node_id: u32,
+        settings: VideoSettings,
     },
     StopStream,
     Subscribe {
@@ -214,15 +217,18 @@ pub enum Command {
         account: AccountId,
         access: CameraAccess,
         node_id: u32,
+        settings: VideoSettings,
     },
     StartStream {
         account: AccountId,
         parent: Option<Arc<ashpd::WindowIdentifier>>,
+        settings: VideoSettings,
     },
     StartStreamCamera {
         account: AccountId,
         access: CameraAccess,
         node_id: u32,
+        settings: VideoSettings,
     },
     StopStream {
         account: AccountId,
@@ -451,17 +457,31 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
-        Command::StartStream { account, parent } => {
-            forward_voice(account, VoiceCommand::StartStream { parent }, ui).await;
+        Command::StartStream {
+            account,
+            parent,
+            settings,
+        } => {
+            forward_voice(
+                account,
+                VoiceCommand::StartStream { parent, settings },
+                ui,
+            )
+            .await;
         }
         Command::SetCameraDevice {
             account,
             access,
             node_id,
+            settings,
         } => {
             forward_voice(
                 account,
-                VoiceCommand::SetCameraDevice { access, node_id },
+                VoiceCommand::SetCameraDevice {
+                    access,
+                    node_id,
+                    settings,
+                },
                 ui,
             )
             .await;
@@ -470,10 +490,15 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             account,
             access,
             node_id,
+            settings,
         } => {
             forward_voice(
                 account,
-                VoiceCommand::StartStreamCamera { access, node_id },
+                VoiceCommand::StartStreamCamera {
+                    access,
+                    node_id,
+                    settings,
+                },
                 ui,
             )
             .await;
@@ -585,6 +610,7 @@ fn spawn_account(
             stream_connection: None,
             stream_camera: None,
             stream_parent: None,
+            stream_settings: VideoSettings::default(),
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -766,6 +792,7 @@ struct VoiceRuntime {
     stream_connection: Option<StreamConnection>,
     stream_camera: Option<(CameraAccess, u32)>,
     stream_parent: Option<Arc<ashpd::WindowIdentifier>>,
+    stream_settings: VideoSettings,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -1100,6 +1127,7 @@ async fn maybe_start_stream(
             let source_ui = ui.clone();
             let camera_source = voice.stream_camera.clone();
             let screen_parent = voice.stream_parent.clone();
+            let video_settings = voice.stream_settings.clone();
             tokio::spawn(async move {
                 let result = if let Some((access, node_id)) = camera_source {
                     access
@@ -1108,7 +1136,7 @@ async fn maybe_start_stream(
                         .and_then(|camera| {
                             VideoSource::camera_portal(
                                 camera,
-                                VideoSettings::default(),
+                                video_settings.clone(),
                                 move |frame| {
                                     source_handle.send_video(frame.data, frame.duration_ms);
                                 },
@@ -1128,7 +1156,7 @@ async fn maybe_start_stream(
                             let watchdog_frames = frame_count.clone();
                             let result = VideoSource::screen(
                                 portal,
-                                VideoSettings::default(),
+                                video_settings.clone(),
                                 move |frame| {
                                     frame_count.fetch_add(1, Ordering::Relaxed);
                                     if !first_frame.swap(true, Ordering::Relaxed) {
@@ -1323,13 +1351,14 @@ async fn start_camera(
     connection: &mut VoiceConnection,
     access: &CameraAccess,
     node_id: u32,
+    settings: VideoSettings,
 ) -> Result<(), String> {
     let camera = access
         .select(node_id)
         .ok_or_else(|| "selected camera is no longer available".to_owned())?;
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
-    let source = VideoSource::camera_portal(camera, VideoSettings::default(), move |frame| {
+    let source = VideoSource::camera_portal(camera, settings, move |frame| {
         handle.send_video(frame.data, frame.duration_ms);
     })
     .map_err(|error| error.to_string())?;
@@ -1406,7 +1435,11 @@ async fn apply_voice_command(
                 }
             }
         }
-        VoiceCommand::SetCameraDevice { access, node_id } => {
+        VoiceCommand::SetCameraDevice {
+            access,
+            node_id,
+            settings,
+        } => {
             voice.camera = true;
             let gateway = voice.handle.clone();
             let (guild_id, channel_id) = match &voice.connection {
@@ -1414,7 +1447,7 @@ async fn apply_voice_command(
                 None => (None, Snowflake::default()),
             };
             match &mut voice.connection {
-                Some(connection) => match start_camera(connection, &access, node_id).await {
+                Some(connection) => match start_camera(connection, &access, node_id, settings).await {
                     Ok(()) => {
                         gateway.update_voice_state(
                             guild_id,
@@ -1515,7 +1548,7 @@ async fn apply_voice_command(
                 }
             }
         }
-        VoiceCommand::StartStream { parent } => {
+        VoiceCommand::StartStream { parent, settings } => {
             let target = voice
                 .connection
                 .as_ref()
@@ -1544,6 +1577,7 @@ async fn apply_voice_command(
             tracing::info!(%guild_id, %channel_id, "creating go live stream");
             voice.stream_camera = None;
             voice.stream_parent = parent;
+            voice.stream_settings = settings;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1557,7 +1591,11 @@ async fn apply_voice_command(
                 voice.handle.stream_pause(&key, false);
             }
         }
-        VoiceCommand::StartStreamCamera { access, node_id } => {
+        VoiceCommand::StartStreamCamera {
+            access,
+            node_id,
+            settings,
+        } => {
             let target = voice
                 .connection
                 .as_ref()
@@ -1577,6 +1615,7 @@ async fn apply_voice_command(
             tracing::info!(%guild_id, %channel_id, node_id, "creating camera go live stream");
             voice.stream_camera = Some((access, node_id));
             voice.stream_parent = None;
+            voice.stream_settings = settings;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1734,6 +1773,7 @@ mod tests {
             stream_connection: None,
             stream_camera: None,
             stream_parent: None,
+            stream_settings: VideoSettings::default(),
             stream_pending: false,
             streaming: false,
             stream_generation: 0,

@@ -34,13 +34,21 @@ pub struct VideoSettings {
     pub preset: String,
 }
 
+impl VideoSettings {
+    /// Rough H.264 budget at 0.12 bits per pixel per frame, capped at 8 Mbps.
+    pub fn automatic_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
+        let kbps = (width as f64 * height as f64 * fps as f64 * 0.12 / 1000.0) as u32;
+        kbps.clamp(800, 8000)
+    }
+}
+
 impl Default for VideoSettings {
     fn default() -> Self {
         Self {
             width: 1280,
             height: 720,
             fps: 30,
-            bitrate_kbps: 2500,
+            bitrate_kbps: Self::automatic_bitrate_kbps(1280, 720, 30),
             preset: "ultrafast".into(),
         }
     }
@@ -57,12 +65,13 @@ fn pipeline_downstream(settings: &VideoSettings) -> String {
         // Leave the source format unconstrained. Forcing I420 on pipewiresrc
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before x264enc.
-        "capsfilter caps=video/x-raw ! videoconvert ! videoscale ! videorate \
+        "capsfilter caps=video/x-raw ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 \
+         ! videoconvert ! videoscale ! videorate \
          ! capsfilter caps=video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
          ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
          ! h264parse config-interval=-1 \
          ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
-         ! appsink name=sink sync=false max-buffers=4 drop=true",
+         ! appsink name=sink sync=false max-buffers=8 drop=true",
         width = settings.width,
         height = settings.height,
         fps = settings.fps,
@@ -277,7 +286,7 @@ impl VideoSource {
              ! x264enc tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
              ! h264parse config-interval=-1 \
              ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
-             ! appsink name=sink sync=false max-buffers=4 drop=true",
+             ! appsink name=sink sync=false max-buffers=8 drop=true",
             fps = settings.fps,
             width = settings.width,
             height = settings.height,

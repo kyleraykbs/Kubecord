@@ -17,6 +17,7 @@ use kc_media::portal::{CameraAccess, CameraChoice};
 use kc_state::{Channel, ChannelType, Message, StoreEvent};
 
 use crate::markdown::{format_size, format_timestamp, render_markdown};
+use crate::settings::{BITRATES, CapturePreferences, FRAMERATES, RESOLUTIONS};
 use crate::session::{
     self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
 };
@@ -199,6 +200,7 @@ struct AppState {
     voice_deafen: gtk::ToggleButton,
     voice_camera: gtk::ToggleButton,
     voice_screen: gtk::ToggleButton,
+    capture_button: gtk::Button,
     emoji_button: gtk::MenuButton,
     user_avatar: adw::Avatar,
     user_name_label: gtk::Label,
@@ -211,6 +213,7 @@ struct AppState {
     cmd_tx: async_channel::Sender<Command>,
     runtime: Arc<tokio::runtime::Runtime>,
     ui_tx: async_channel::Sender<UiEvent>,
+    capture: RefCell<CapturePreferences>,
     window_identifier: RefCell<Option<Arc<ashpd::WindowIdentifier>>>,
     typing_generation: Rc<Cell<u64>>,
     last_rendered_channel: Cell<Option<Snowflake>>,
@@ -387,6 +390,8 @@ impl AppState {
         voice_camera.set_tooltip_text(Some("Turn On Camera"));
         let voice_screen = toggle_icon_button("video-display-symbolic", "Share");
         voice_screen.set_tooltip_text(Some("Share Your Screen"));
+        let capture_button = icon_button("applications-multimedia-symbolic", "Quality");
+        capture_button.set_tooltip_text(Some("Capture quality"));
         let voice_leave = icon_button("phone-hangup-symbolic", "Disconnect");
         voice_leave.set_tooltip_text(Some("Disconnect"));
 
@@ -456,6 +461,7 @@ impl AppState {
         user_panel.append(&user_text);
         user_panel.append(&voice_mute);
         user_panel.append(&voice_deafen);
+        user_panel.append(&capture_button);
         user_panel.append(&account_button);
 
         let channel_sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -691,6 +697,7 @@ impl AppState {
             voice_deafen,
             voice_camera,
             voice_screen,
+            capture_button,
             emoji_button,
             user_avatar,
             user_name_label,
@@ -706,6 +713,7 @@ impl AppState {
             cmd_tx,
             runtime,
             ui_tx,
+            capture: RefCell::new(CapturePreferences::load()),
             window_identifier: RefCell::new(None),
             typing_generation: Rc::new(Cell::new(0)),
             last_rendered_channel: Cell::new(None),
@@ -810,6 +818,106 @@ impl AppState {
         let app = self.clone();
         self.voice_screen
             .connect_toggled(move |_| app.on_screen_toggled());
+        let app = self.clone();
+        self.capture_button
+            .connect_clicked(move |_| app.show_capture_settings());
+    }
+
+    fn show_capture_settings(self: &Rc<Self>) {
+        let current = self.capture.borrow().clone();
+        let dialog = gtk::Dialog::builder()
+            .title("Capture quality")
+            .transient_for(&self.window)
+            .modal(true)
+            .build();
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Save", gtk::ResponseType::Accept);
+
+        let grid = gtk::Grid::new();
+        grid.set_row_spacing(10);
+        grid.set_column_spacing(16);
+        grid.set_margin_top(12);
+        grid.set_margin_bottom(12);
+        grid.set_margin_start(12);
+        grid.set_margin_end(12);
+
+        let resolution_names: Vec<&str> = RESOLUTIONS.iter().map(|(_, _, name)| *name).collect();
+        let resolution = gtk::DropDown::from_strings(&resolution_names);
+        let resolution_index = RESOLUTIONS
+            .iter()
+            .position(|(width, height, _)| *width == current.width && *height == current.height)
+            .unwrap_or(1) as u32;
+        resolution.set_selected(resolution_index);
+
+        let framerate_names: Vec<String> = FRAMERATES.iter().map(|fps| format!("{fps} fps")).collect();
+        let framerate_refs: Vec<&str> = framerate_names.iter().map(String::as_str).collect();
+        let framerate = gtk::DropDown::from_strings(&framerate_refs);
+        framerate.set_selected(
+            FRAMERATES
+                .iter()
+                .position(|fps| *fps == current.fps)
+                .unwrap_or(1) as u32,
+        );
+
+        let mut bitrate_names = vec!["Automatic".to_owned()];
+        bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
+        let bitrate_refs: Vec<&str> = bitrate_names.iter().map(String::as_str).collect();
+        let bitrate = gtk::DropDown::from_strings(&bitrate_refs);
+        let bitrate_index = current
+            .bitrate_kbps
+            .and_then(|kbps| BITRATES.iter().position(|value| *value == kbps))
+            .map(|index| index + 1)
+            .unwrap_or(0) as u32;
+        bitrate.set_selected(bitrate_index);
+
+        for (row, label_text, dropdown) in [
+            (0, "Resolution", &resolution),
+            (1, "Framerate", &framerate),
+            (2, "Bitrate", &bitrate),
+        ] {
+            let label = gtk::Label::new(Some(label_text));
+            label.set_xalign(0.0);
+            grid.attach(&label, 0, row, 1, 1);
+            grid.attach(dropdown, 1, row, 1, 1);
+        }
+
+        let note = gtk::Label::new(Some(
+            "Automatic bitrate is derived from resolution and framerate. Changes apply to the next camera or screen capture.",
+        ));
+        note.set_xalign(0.0);
+        note.set_wrap(true);
+        note.add_css_class("dim-label");
+        note.add_css_class("caption");
+        grid.attach(&note, 0, 3, 2, 1);
+        dialog.content_area().append(&grid);
+
+        let app = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            if response != gtk::ResponseType::Accept {
+                return;
+            }
+            let (width, height, _) = RESOLUTIONS[resolution.selected() as usize];
+            let fps = FRAMERATES[framerate.selected() as usize];
+            let bitrate_kbps = match bitrate.selected() as usize {
+                0 => None,
+                index => BITRATES.get(index - 1).copied(),
+            };
+            let prefs = CapturePreferences {
+                width,
+                height,
+                fps,
+                bitrate_kbps,
+            };
+            match prefs.save() {
+                Ok(()) => {
+                    *app.capture.borrow_mut() = prefs;
+                    app.set_status("Capture quality saved for the next capture");
+                }
+                Err(error) => app.set_status(&format!("capture settings: {error}")),
+            }
+        });
+        dialog.present();
     }
 
     // -- account lifecycle -----------------------------------------------
@@ -1294,18 +1402,22 @@ impl AppState {
                 };
                 match purpose {
                     CameraPurpose::Camera => {
+                        let settings = app.capture.borrow().video_settings();
                         let _ = app.cmd_tx.try_send(Command::SetCameraDevice {
                             account,
                             access: access.clone(),
                             node_id: camera.node_id,
+                            settings,
                         });
                         app.set_status("Turning on camera…");
                     }
                     CameraPurpose::Stream => {
+                        let settings = app.capture.borrow().video_settings();
                         let _ = app.cmd_tx.try_send(Command::StartStreamCamera {
                             account,
                             access: access.clone(),
                             node_id: camera.node_id,
+                            settings,
                         });
                         app.set_status("Starting camera stream…");
                     }
@@ -1340,9 +1452,10 @@ impl AppState {
             match response {
                 gtk::ResponseType::Accept => {
                     let parent = app.window_identifier.borrow().clone();
+                    let settings = app.capture.borrow().video_settings();
                     let _ = app
                         .cmd_tx
-                        .try_send(Command::StartStream { account, parent });
+                        .try_send(Command::StartStream { account, parent, settings });
                     app.set_status("Starting screen share…");
                 }
                 gtk::ResponseType::Other(1) => {
