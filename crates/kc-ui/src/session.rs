@@ -1181,6 +1181,7 @@ async fn maybe_start_stream(
                 Duration::from_millis(stream_delay_ms),
                 move |data: Vec<u8>, frame_ms| video_send.send_video(data, frame_ms),
             );
+            let last_frame = Arc::new(Mutex::new(Instant::now()));
             tokio::spawn(async move {
                 let result = if let Some((access, node_id)) = camera_source {
                     access
@@ -1188,10 +1189,21 @@ async fn maybe_start_stream(
                         .ok_or_else(|| "selected camera is no longer available".to_owned())
                         .and_then(|camera| {
                             let video_delay = video_delay.clone();
+                            let last_frame = last_frame.clone();
                             VideoSource::camera_portal(
                                 camera,
                                 video_settings.clone(),
                                 move |frame| {
+                                    if let Ok(mut last) = last_frame.lock() {
+                                        let gap = last.elapsed();
+                                        if gap > Duration::from_millis(500) {
+                                            tracing::warn!(
+                                                gap_ms = gap.as_millis(),
+                                                "encoded camera frame gap"
+                                            );
+                                        }
+                                        *last = Instant::now();
+                                    }
                                     video_delay.send(frame.data, frame.duration_ms);
                                 },
                             )
@@ -1209,10 +1221,21 @@ async fn maybe_start_stream(
                             let frame_count = Arc::new(AtomicUsize::new(0));
                             let watchdog_frames = frame_count.clone();
                             let video_delay = video_delay.clone();
+                            let last_frame = last_frame.clone();
                             let result = VideoSource::screen(
                                 portal,
                                 video_settings.clone(),
                                 move |frame| {
+                                    if let Ok(mut last) = last_frame.lock() {
+                                        let gap = last.elapsed();
+                                        if gap > Duration::from_millis(500) {
+                                            tracing::warn!(
+                                                gap_ms = gap.as_millis(),
+                                                "encoded screen frame gap"
+                                            );
+                                        }
+                                        *last = Instant::now();
+                                    }
                                     frame_count.fetch_add(1, Ordering::Relaxed);
                                     if !first_frame.swap(true, Ordering::Relaxed) {
                                         tracing::info!(

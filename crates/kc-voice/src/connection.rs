@@ -518,6 +518,14 @@ impl SessionState {
                     None => frame,
                 };
                 let packets = rtp::packetize(&encrypted, MAX_PAYLOAD);
+                tracing::debug!(
+                    bytes = frame_size,
+                    packets = packets.len(),
+                    frame_ms,
+                    queued = self.video_queue.len(),
+                    ssrc = self.video_ssrc,
+                    "queueing video frame"
+                );
                 if self.video_queue.is_empty() {
                     tracing::info!(
                         bytes = frame_size,
@@ -535,6 +543,13 @@ impl SessionState {
                         "dropping video frame: RTP pacing queue is full"
                     );
                 } else {
+                    if self.video_queue.len() > 64 {
+                        tracing::warn!(
+                            queued = self.video_queue.len(),
+                            packets = packets.len(),
+                            "video RTP pacing backlog"
+                        );
+                    }
                     for (payload, marker) in packets {
                         self.video_queue.push_back((payload, marker, timestamp));
                     }
@@ -962,6 +977,19 @@ impl SessionState {
         // RTCP header: V/P/RC, PT, length. PT 206 = PSFB (PLI is FMT 1).
         let packet_type = packet[1];
         let fmt = packet[0] & 0x1F;
+        match packet_type {
+            205 => tracing::info!(
+                fmt,
+                len = packet.len(),
+                "RTCP video NACK/RTPFB received"
+            ),
+            206 => tracing::info!(
+                fmt,
+                len = packet.len(),
+                "RTCP video PSFB received"
+            ),
+            _ => {}
+        }
         if packet_type == 206 && (fmt == 1 || fmt == 4) {
             // PSFB: header (8) + sender SSRC (4) + media source SSRC (4).
             let ssrc = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
