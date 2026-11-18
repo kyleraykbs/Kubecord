@@ -18,7 +18,7 @@ use kc_state::{Channel, ChannelType, Message, StoreEvent};
 
 use crate::markdown::{format_size, format_timestamp, render_markdown};
 use crate::settings::{
-    BITRATES, CapturePreferences, FRAMERATES, RESOLUTIONS, STREAM_DELAYS,
+    BITRATES, CapturePreferences, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS, STREAM_DELAYS,
 };
 use crate::session::{
     self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
@@ -881,6 +881,19 @@ impl AppState {
                 .unwrap_or(0) as u32,
         );
 
+        let keyframe_names: Vec<String> = KEYFRAME_INTERVALS
+            .iter()
+            .map(|seconds| format!("{seconds} s"))
+            .collect();
+        let keyframe_refs: Vec<&str> = keyframe_names.iter().map(String::as_str).collect();
+        let keyframe = gtk::DropDown::from_strings(&keyframe_refs);
+        keyframe.set_selected(
+            KEYFRAME_INTERVALS
+                .iter()
+                .position(|seconds| *seconds == current.keyframe_secs)
+                .unwrap_or(0) as u32,
+        );
+
         let cpu_encoder = gtk::CheckButton::with_label("Use software CPU encoder (x264)");
         cpu_encoder.set_active(current.cpu_encoder);
 
@@ -889,6 +902,7 @@ impl AppState {
             (1, "Framerate", &framerate),
             (2, "Bitrate", &bitrate),
             (3, "Go Live delay", &delay),
+            (4, "Keyframe interval", &keyframe),
         ] {
             let label = gtk::Label::new(Some(label_text));
             label.set_xalign(0.0);
@@ -898,8 +912,8 @@ impl AppState {
 
         let encoder_label = gtk::Label::new(Some("Encoder"));
         encoder_label.set_xalign(0.0);
-        grid.attach(&encoder_label, 0, 4, 1, 1);
-        grid.attach(&cpu_encoder, 1, 4, 1, 1);
+        grid.attach(&encoder_label, 0, 5, 1, 1);
+        grid.attach(&cpu_encoder, 1, 5, 1, 1);
 
         let note = gtk::Label::new(Some(
             "Automatic bitrate is derived from resolution and framerate. Hardware encoding is used when available and falls back to x264. Changes apply to the next capture.",
@@ -908,7 +922,7 @@ impl AppState {
         note.set_wrap(true);
         note.add_css_class("dim-label");
         note.add_css_class("caption");
-        grid.attach(&note, 0, 5, 2, 1);
+        grid.attach(&note, 0, 6, 2, 1);
         dialog.content_area().append(&grid);
 
         let app = self.clone();
@@ -928,6 +942,7 @@ impl AppState {
                 height,
                 fps,
                 bitrate_kbps,
+                keyframe_secs: KEYFRAME_INTERVALS[keyframe.selected() as usize],
                 stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
                 cpu_encoder: cpu_encoder.is_active(),
             };

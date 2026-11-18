@@ -13,6 +13,8 @@ pub const RESOLUTIONS: [(u32, u32, &str); 4] = [
 
 pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 
+pub const KEYFRAME_INTERVALS: [u32; 4] = [2, 4, 6, 10];
+
 pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
@@ -25,6 +27,8 @@ pub struct CapturePreferences {
     pub fps: u32,
     /// `None` means derive the bitrate from resolution and framerate.
     pub bitrate_kbps: Option<u32>,
+    /// Seconds between IDR keyframes.
+    pub keyframe_secs: u32,
     /// Fixed Go Live buffering delay in milliseconds.
     pub stream_delay_ms: u64,
     /// Force the software x264 encoder instead of trying VA-API first.
@@ -38,6 +42,7 @@ impl Default for CapturePreferences {
             height: 720,
             fps: 30,
             bitrate_kbps: None,
+            keyframe_secs: 2,
             stream_delay_ms: 0,
             cpu_encoder: false,
         }
@@ -53,6 +58,7 @@ impl CapturePreferences {
             bitrate_kbps: self
                 .bitrate_kbps
                 .unwrap_or_else(|| VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)),
+            keyframe_secs: self.keyframe_secs,
             preset: "ultrafast".into(),
             encoder: if self.cpu_encoder {
                 EncoderPreference::Cpu
@@ -103,6 +109,9 @@ impl CapturePreferences {
         if !STREAM_DELAYS.contains(&self.stream_delay_ms) {
             self.stream_delay_ms = 0;
         }
+        if !KEYFRAME_INTERVALS.contains(&self.keyframe_secs) {
+            self.keyframe_secs = 2;
+        }
     }
 }
 
@@ -130,6 +139,7 @@ mod tests {
             height: 1080,
             fps: 60,
             bitrate_kbps: Some(6000),
+            keyframe_secs: 4,
             stream_delay_ms: 1000,
             cpu_encoder: true,
         };

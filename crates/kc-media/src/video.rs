@@ -41,6 +41,8 @@ pub struct VideoSettings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Seconds between IDR keyframes.
+    pub keyframe_secs: u32,
     /// x264 preset; `zerolatency` tuning is always applied.
     pub preset: String,
     pub encoder: EncoderPreference,
@@ -61,6 +63,7 @@ impl Default for VideoSettings {
             height: 720,
             fps: 30,
             bitrate_kbps: Self::automatic_bitrate_kbps(1280, 720, 30),
+            keyframe_secs: 2,
             preset: "ultrafast".into(),
             encoder: EncoderPreference::Auto,
         }
@@ -82,15 +85,15 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
         format!(
             "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
             bitrate = settings.bitrate_kbps,
-            keyint = settings.fps * 2,
+            keyint = settings.fps * settings.keyframe_secs.max(1),
         )
     } else {
         format!(
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 vbv-buf-capacity=250 option-string=scenecut=0:sync-lookahead=0",
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
-            keyint = settings.fps * 2,
+            keyint = settings.fps * settings.keyframe_secs.max(1),
         )
     }
 }
