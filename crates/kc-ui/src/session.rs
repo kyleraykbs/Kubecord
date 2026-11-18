@@ -738,6 +738,14 @@ fn spawn_account(
                                 teardown_voice(&mut voice, account, &ui, true).await;
                             }
                         }
+                        VoiceControl::ForceCameraKeyframe { generation } => {
+                            if generation == voice.generation
+                                && let Some(connection) = &voice.connection
+                                && let Some(source) = &connection.camera
+                            {
+                                source.force_keyframe();
+                            }
+                        }
                         VoiceControl::StreamReady { generation } => {
                             if generation == voice.stream_generation
                                 && voice.stream_connection.is_some()
@@ -791,6 +799,14 @@ fn spawn_account(
                                         ui.send(UiEvent::StreamError { account, message }).await;
                                     teardown_stream(&mut voice, account, &ui, true).await;
                                 }
+                            }
+                        }
+                        VoiceControl::ForceKeyframe { generation } => {
+                            if generation == voice.stream_generation
+                                && let Some(connection) = &voice.stream_connection
+                                && let Some(source) = &connection.source
+                            {
+                                source.force_keyframe();
                             }
                         }
                     }
@@ -861,6 +877,12 @@ enum VoiceControl {
     StreamSource {
         generation: u64,
         result: Result<VideoSource, String>,
+    },
+    ForceKeyframe {
+        generation: u64,
+    },
+    ForceCameraKeyframe {
+        generation: u64,
     },
 }
 
@@ -1124,6 +1146,9 @@ async fn maybe_start_stream(
                         VoiceEvent::DaveReady => {
                             tracing::info!("stream DAVE ready");
                         }
+                        VoiceEvent::ForceKeyframe => {
+                            let _ = control.send(VoiceControl::ForceKeyframe { generation });
+                        }
                         VoiceEvent::Error(message) => {
                             tracing::warn!(%message, "stream voice error");
                             let _ = ui_events
@@ -1352,6 +1377,9 @@ async fn maybe_connect(
                                     channel_id,
                                 })
                                 .await;
+                        }
+                        VoiceEvent::ForceKeyframe => {
+                            let _ = control.send(VoiceControl::ForceCameraKeyframe { generation });
                         }
                         VoiceEvent::Error(message) => {
                             let _ = ui.send(UiEvent::VoiceError { account, message }).await;

@@ -78,13 +78,13 @@ fn hardware_available() -> bool {
 fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     if hardware {
         format!(
-            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7",
+            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=4",
             bitrate = settings.bitrate_kbps,
             keyint = settings.fps * 2,
         )
     } else {
         format!(
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 vbv-buf-capacity=250",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
@@ -119,7 +119,7 @@ fn pipeline_description(source: &str, settings: &VideoSettings, hardware: bool) 
 
 fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
     format!(
-        "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
+        "pipewiresrc name=src do-timestamp=true keepalive-time=33 resend-last=true \
          ! videorate skip-to-first=true \
          ! capsfilter caps=video/x-raw,framerate={fps}/1 \
          ! queue \
@@ -266,6 +266,23 @@ impl VideoSource {
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Message("no capture pipeline variant".into())))
+    }
+
+    /// Asks the encoder for an immediate keyframe in response to PLI/FIR.
+    pub fn force_keyframe(&self) {
+        let Some(sink) = self.pipeline.by_name("sink") else {
+            return;
+        };
+        let Some(pad) = sink.static_pad("sink") else {
+            return;
+        };
+        let event = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+            .all_headers(true)
+            .count(1)
+            .build();
+        if !pad.send_event(event) {
+            tracing::warn!("could not send force-key-unit event upstream");
+        }
     }
 
     /// Opens a V4L2 camera, or the first available one when `device` is None.

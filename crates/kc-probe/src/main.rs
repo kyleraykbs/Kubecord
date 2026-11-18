@@ -397,6 +397,7 @@ async fn voice(
                         if speaking { println!("{user_id} speaking"); }
                     }
                     Some(VoiceEvent::DaveReady) => println!("DAVE ready"),
+                    Some(VoiceEvent::ForceKeyframe) => println!("force keyframe requested"),
                     Some(VoiceEvent::KeyframeRequest { user_id, .. }) => {
                         println!("keyframe requested by {user_id}");
                     }
