@@ -86,10 +86,11 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
         )
     } else {
         format!(
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max=0 intra-refresh=true bframes=0",
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
+            keyint = settings.fps * 2,
         )
     }
 }
