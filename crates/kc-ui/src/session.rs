@@ -713,8 +713,15 @@ async fn handle_voice_state(
     let channel_id: Option<Snowflake> = serde_json::from_value(data["channel_id"].clone()).ok();
     match channel_id {
         None => {
-            if voice.connection.is_some() || voice.pending_join.is_some() {
+            // Discord reports the old voice state as `channel_id: null` while
+            // a join to a different channel is still pending. Tearing down on
+            // that stale event clears pending_join, so the later self state
+            // with the new channel never connects and the UI stays on "Join
+            // Voice". Only an established connection means a real leave.
+            if voice.connection.is_some() {
                 teardown_voice(voice, account, ui, true).await;
+            } else if voice.pending_join.is_some() {
+                tracing::debug!("ignoring stale self voice state with no channel during join");
             }
         }
         Some(channel_id) => {
@@ -1040,6 +1047,7 @@ async fn maybe_connect(
         return;
     };
 
+    tracing::info!(%channel_id, ?guild_id, "voice connecting from gateway state");
     let params = VoiceParams {
         server_id: guild_id.unwrap_or(channel_id),
         channel_id,
@@ -1058,6 +1066,7 @@ async fn maybe_connect(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
     match kc_voice::connect(params, event_tx).await {
         Ok(handle) => {
+            tracing::info!(%channel_id, "voice connection started");
             let audio = match VoiceAudio::start(handle.clone()) {
                 Ok(audio) => Some(Arc::new(audio)),
                 Err(error) => {
@@ -1151,6 +1160,7 @@ async fn maybe_connect(
             });
         }
         Err(error) => {
+            tracing::warn!(%error, "voice connect failed");
             let _ = ui
                 .send(UiEvent::VoiceError {
                     account,

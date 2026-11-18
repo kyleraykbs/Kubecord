@@ -283,6 +283,12 @@ impl State {
                 }
             }
             "VOICE_STATE_UPDATE" => {
+                // Guild voice states carry a member object for users we have
+                // not otherwise seen; use it so the channel occupant list can
+                // render names instead of dropping the entry.
+                if let Some(user) = data.pointer("/member/user") {
+                    self.upsert_user_from_value(user);
+                }
                 if let Ok(voice_state) = serde_json::from_value::<VoiceState>(data.clone()) {
                     let key = voice_state.key();
                     let event = StoreEvent::VoiceStateUpdated {
@@ -1221,6 +1227,25 @@ mod tests {
                 .map(|user| user.username)
                 .collect();
             assert_eq!(names, vec!["friend", "lambda", "third"]);
+        });
+    }
+
+    #[test]
+    fn voice_state_member_populates_occupant_name() {
+        let store = Store::new();
+        store.apply(
+            "VOICE_STATE_UPDATE",
+            &json!({
+                "guild_id": "5",
+                "channel_id": "12",
+                "user_id": "2",
+                "member": {"user": {"id": "2", "username": "friend"}}
+            }),
+        );
+        store.read(|state| {
+            let users = state.users_in_channel_voice(Snowflake(5), Snowflake(12));
+            assert_eq!(users.len(), 1);
+            assert_eq!(users[0].display_name(), "friend");
         });
     }
 
