@@ -112,47 +112,64 @@ impl Srtp {
             return Ok(packet[..index_offset].to_vec());
         }
         let encrypted = &packet[8..index_offset];
-        let mut nonce = [0u8; 12];
-        nonce[2..6].copy_from_slice(&packet[4..8]);
-        nonce[8..12].copy_from_slice(&(index & 0x7fff_ffff).to_be_bytes());
-        let mut aad = Vec::with_capacity(12);
-        aad.extend_from_slice(&packet[..8]);
-        aad.extend_from_slice(&packet[index_offset..]);
+        let header = &packet[..8];
+        let index_bytes = &packet[index_offset..];
+        let mut last_error = None;
 
-        let plaintext = match self.mode {
-            Mode::Aes256GcmRtpsize => {
-                let cipher = Aes256Gcm::new_from_slice(&self.key)
-                    .map_err(|_| Error::Message("invalid AES key".into()))?;
-                cipher
-                    .decrypt(
-                        aes_gcm::Nonce::from_slice(&nonce),
-                        Payload {
-                            msg: encrypted,
-                            aad: &aad,
-                        },
-                    )
-                    .map_err(|_| Error::Message("SRTCP AES-GCM decryption failed".into()))?
+        // Discord's AEAD implementation uses the trailing 4-byte counter as
+        // the nonce prefix, like SRTP. The RTCP index is not the RFC 7714
+        // SSRC-derived IV. Try the authenticated variants used by common
+        // implementations before giving up.
+        for full_index in [index & 0x7fff_ffff, index] {
+            let mut nonce = [0u8; 12];
+            nonce[..4].copy_from_slice(&full_index.to_be_bytes());
+            let mut aads = Vec::with_capacity(2);
+            let mut with_index = Vec::with_capacity(12);
+            with_index.extend_from_slice(header);
+            with_index.extend_from_slice(index_bytes);
+            aads.push(with_index);
+            aads.push(header.to_vec());
+            for aad in aads {
+                let plaintext = match self.mode {
+                    Mode::Aes256GcmRtpsize => {
+                        let cipher = Aes256Gcm::new_from_slice(&self.key)
+                            .map_err(|_| Error::Message("invalid AES key".into()))?;
+                        match cipher.decrypt(
+                            aes_gcm::Nonce::from_slice(&nonce),
+                            Payload {
+                                msg: encrypted,
+                                aad: &aad,
+                            },
+                        ) {
+                            Ok(plaintext) => plaintext,
+                            Err(_) => continue,
+                        }
+                    }
+                    Mode::XChaCha20Poly1305Rtpsize => {
+                        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+                            .map_err(|_| Error::Message("invalid XChaCha20 key".into()))?;
+                        let mut nonce24 = [0u8; 24];
+                        nonce24[..12].copy_from_slice(&nonce);
+                        match cipher.decrypt(
+                            &nonce24.into(),
+                            Payload {
+                                msg: encrypted,
+                                aad: &aad,
+                            },
+                        ) {
+                            Ok(plaintext) => plaintext,
+                            Err(_) => continue,
+                        }
+                    }
+                };
+                let mut result = Vec::with_capacity(8 + plaintext.len());
+                result.extend_from_slice(header);
+                result.extend_from_slice(&plaintext);
+                return Ok(result);
             }
-            Mode::XChaCha20Poly1305Rtpsize => {
-                let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
-                    .map_err(|_| Error::Message("invalid XChaCha20 key".into()))?;
-                let mut nonce24 = [0u8; 24];
-                nonce24[..12].copy_from_slice(&nonce);
-                cipher
-                    .decrypt(
-                        &nonce24.into(),
-                        Payload {
-                            msg: encrypted,
-                            aad: &aad,
-                        },
-                    )
-                    .map_err(|_| Error::Message("SRTCP XChaCha20 decryption failed".into()))?
-            }
-        };
-        let mut result = Vec::with_capacity(8 + plaintext.len());
-        result.extend_from_slice(&packet[..8]);
-        result.extend_from_slice(&plaintext);
-        Ok(result)
+            last_error = Some(Error::Message("SRTCP AEAD decryption failed".into()));
+        }
+        Err(last_error.unwrap_or_else(|| Error::Message("SRTCP decrypt failed".into())))
     }
 
     /// Decrypts a complete RTP packet, returning the plaintext payload.
