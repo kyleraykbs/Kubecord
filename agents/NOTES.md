@@ -152,3 +152,11 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   back to path/target-object variants.
 - Failed pipeline attempts now go to NULL before being dropped, avoiding the
   "dispose element in READY" GStreamer critical.
+
+## Screen capture selected the camera node (2026-11-18)
+
+- `pipewiresrc fd=<fd>` without `path` defaults to the first portal node, which
+  was the camera; Go Live therefore showed the camera feed instead of the
+  selected display. Screen capture now prefers `path=<node>` and sets `fd`/`path`
+  as element properties directly, matching the gtk4 paintable example. Camera
+  capture keeps fd-only first because path fails its format setup.
