@@ -218,9 +218,17 @@ impl VideoSource {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = std::thread::spawn(move || {
+            let mut last_arrival: Option<Instant> = None;
             while !thread_stop.load(Ordering::Relaxed) {
                 let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
                 else {
+                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100)) {
+                        tracing::debug!(
+                            silent_ms = last_arrival.unwrap().elapsed().as_millis(),
+                            "video capture starved"
+                        );
+                        last_arrival = Some(Instant::now());
+                    }
                     continue;
                 };
                 let Some(buffer) = sample.buffer() else {
@@ -230,6 +238,18 @@ impl VideoSource {
                     continue;
                 };
                 if !map.as_slice().is_empty() {
+                    let now = Instant::now();
+                    if let Some(last) = last_arrival {
+                        let gap = now.saturating_duration_since(last);
+                        if gap > Duration::from_millis(frame_ms as u64 * 2) {
+                            tracing::debug!(
+                                gap_ms = gap.as_millis(),
+                                bytes = map.as_slice().len(),
+                                "video encoder frame gap"
+                            );
+                        }
+                    }
+                    last_arrival = Some(now);
                     on_frame(EncodedFrame {
                         data: map.as_slice().to_vec(),
                         duration_ms: frame_ms,
@@ -544,9 +564,17 @@ impl VideoDecoder {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = std::thread::spawn(move || {
+            let mut last_arrival: Option<Instant> = None;
             while !thread_stop.load(Ordering::Relaxed) {
                 let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
                 else {
+                    if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100)) {
+                        tracing::debug!(
+                            silent_ms = last_arrival.unwrap().elapsed().as_millis(),
+                            "video capture starved"
+                        );
+                        last_arrival = Some(Instant::now());
+                    }
                     continue;
                 };
                 let Some(caps) = sample.caps() else {

@@ -26,6 +26,14 @@ impl<T: Send + 'static> DelayedSender<T> {
         std::thread::spawn(move || {
             let mut next = Instant::now() + delay;
             while let Ok((queued, item, frame_ms)) = rx.recv() {
+                let latency = queued.elapsed();
+                if latency > Duration::from_millis(100) {
+                    tracing::debug!(
+                        latency_ms = latency.as_millis(),
+                        frame_ms,
+                        "video delay queue backlog"
+                    );
+                }
                 let due = (queued + delay).max(next);
                 let now = Instant::now();
                 if due > now {
