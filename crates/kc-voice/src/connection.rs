@@ -510,8 +510,15 @@ impl SessionState {
                 speaking,
             } => {
                 if let Some(dave) = &mut self.dave {
-                    let encrypted = dave.encrypt_audio(&opus)?;
-                    self.send_rtp_audio(&encrypted).await?;
+                    match dave.encrypt_audio(&opus) {
+                        Ok(encrypted) => self.send_rtp_audio(&encrypted).await?,
+                        Err(error) => {
+                            // DAVE transitions can still be pending when the
+                            // first microphone frame arrives. Drop that frame
+                            // rather than tearing down the whole voice session.
+                            debug!(%error, "dropping audio frame until DAVE is ready");
+                        }
+                    }
                 } else {
                     self.send_rtp_audio(&opus).await?;
                 }
@@ -527,7 +534,13 @@ impl SessionState {
                     return Ok(true);
                 }
                 let encrypted = match &mut self.dave {
-                    Some(dave) => dave.encrypt_video(&frame)?,
+                    Some(dave) => match dave.encrypt_video(&frame) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            debug!(%error, "dropping video frame until DAVE is ready");
+                            return Ok(true);
+                        }
+                    },
                     None => frame,
                 };
                 let packets = rtp::packetize(&encrypted, MAX_PAYLOAD);
