@@ -136,7 +136,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         // Leave the source format unconstrained. Forcing I420 on pipewiresrc
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before the encoder.
-        "capsfilter caps=video/x-raw ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0{leaky} \
+        "capsfilter caps=video/x-raw ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0{leaky} \
          ! videoconvert ! videoscale ! videorate \
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
          ! {encoder} \
@@ -161,7 +161,7 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
         "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
          ! videorate skip-to-first=true \
          ! capsfilter caps=video/x-raw,framerate={fps}/1 \
-         ! queue{leaky} \
+         ! queue max-size-buffers=8{leaky} \
          ! videoconvert \
          ! videoscale \
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height} \
