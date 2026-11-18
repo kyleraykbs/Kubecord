@@ -133,3 +133,13 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   old caps negotiation failed with "Element failed to change its state".
 - Pipeline state failures now surface the GStreamer error and debug string in
   the UI status line.
+
+## H.264 profile was the video failure (2026-11-18)
+
+- The capture pipeline negotiated `High 4:4:4 Predictive` because nothing forced
+  chroma layout; Discord expects 4:2:0 baseline (`42e01f`) for these streams.
+  Constraining the capsfilter to `format=I420` makes x264enc emit
+  `Constrained Baseline` level 3.1 (verified with ffprobe). This is the likely
+  cause of the camera 2015 and Go Live 2012 timeouts.
+- `videorate` precedes the caps so 0/1 or 60 fps sources can produce the
+  requested 30 fps without failing state negotiation.

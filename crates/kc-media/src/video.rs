@@ -55,7 +55,7 @@ fn encoder_element() -> &'static str {
 fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
     format!(
         "{source} ! videoconvert ! videoscale ! videorate \
-         ! video/x-raw,width={width},height={height},framerate={fps}/1 \
+         ! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
          ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
          ! h264parse config-interval=-1 \
          ! video/x-h264,stream-format=byte-stream,alignment=au \
@@ -357,6 +357,7 @@ mod tests {
             "videotestsrc num-buffers=5 \
              ! video/x-raw,width=320,height=240,framerate=30/1 \
              ! videoconvert ! videoscale ! videorate \
+             ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 \
              ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=500 key-int-max=30 bframes=0 \
              ! h264parse config-interval=-1 \
              ! video/x-h264,stream-format=byte-stream,alignment=au \
