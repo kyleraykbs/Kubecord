@@ -18,7 +18,7 @@ use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
 use kc_media::delay::DelayedSender;
 use kc_media::portal::CameraAccess;
-use kc_media::video::{VideoSettings, VideoSource};
+use kc_media::video::{VideoSettings, VideoSource, is_keyframe};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
 use tokio::sync::broadcast::error::RecvError;
@@ -1179,9 +1179,10 @@ async fn maybe_start_stream(
             let drop_after_ms = video_settings.drop_frames_after_ms;
             let drop_after = (drop_after_ms > 0).then(|| Duration::from_millis(drop_after_ms as u64));
             let video_send = source_handle.clone();
-            let video_delay = DelayedSender::start_with_limit(
+            let video_delay = DelayedSender::start_with_limit_and_keep(
                 Duration::from_millis(stream_delay_ms),
                 drop_after,
+                |data: &Vec<u8>| is_keyframe(data),
                 move |data: Vec<u8>, frame_ms| video_send.send_video(data, frame_ms),
             );
             let last_frame = Arc::new(Mutex::new(Instant::now()));

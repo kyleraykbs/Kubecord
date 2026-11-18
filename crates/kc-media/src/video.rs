@@ -77,6 +77,24 @@ impl Default for VideoSettings {
     }
 }
 
+/// True when an Annex-B access unit contains an IDR or SPS NAL.
+pub fn is_keyframe(annexb: &[u8]) -> bool {
+    let mut index = 0;
+    while index + 3 <= annexb.len() {
+        if annexb[index] == 0 && annexb[index + 1] == 0 && annexb[index + 2] == 1 {
+            if let Some(kind) = annexb.get(index + 3).map(|byte| byte & 0x1F)
+                && (kind == 5 || kind == 7)
+            {
+                return true;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    false
+}
+
 fn encoder_element() -> &'static str {
     // Prefer hardware when the plugin is present; x264enc is the reliable
     // software path. The element is resolved once per pipeline startup.

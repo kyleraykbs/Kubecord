@@ -28,6 +28,18 @@ impl<T: Send + 'static> DelayedSender<T> {
     pub fn start_with_limit(
         delay: Duration,
         max_extra_latency: Option<Duration>,
+        send: impl FnMut(T, u32) + Send + 'static,
+    ) -> Self {
+        Self::start_with_limit_and_keep(delay, max_extra_latency, |_| false, send)
+    }
+
+    /// Like [`start_with_limit`](Self::start_with_limit), except items for
+    /// which `keep` returns true are never dropped. Video uses this to protect
+    /// keyframes, since dropping one freezes the decoder until the next IDR.
+    pub fn start_with_limit_and_keep(
+        delay: Duration,
+        max_extra_latency: Option<Duration>,
+        keep: impl Fn(&T) -> bool + Send + 'static,
         mut send: impl FnMut(T, u32) + Send + 'static,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<(Instant, T, u32)>();
@@ -37,7 +49,7 @@ impl<T: Send + 'static> DelayedSender<T> {
             let mut last_drop_log: Option<Instant> = None;
             while let Ok((queued, item, frame_ms)) = rx.recv() {
                 let excess = queued.elapsed().saturating_sub(delay);
-                if max_extra_latency.is_some_and(|limit| excess > limit) {
+                if max_extra_latency.is_some_and(|limit| excess > limit) && !keep(&item) {
                     dropped += 1;
                     if last_drop_log.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)) {
                         tracing::debug!(
