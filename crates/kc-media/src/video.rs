@@ -231,10 +231,13 @@ impl VideoSource {
             Path,
             Target,
         }
-        let variants = if prefer_path {
-            [Variant::Path, Variant::FdOnly, Variant::Target]
+        let variants: Vec<Variant> = if prefer_path {
+            // Never fall back to fd-only for a screen: that selects the
+            // portal's first node, which is usually the camera, steals it from
+            // the camera path, and shows the camera in the stream.
+            vec![Variant::Path, Variant::Target]
         } else {
-            [Variant::FdOnly, Variant::Path, Variant::Target]
+            vec![Variant::FdOnly, Variant::Path, Variant::Target]
         };
         let source = "pipewiresrc name=src do-timestamp=true";
         let mut last_error = None;

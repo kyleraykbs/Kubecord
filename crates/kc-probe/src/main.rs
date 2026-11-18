@@ -135,9 +135,9 @@ async fn main() -> Result<()> {
                             frames += 1;
                         }
                     }
-                    println!("screen frames in 3s: {frames}");
+                    eprintln!("screen frames in 3s: {frames}");
                 }
-                Err(error) => println!("screen pipeline failed: {error}"),
+                Err(error) => eprintln!("screen pipeline failed: {error}"),
             }
         }
         "camera" => {

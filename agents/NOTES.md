@@ -160,3 +160,12 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   selected display. Screen capture now prefers `path=<node>` and sets `fd`/`path`
   as element properties directly, matching the gtk4 paintable example. Camera
   capture keeps fd-only first because path fails its format setup.
+
+## Screen fallback stole the camera (2026-11-18)
+
+- Screen capture previously fell back to `pipewiresrc fd=<fd>`, which chooses
+  the portal's first node (the camera). That made Go Live show the camera and
+  left the camera unavailable to the camera toggle. Screens now try only
+  `path=<node>` and `target-object=<node>`; fd-only is camera-only.
+- Screen path probe: `variant=Path`, 2 frames in 3s on a static desktop; camera
+  probe: `variant=FdOnly`, 90 frames in 3s.
