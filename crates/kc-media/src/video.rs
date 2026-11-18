@@ -23,6 +23,15 @@ pub struct VideoSource {
     _camera: Option<crate::portal::CameraCast>,
 }
 
+/// Encoder choice for a capture pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderPreference {
+    /// Prefer VA-API and fall back to x264 if it cannot start.
+    Auto,
+    /// Force the software x264 encoder.
+    Cpu,
+}
+
 /// Settings shared by camera and screen capture.
 #[derive(Clone, Debug)]
 pub struct VideoSettings {
@@ -32,6 +41,7 @@ pub struct VideoSettings {
     pub bitrate_kbps: u32,
     /// x264 preset; `zerolatency` tuning is always applied.
     pub preset: String,
+    pub encoder: EncoderPreference,
 }
 
 impl VideoSettings {
@@ -50,6 +60,7 @@ impl Default for VideoSettings {
             fps: 30,
             bitrate_kbps: Self::automatic_bitrate_kbps(1280, 720, 30),
             preset: "ultrafast".into(),
+            encoder: EncoderPreference::Auto,
         }
     }
 }
@@ -60,30 +71,71 @@ fn encoder_element() -> &'static str {
     "x264enc"
 }
 
-fn pipeline_downstream(settings: &VideoSettings) -> String {
+fn hardware_available() -> bool {
+    gst::init().is_ok() && gst::ElementFactory::find("vah264enc").is_some()
+}
+
+fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
+    if hardware {
+        format!(
+            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7",
+            bitrate = settings.bitrate_kbps,
+            keyint = settings.fps * 2,
+        )
+    } else {
+        format!(
+            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0",
+            encoder = encoder_element(),
+            preset = settings.preset,
+            bitrate = settings.bitrate_kbps,
+            keyint = settings.fps * 2,
+        )
+    }
+}
+
+fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
     format!(
         // Leave the source format unconstrained. Forcing I420 on pipewiresrc
         // itself fails its output-format setup (-22); videoconvert performs
-        // the chroma conversion before x264enc.
+        // the chroma conversion before the encoder.
         "capsfilter caps=video/x-raw ! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 \
          ! videoconvert ! videoscale ! videorate \
-         ! capsfilter caps=video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
-         ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
+         ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
+         ! {encoder} \
          ! h264parse config-interval=-1 \
          ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
          ! appsink name=sink sync=false max-buffers=8 drop=true",
         width = settings.width,
         height = settings.height,
         fps = settings.fps,
-        encoder = encoder_element(),
-        preset = settings.preset,
-        bitrate = settings.bitrate_kbps,
-        keyint = settings.fps * 2,
+        format = if hardware { "NV12" } else { "I420" },
+        encoder = encoder_chain(settings, hardware),
     )
 }
 
-fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
-    format!("{source} ! {}", pipeline_downstream(settings))
+fn pipeline_description(source: &str, settings: &VideoSettings, hardware: bool) -> String {
+    format!("{source} ! {}", pipeline_downstream(settings, hardware))
+}
+
+fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
+    format!(
+        "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
+         ! videorate skip-to-first=true \
+         ! capsfilter caps=video/x-raw,framerate={fps}/1 \
+         ! queue \
+         ! videoconvert \
+         ! videoscale \
+         ! capsfilter caps=video/x-raw,format={format},width={width},height={height} \
+         ! {encoder} \
+         ! h264parse config-interval=-1 \
+         ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
+         ! appsink name=sink sync=false max-buffers=8 drop=true",
+        fps = settings.fps,
+        width = settings.width,
+        height = settings.height,
+        format = if hardware { "NV12" } else { "I420" },
+        encoder = encoder_chain(settings, hardware),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -104,20 +156,24 @@ pub fn preload_pipewire() -> Result<()> {
     Ok(())
 }
 
-impl VideoSource {
-    fn start_pipeline(
-        description: &str,
-        frame_ms: u32,
-        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
-    ) -> Result<Self> {
-        Self::start_pipeline_with(description, frame_ms, on_frame, |_| Ok(()))
+fn encoder_descriptions(
+    settings: &VideoSettings,
+    make: impl Fn(bool) -> String,
+) -> Vec<String> {
+    let mut descriptions = Vec::new();
+    if settings.encoder == EncoderPreference::Auto && hardware_available() {
+        descriptions.push(make(true));
     }
+    descriptions.push(make(false));
+    descriptions
+}
 
+impl VideoSource {
     fn start_pipeline_with(
         description: &str,
         frame_ms: u32,
         mut on_frame: impl FnMut(EncodedFrame) + Send + 'static,
-        configure: impl FnOnce(&gst::Pipeline) -> Result<()>,
+        configure: impl Fn(&gst::Pipeline) -> Result<()>,
     ) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
         let element = gst::parse::launch(description)
@@ -186,6 +242,32 @@ impl VideoSource {
         })
     }
 
+    fn start_with_fallback(
+        descriptions: Vec<String>,
+        frame_ms: u32,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+        configure: impl Fn(&gst::Pipeline) -> Result<()>,
+    ) -> Result<Self> {
+        let callback = Arc::new(std::sync::Mutex::new(on_frame));
+        let mut last_error = None;
+        for description in descriptions {
+            let callback = callback.clone();
+            let callback = move |frame| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(frame);
+                }
+            };
+            match Self::start_pipeline_with(&description, frame_ms, callback, &configure) {
+                Ok(source) => return Ok(source),
+                Err(error) => {
+                    tracing::warn!(%error, "capture encoder attempt failed");
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::Message("no capture pipeline variant".into())))
+    }
+
     /// Opens a V4L2 camera, or the first available one when `device` is None.
     pub fn camera(
         device: Option<String>,
@@ -194,10 +276,14 @@ impl VideoSource {
     ) -> Result<Self> {
         let device = device.unwrap_or_else(|| "/dev/video0".into());
         let source = format!("v4l2src device={device}");
-        Self::start_pipeline(
-            &pipeline_description(&source, &settings),
+        let descriptions = encoder_descriptions(&settings, |hardware| {
+            pipeline_description(&source, &settings, hardware)
+        });
+        Self::start_with_fallback(
+            descriptions,
             1000 / settings.fps.max(1),
             on_frame,
+            |_| Ok(()),
         )
     }
 
@@ -208,10 +294,14 @@ impl VideoSource {
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
         let source = format!("pipewiresrc path={node_id} do-timestamp=true");
-        Self::start_pipeline(
-            &pipeline_description(&source, &settings),
+        let descriptions = encoder_descriptions(&settings, |hardware| {
+            pipeline_description(&source, &settings, hardware)
+        });
+        Self::start_with_fallback(
+            descriptions,
             1000 / settings.fps.max(1),
             on_frame,
+            |_| Ok(()),
         )
     }
 
@@ -275,28 +365,12 @@ impl VideoSource {
         }
         let fd = portal.fd();
         let node_id = portal.node_id;
-        let description = format!(
-            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
-             ! videorate skip-to-first=true \
-             ! capsfilter caps=video/x-raw,framerate={fps}/1 \
-             ! queue \
-             ! videoconvert \
-             ! videoscale \
-             ! capsfilter caps=video/x-raw,format=I420,width={width},height={height} \
-             ! x264enc tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
-             ! h264parse config-interval=-1 \
-             ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
-             ! appsink name=sink sync=false max-buffers=8 drop=true",
-            fps = settings.fps,
-            width = settings.width,
-            height = settings.height,
-            preset = settings.preset,
-            bitrate = settings.bitrate_kbps,
-            keyint = settings.fps * 2,
-        );
+        let descriptions = encoder_descriptions(&settings, |hardware| {
+            screen_description(&settings, hardware)
+        });
         tracing::debug!("screen capture parsing pipeline");
-        let mut source = Self::start_pipeline_with(
-            &description,
+        let mut source = Self::start_with_fallback(
+            descriptions,
             1000 / settings.fps.max(1),
             on_frame,
             move |pipeline| {
@@ -352,8 +426,11 @@ impl VideoSource {
                 }
                 Ok(())
             };
-            match Self::start_pipeline_with(
-                &pipeline_description(source, settings),
+            let descriptions = encoder_descriptions(settings, |hardware| {
+                pipeline_description(source, settings, hardware)
+            });
+            match Self::start_with_fallback(
+                descriptions,
                 1000 / settings.fps.max(1),
                 callback,
                 configure,

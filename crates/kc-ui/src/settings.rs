@@ -1,7 +1,7 @@
 //! Persisted capture-quality preferences.
 
 use kc_core::paths::{config_dir, ensure_dir};
-use kc_media::video::VideoSettings;
+use kc_media::video::{EncoderPreference, VideoSettings};
 use serde::{Deserialize, Serialize};
 
 pub const RESOLUTIONS: [(u32, u32, &str); 4] = [
@@ -27,6 +27,8 @@ pub struct CapturePreferences {
     pub bitrate_kbps: Option<u32>,
     /// Fixed Go Live buffering delay in milliseconds.
     pub stream_delay_ms: u64,
+    /// Force the software x264 encoder instead of trying VA-API first.
+    pub cpu_encoder: bool,
 }
 
 impl Default for CapturePreferences {
@@ -37,6 +39,7 @@ impl Default for CapturePreferences {
             fps: 30,
             bitrate_kbps: None,
             stream_delay_ms: 0,
+            cpu_encoder: false,
         }
     }
 }
@@ -51,6 +54,11 @@ impl CapturePreferences {
                 .bitrate_kbps
                 .unwrap_or_else(|| VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)),
             preset: "ultrafast".into(),
+            encoder: if self.cpu_encoder {
+                EncoderPreference::Cpu
+            } else {
+                EncoderPreference::Auto
+            },
         }
     }
 
@@ -123,6 +131,7 @@ mod tests {
             fps: 60,
             bitrate_kbps: Some(6000),
             stream_delay_ms: 1000,
+            cpu_encoder: true,
         };
         let settings = prefs.video_settings();
         assert_eq!(settings.bitrate_kbps, 6000);

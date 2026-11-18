@@ -1,6 +1,6 @@
 //! Voice gateway, UDP, SRTP, RTP and DAVE state machine.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -187,6 +187,7 @@ struct SessionState {
     seq_video: u16,
     ts_audio: u32,
     ts_video: u32,
+    video_queue: VecDeque<(Vec<u8>, bool, u32)>,
     speaking: u8,
     video_enabled: bool,
     last_binary_seq: u16,
@@ -383,6 +384,7 @@ async fn run(
         seq_video: (now_millis() & 0xFFFF) as u16,
         ts_audio: now_millis() as u32,
         ts_video: now_millis() as u32,
+        video_queue: VecDeque::new(),
         speaking: 0,
         video_enabled: false,
         last_binary_seq: 0,
@@ -413,6 +415,10 @@ async fn run(
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     keepalive.tick().await;
 
+    let mut video_tick = tokio::time::interval(Duration::from_millis(1));
+    video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    video_tick.tick().await;
+
     let mut buffer = vec![0u8; 2048];
     loop {
         tokio::select! {
@@ -426,6 +432,11 @@ async fn run(
                 // Abaddon sends this two-byte UDP keepalive every 10 seconds so
                 // the NAT mapping and the SFU's SSRC state stay alive.
                 let _ = state.socket.send_to(&[0x13, 0x37], state.remote).await;
+            }
+            _ = video_tick.tick() => {
+                if let Some((payload, marker, timestamp)) = state.video_queue.pop_front() {
+                    state.send_rtp_video(&payload, marker, timestamp).await?;
+                }
             }
             command = commands.recv() => {
                 let Some(command) = command else { break };
@@ -506,17 +517,26 @@ impl SessionState {
                     None => frame,
                 };
                 let packets = rtp::packetize(&encrypted, MAX_PAYLOAD);
-                if self.ts_video == 0 {
+                if self.video_queue.is_empty() {
                     tracing::info!(
                         bytes = frame_size,
                         packets = packets.len(),
                         frame_ms,
                         ssrc = self.video_ssrc,
-                        "sending first video frame"
+                        "queueing first video frame"
                     );
                 }
-                for (payload, marker) in packets {
-                    self.send_rtp_video(&payload, marker).await?;
+                let timestamp = self.ts_video;
+                if self.video_queue.len() + packets.len() > 4096 {
+                    tracing::warn!(
+                        queued = self.video_queue.len(),
+                        packets = packets.len(),
+                        "dropping video frame: RTP pacing queue is full"
+                    );
+                } else {
+                    for (payload, marker) in packets {
+                        self.video_queue.push_back((payload, marker, timestamp));
+                    }
                 }
                 self.ts_video = self.ts_video.wrapping_add(frame_ms * 90);
             }
@@ -602,9 +622,14 @@ impl SessionState {
         Ok(())
     }
 
-    async fn send_rtp_video(&mut self, payload: &[u8], marker: bool) -> Result<()> {
+    async fn send_rtp_video(
+        &mut self,
+        payload: &[u8],
+        marker: bool,
+        timestamp: u32,
+    ) -> Result<()> {
         let ssrc = self.video_ssrc.unwrap_or(self.audio_ssrc);
-        let header = RtpHeader::write(marker, PT_H264, self.seq_video, self.ts_video, ssrc);
+        let header = RtpHeader::write(marker, PT_H264, self.seq_video, timestamp, ssrc);
         self.seq_video = self.seq_video.wrapping_add(1);
         let packet = self.srtp.encrypt(&header, payload)?;
         self.socket

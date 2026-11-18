@@ -881,6 +881,9 @@ impl AppState {
                 .unwrap_or(0) as u32,
         );
 
+        let cpu_encoder = gtk::CheckButton::with_label("Use software CPU encoder (x264)");
+        cpu_encoder.set_active(current.cpu_encoder);
+
         for (row, label_text, dropdown) in [
             (0, "Resolution", &resolution),
             (1, "Framerate", &framerate),
@@ -893,14 +896,19 @@ impl AppState {
             grid.attach(dropdown, 1, row, 1, 1);
         }
 
+        let encoder_label = gtk::Label::new(Some("Encoder"));
+        encoder_label.set_xalign(0.0);
+        grid.attach(&encoder_label, 0, 4, 1, 1);
+        grid.attach(&cpu_encoder, 1, 4, 1, 1);
+
         let note = gtk::Label::new(Some(
-            "Automatic bitrate is derived from resolution and framerate. Changes apply to the next camera or screen capture.",
+            "Automatic bitrate is derived from resolution and framerate. Hardware encoding is used when available and falls back to x264. Changes apply to the next capture.",
         ));
         note.set_xalign(0.0);
         note.set_wrap(true);
         note.add_css_class("dim-label");
         note.add_css_class("caption");
-        grid.attach(&note, 0, 4, 2, 1);
+        grid.attach(&note, 0, 5, 2, 1);
         dialog.content_area().append(&grid);
 
         let app = self.clone();
@@ -921,6 +929,7 @@ impl AppState {
                 fps,
                 bitrate_kbps,
                 stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
+                cpu_encoder: cpu_encoder.is_active(),
             };
             match prefs.save() {
                 Ok(()) => {
