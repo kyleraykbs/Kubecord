@@ -103,7 +103,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
          ! {encoder} \
          ! h264parse config-interval=-1 \
-         ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
+         ! capsfilter caps=video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au \
          ! appsink name=sink sync=false max-buffers=8 drop=true",
         width = settings.width,
         height = settings.height,
@@ -128,7 +128,7 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height} \
          ! {encoder} \
          ! h264parse config-interval=-1 \
-         ! capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au \
+         ! capsfilter caps=video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au \
          ! appsink name=sink sync=false max-buffers=8 drop=true",
         fps = settings.fps,
         width = settings.width,
