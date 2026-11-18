@@ -114,6 +114,32 @@ async fn main() -> Result<()> {
         "watch" => {
             watch(token, false).await?;
         }
+        "screen" => {
+            let portal = kc_media::portal::request().await?;
+            let (tx, rx) = std::sync::mpsc::channel();
+            match kc_media::video::VideoSource::screen(
+                portal,
+                kc_media::video::VideoSettings::default(),
+                move |frame| {
+                    let _ = tx.send(frame.data.len());
+                },
+            ) {
+                Ok(_source) => {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    let mut frames = 0;
+                    while std::time::Instant::now() < deadline {
+                        if rx
+                            .recv_timeout(std::time::Duration::from_millis(500))
+                            .is_ok()
+                        {
+                            frames += 1;
+                        }
+                    }
+                    println!("screen frames in 3s: {frames}");
+                }
+                Err(error) => println!("screen pipeline failed: {error}"),
+            }
+        }
         "camera" => {
             let Some(camera) = kc_media::portal::request_camera().await? else {
                 bail!("no camera from portal");

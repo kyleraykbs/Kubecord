@@ -77,7 +77,16 @@ impl VideoSource {
     fn start_pipeline(
         description: &str,
         frame_ms: u32,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self> {
+        Self::start_pipeline_with(description, frame_ms, on_frame, |_| Ok(()))
+    }
+
+    fn start_pipeline_with(
+        description: &str,
+        frame_ms: u32,
         mut on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+        configure: impl FnOnce(&gst::Pipeline) -> Result<()>,
     ) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
         let element = gst::parse::launch(description)
@@ -85,6 +94,7 @@ impl VideoSource {
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| Error::Message("video pipeline is not a pipeline".into()))?;
+        configure(&pipeline)?;
         let appsink = pipeline
             .by_name("sink")
             .and_then(|element| element.downcast::<gstreamer_app::AppSink>().ok())
@@ -182,7 +192,10 @@ impl VideoSource {
     ) -> Result<Self> {
         let node_id = portal.node_id;
         let fd = portal.fd();
-        let mut source = Self::from_pipewire(node_id, fd, &settings, on_frame)?;
+        // The screen portal fd can expose multiple nodes; path selects the
+        // display the user picked. Without it pipewiresrc defaults to the
+        // camera node, which made Go Live show the camera instead.
+        let mut source = Self::from_pipewire(node_id, fd, &settings, true, on_frame)?;
         source._portal = Some(portal);
         Ok(source)
     }
@@ -195,7 +208,7 @@ impl VideoSource {
     ) -> Result<Self> {
         let node_id = camera.node_id;
         let fd = camera.fd();
-        let mut source = Self::from_pipewire(node_id, fd, &settings, on_frame)?;
+        let mut source = Self::from_pipewire(node_id, fd, &settings, false, on_frame)?;
         // The portal owns the PipeWire fd; keep it alive with the pipeline.
         source._camera = Some(camera);
         Ok(source)
@@ -205,31 +218,58 @@ impl VideoSource {
         node_id: u32,
         fd: std::os::fd::RawFd,
         settings: &VideoSettings,
+        prefer_path: bool,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
         let on_frame = Arc::new(std::sync::Mutex::new(on_frame));
-        let variants = [
-            // The portal fd usually exposes exactly the granted node; the
-            // explicit path variant fails format setup on this camera.
-            format!("pipewiresrc fd={fd} do-timestamp=true"),
-            format!("pipewiresrc path={node_id} fd={fd} do-timestamp=true"),
-            format!("pipewiresrc target-object={node_id} fd={fd} do-timestamp=true"),
-        ];
+        // Set properties on the element directly. Passing fd/path through
+        // gst_parse_launch failed state setup on the camera; the gtk4
+        // paintable example sets fd and path as properties.
+        #[derive(Clone, Copy, Debug)]
+        enum Variant {
+            FdOnly,
+            Path,
+            Target,
+        }
+        let variants = if prefer_path {
+            [Variant::Path, Variant::FdOnly, Variant::Target]
+        } else {
+            [Variant::FdOnly, Variant::Path, Variant::Target]
+        };
+        let source = "pipewiresrc name=src do-timestamp=true";
         let mut last_error = None;
-        for source in variants {
+        for variant in variants {
             let callback = on_frame.clone();
             let callback = move |frame| {
                 if let Ok(mut callback) = callback.lock() {
                     callback(frame);
                 }
             };
-            match Self::start_pipeline(
-                &pipeline_description(&source, settings),
+            let configure = move |pipeline: &gst::Pipeline| -> Result<()> {
+                let element = pipeline
+                    .by_name("src")
+                    .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
+                element.set_property("fd", fd);
+                match variant {
+                    Variant::FdOnly => {}
+                    Variant::Path => element.set_property("path", node_id.to_string()),
+                    Variant::Target => element.set_property("target-object", node_id.to_string()),
+                }
+                Ok(())
+            };
+            match Self::start_pipeline_with(
+                &pipeline_description(source, settings),
                 1000 / settings.fps.max(1),
                 callback,
+                configure,
             ) {
                 Ok(video_source) => {
-                    tracing::info!(source, "pipewire capture source selected");
+                    tracing::info!(
+                        variant = ?variant,
+                        node_id,
+                        fd,
+                        "pipewire capture source selected"
+                    );
                     return Ok(video_source);
                 }
                 Err(error) => last_error = Some(error),
