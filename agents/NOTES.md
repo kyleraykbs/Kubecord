@@ -318,3 +318,31 @@ dispatch; contains account data).
   live; video is shown as it arrives (no clock smoothing); software decode
   only; no fullscreen or pop-out; own camera has no local preview.
 
+
+## UI parity additions (2026-11-18, later)
+
+- Right-click user menu (`menu.rs`): attached to member rows, voice tiles,
+  sidebar voice rows, DM rows and message avatars. Popovers are parented to
+  the window via `anchor_popover` (not the clicked row) so a sidebar rebuild
+  under an open menu can't orphan the grab and freeze input.
+- Profiles are a floating `adw::Dialog` card (members.rs `show_profile`),
+  with Member Since, mutual counts, editable note, and — for yourself — an
+  Edit Profile button (`edit_profile_dialog`: global name, pronouns, bio via
+  `set_global_name` / `set_profile`).
+- DM/group-DM voice calls: header call button (`toggle_dm_call`), `join_call`
+  rings via `ring_call`. Screenshare and camera now work in DM calls —
+  `stream_create` takes `Option<guild>` and emits a `call` stream; the
+  guild-only guards are gone. `stream_key(guild, channel, owner)` builds the
+  key for both guild and `call:` forms.
+- Incoming DM call: `CALL_CREATE` with us in `ringing` → `UiEvent::IncomingCall`
+  → a toast with a Join button.
+- Per-user volume: `Command::SetUserVolume` → account loop sets it on the
+  voice audio (and the stream-audio key); remembered in `AppState.user_volumes`
+  and re-applied on reconnect.
+- Audio device selection in Settings (the former "Capture Quality" dialog,
+  now "Settings"): `kc_media::devices` enumerates sources/sinks and holds the
+  process-global choice; `CapturePreferences.{input,output}_device` persist it
+  and `apply_devices()` pushes it to capture/playback. Both default to system
+  default. Takes effect on the next call.
+- Server header is a dropdown (`server.rs`): Invite, Create Channel/Category,
+  Server Settings (rename), Mute/Unmute, Copy ID, Leave — gated by perms.
