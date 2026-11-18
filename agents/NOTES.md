@@ -143,3 +143,12 @@ Reference: `reference-projects/abaddon` (uowuo/abaddon, commit 7b3a4ff).
   cause of the camera 2015 and Go Live 2012 timeouts.
 - `videorate` precedes the caps so 0/1 or 60 fps sources can produce the
   requested 30 fps without failing state negotiation.
+
+## pipewiresrc portal fd variant (2026-11-18)
+
+- `pipewiresrc path=<node> fd=<fd>` failed state setup on the camera portal with
+  `error set output format: -22`. `pipewiresrc fd=<fd>` alone works (verified
+  90 encoded frames in 3s). The capture wrapper tries fd-only first and falls
+  back to path/target-object variants.
+- Failed pipeline attempts now go to NULL before being dropped, avoiding the
+  "dispose element in READY" GStreamer critical.

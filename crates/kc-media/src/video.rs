@@ -54,7 +54,10 @@ fn encoder_element() -> &'static str {
 
 fn pipeline_description(source: &str, settings: &VideoSettings) -> String {
     format!(
-        "{source} ! videoconvert ! videoscale ! videorate \
+        // Leave the source format unconstrained. Forcing I420 on pipewiresrc
+        // itself fails its output-format setup (-22); videoconvert performs
+        // the chroma conversion before x264enc.
+        "{source} ! video/x-raw ! videoconvert ! videoscale ! videorate \
          ! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 \
          ! {encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} key-int-max={keyint} bframes=0 \
          ! h264parse config-interval=-1 \
@@ -106,6 +109,7 @@ impl VideoSource {
                     _ => None,
                 })
                 .unwrap_or_default();
+            let _ = pipeline.set_state(gst::State::Null);
             return Err(Error::Message(format!("video state: {error} {detail}")));
         }
 
@@ -203,12 +207,35 @@ impl VideoSource {
         settings: &VideoSettings,
         on_frame: impl FnMut(EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
-        let source = format!("pipewiresrc path={node_id} fd={fd} do-timestamp=true");
-        Self::start_pipeline(
-            &pipeline_description(&source, settings),
-            1000 / settings.fps.max(1),
-            on_frame,
-        )
+        let on_frame = Arc::new(std::sync::Mutex::new(on_frame));
+        let variants = [
+            // The portal fd usually exposes exactly the granted node; the
+            // explicit path variant fails format setup on this camera.
+            format!("pipewiresrc fd={fd} do-timestamp=true"),
+            format!("pipewiresrc path={node_id} fd={fd} do-timestamp=true"),
+            format!("pipewiresrc target-object={node_id} fd={fd} do-timestamp=true"),
+        ];
+        let mut last_error = None;
+        for source in variants {
+            let callback = on_frame.clone();
+            let callback = move |frame| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(frame);
+                }
+            };
+            match Self::start_pipeline(
+                &pipeline_description(&source, settings),
+                1000 / settings.fps.max(1),
+                callback,
+            ) {
+                Ok(video_source) => {
+                    tracing::info!(source, "pipewire capture source selected");
+                    return Ok(video_source);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::Message("no pipewire source variant".into())))
     }
 }
 
