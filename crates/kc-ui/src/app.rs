@@ -142,6 +142,24 @@ pub fn run() -> glib::ExitCode {
                 app_state.show_video_demo();
             });
         }
+        if let Ok(popup) = std::env::var("KYLECORD_POPUP") {
+            let app_state = state.clone();
+            glib::timeout_add_local_once(Duration::from_millis(4000), move || {
+                let Some((account, _, store)) = app_state.active() else {
+                    return;
+                };
+                match popup.as_str() {
+                    "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
+                    "share" => app_state.show_share_popup(account),
+                    _ => {
+                        if let Some(me) = store.read(|state| state.my_id()) {
+                            let anchor = app_state.window.clone().upcast::<gtk::Widget>();
+                            app_state.show_profile(me, &anchor);
+                        }
+                    }
+                }
+            });
+        }
         if let Ok(page) = std::env::var("KYLECORD_SETTINGS") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
@@ -278,6 +296,29 @@ impl AppState {
         let app = self.clone();
         self.capture_button
             .connect_clicked(move |_| app.show_settings());
+
+        // Clicking outside a dialog closes it, as in Discord.
+        let outside = gtk::GestureClick::new();
+        outside.set_button(0);
+        outside.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let window = self.window.clone();
+        outside.connect_pressed(move |gesture, _, x, y| {
+            let Some(dialog) = window.visible_dialog() else {
+                return;
+            };
+            let Some(card) = dialog.child() else {
+                return;
+            };
+            let point = gtk::graphene::Point::new(x as f32, y as f32);
+            let inside = card
+                .compute_bounds(&window)
+                .is_some_and(|bounds| bounds.contains_point(&point));
+            if !inside {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                dialog.close();
+            }
+        });
+        self.window.add_controller(outside);
 
         // The sidebar width is kept between launches.
         let app = self.clone();
@@ -546,7 +587,7 @@ impl AppState {
             }
         });
         if let Some(account) = account {
-            self.show_share_source_dialog(account);
+            self.show_share_popup(account);
         }
     }
 
@@ -591,6 +632,8 @@ impl AppState {
         });
     }
 
+    /// Camera access arrived: ask in the camera popout before anything is
+    /// sent.
     pub(crate) fn show_camera_dialog(
         self: &Rc<Self>,
         account: AccountId,
@@ -603,130 +646,20 @@ impl AppState {
             self.set_status("No camera available");
             return;
         }
-        // The camera chosen in Settings is used without asking.
-        let preferred = self.capture.borrow().camera.clone();
-        if purpose == CameraPurpose::Camera
-            && let Some(camera) = cameras.iter().find(|camera| camera.name == preferred)
-        {
-            let settings = self.capture.borrow().video_settings();
-            let _ = self.cmd_tx.try_send(Command::SetCameraDevice {
-                account,
-                access,
-                node_id: camera.node_id,
-                settings,
-            });
-            self.set_status("Turning on camera…");
-            return;
-        }
+        self.show_camera_popup(account, access);
+    }
 
-        let dialog = adw::AlertDialog::new(
-            Some("Choose Camera"),
-            Some(match purpose {
-                CameraPurpose::Camera => "Select a camera for your camera tile.",
-                CameraPurpose::Stream => "Select a camera to use as the Go Live source.",
-            }),
-        );
-        dialog.add_responses(&[("cancel", "Cancel"), ("use", "Use Camera")]);
-        dialog.set_response_appearance("use", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("use"));
-        // Escape and closing the dialog count as cancelling.
-        dialog.set_close_response("cancel");
-
-        let names: Vec<String> = cameras.iter().map(|camera| camera.name.clone()).collect();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let dropdown = gtk::DropDown::from_strings(&name_refs);
-        drop(name_refs);
-        dialog.set_extra_child(Some(&dropdown));
-
-        let app = self.clone();
-        dialog.connect_response(None, move |_, response| {
-            if response == "use" {
-                let Some(camera) = cameras.get(dropdown.selected() as usize) else {
-                    app.reset_camera_ui(purpose);
-                    return;
-                };
-                match purpose {
-                    CameraPurpose::Camera => {
-                        let settings = app.capture.borrow().video_settings();
-                        let _ = app.cmd_tx.try_send(Command::SetCameraDevice {
-                            account,
-                            access: access.clone(),
-                            node_id: camera.node_id,
-                            settings,
-                        });
-                        app.set_status("Turning on camera…");
-                    }
-                    CameraPurpose::Stream => {
-                        let settings = app.capture.borrow().video_settings();
-                        let delay_ms = app.capture.borrow().stream_delay_ms;
-                        let _ = app.cmd_tx.try_send(Command::StartStreamCamera {
-                            account,
-                            access: access.clone(),
-                            node_id: camera.node_id,
-                            settings,
-                            delay_ms,
-                        });
-                        app.set_status("Starting camera stream…");
-                    }
-                }
+    pub(crate) fn reset_camera_ui(self: &Rc<Self>, _purpose: CameraPurpose) {
+        let changed = self.update_voice_flag(|voice| {
+            if voice.camera {
+                voice.camera = false;
+                Some(())
             } else {
-                app.reset_camera_ui(purpose);
+                None
             }
         });
-        dialog.present(Some(&self.window));
-    }
-
-    pub(crate) fn show_share_source_dialog(self: &Rc<Self>, account: AccountId) {
-        let dialog = adw::AlertDialog::new(
-            Some("Go Live"),
-            Some("Share a screen or window through the desktop portal, or stream from a camera."),
-        );
-        dialog.add_responses(&[
-            ("cancel", "Cancel"),
-            ("camera", "Share Camera"),
-            ("screen", "Share Screen"),
-        ]);
-        dialog.set_response_appearance("screen", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("screen"));
-        dialog.set_close_response("cancel");
-
-        let app = self.clone();
-        dialog.connect_response(None, move |_, response| match response {
-            "screen" => {
-                let parent = app.window_identifier.borrow().clone();
-                let settings = app.capture.borrow().video_settings();
-                let delay_ms = app.capture.borrow().stream_delay_ms;
-                let _ = app.cmd_tx.try_send(Command::StartStream {
-                    account,
-                    parent,
-                    settings,
-                    delay_ms,
-                });
-                app.set_status("Starting screen share…");
-            }
-            "camera" => {
-                app.request_cameras(account, CameraPurpose::Stream);
-            }
-            _ => app.reset_stream_ui(),
-        });
-        dialog.present(Some(&self.window));
-    }
-
-    pub(crate) fn reset_camera_ui(self: &Rc<Self>, purpose: CameraPurpose) {
-        if purpose == CameraPurpose::Camera {
-            let changed = self.update_voice_flag(|voice| {
-                if voice.camera {
-                    voice.camera = false;
-                    Some(())
-                } else {
-                    None
-                }
-            });
-            if changed.is_some() {
-                self.render_voice_panel();
-            }
-        } else {
-            self.reset_stream_ui();
+        if changed.is_some() {
+            self.render_voice_panel();
         }
     }
 

@@ -559,6 +559,15 @@ impl VideoSource {
     }
 }
 
+impl VideoSource {
+    /// Takes the screen-cast portal session out of a screen capture, so a
+    /// new capture can reuse the screen or window the user already picked.
+    /// The capture itself stops when this source is dropped.
+    pub fn take_screen_portal(&mut self) -> Option<crate::portal::ScreenCast> {
+        self._portal.take()
+    }
+}
+
 impl Drop for VideoSource {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

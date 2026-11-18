@@ -3,7 +3,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use gtk::glib;
@@ -13,95 +12,19 @@ use libadwaita::prelude::*;
 
 use kc_http::cdn;
 use kc_media::audio::MicTest;
-use kc_media::decode::VideoFeed;
-use kc_media::portal::CameraAccess;
-use kc_media::video::{VideoSettings, VideoSource, is_keyframe};
+use kc_media::portal::{CameraAccess, ShareSources};
 
-use crate::live::LiveVideo;
-use crate::settings::{
-    BITRATES, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS,
-    RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
-};
+use crate::settings::{CapturePreferences, SHARE_SOURCES};
 use crate::shell::AppState;
+use crate::video_setup::{
+    Apply, CameraPick, Preview, quality_controls, spawn_local, start_camera_preview,
+    start_screen_preview, string_dropdown,
+};
 
 /// Longest device name shown in a dropdown before it is shortened.
 const DEVICE_LABEL_CHARS: usize = 40;
 /// Segments in the mic test's level meter.
 const METER_BLOCKS: f64 = 40.0;
-
-/// One of the two video test boxes: a picture with a button over it.
-struct Preview {
-    picture: gtk::Picture,
-    button: gtk::Button,
-    idle_label: &'static str,
-    live: RefCell<Option<LiveVideo>>,
-    source: RefCell<Option<VideoSource>>,
-    /// Bumped by every start and stop, so a capture that finishes starting
-    /// after its test was stopped is thrown away.
-    generation: Cell<u64>,
-}
-
-impl Preview {
-    fn new(idle_label: &'static str) -> (Rc<Self>, gtk::Overlay) {
-        let picture = gtk::Picture::new();
-        picture.set_content_fit(gtk::ContentFit::Contain);
-        picture.set_can_shrink(true);
-        let button = gtk::Button::with_label(idle_label);
-        button.add_css_class("pill");
-        button.set_halign(gtk::Align::Center);
-        button.set_valign(gtk::Align::Center);
-        let frame = gtk::Overlay::new();
-        frame.add_css_class("kc-preview");
-        frame.set_overflow(gtk::Overflow::Hidden);
-        frame.set_size_request(-1, 180);
-        frame.set_child(Some(&picture));
-        frame.add_overlay(&button);
-        let preview = Rc::new(Self {
-            picture,
-            button,
-            idle_label,
-            live: RefCell::new(None),
-            source: RefCell::new(None),
-            generation: Cell::new(0),
-        });
-        (preview, frame)
-    }
-
-    fn running(&self) -> bool {
-        self.live.borrow().is_some()
-    }
-
-    /// Starts showing a new feed; the capture is attached when it is up.
-    fn begin(&self) -> Option<(Arc<VideoFeed>, u64)> {
-        let feed = Arc::new(VideoFeed::default());
-        let live = LiveVideo::start(feed.clone())?;
-        self.picture.set_paintable(Some(&live.paintable));
-        *self.live.borrow_mut() = Some(live);
-        let generation = self.generation.get() + 1;
-        self.generation.set(generation);
-        self.button.set_label("Stop Test");
-        self.button.set_valign(gtk::Align::End);
-        self.button.set_margin_bottom(10);
-        Some((feed, generation))
-    }
-
-    fn attach(&self, generation: u64, source: VideoSource) {
-        // A stale capture is dropped here, which stops it.
-        if self.generation.get() == generation && self.running() {
-            *self.source.borrow_mut() = Some(source);
-        }
-    }
-
-    fn stop(&self) {
-        self.generation.set(self.generation.get() + 1);
-        self.source.borrow_mut().take();
-        self.live.borrow_mut().take();
-        self.picture.set_paintable(None::<&gtk::gdk::Paintable>);
-        self.button.set_label(self.idle_label);
-        self.button.set_valign(gtk::Align::Center);
-        self.button.set_margin_bottom(0);
-    }
-}
 
 /// What the panel keeps running while it is open.
 struct Panel {
@@ -154,9 +77,12 @@ impl AppState {
         dialog.set_title("Settings");
         dialog.set_content_width(960);
         dialog.set_content_height(700);
+        // Required with a breakpoint: the size it may shrink to.
+        dialog.set_width_request(360);
+        dialog.set_height_request(400);
 
-        let (camera, camera_frame) = Preview::new("Test Camera");
-        let (screen, screen_frame) = Preview::new("Test Screenshare");
+        let (camera, camera_frame) = Preview::new("Test Camera", 180);
+        let (screen, screen_frame) = Preview::new("Test Screenshare", 180);
         let panel = Rc::new(Panel {
             mic_test: RefCell::new(None),
             camera,
@@ -589,181 +515,27 @@ impl AppState {
         let section = gtk::Box::new(gtk::Orientation::Vertical, 12);
         section.set_margin_top(8);
         let current = self.capture.borrow().clone();
-
-        let resolution_names: Vec<&str> = RESOLUTIONS.iter().map(|(_, _, name)| *name).collect();
-        let resolution = gtk::DropDown::from_strings(&resolution_names);
-        let framerate_names: Vec<String> =
-            FRAMERATES.iter().map(|fps| format!("{fps} fps")).collect();
-        let framerate = string_dropdown(&framerate_names);
-        let mut bitrate_names = vec!["Automatic".to_owned()];
-        bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
-        let bitrate = string_dropdown(&bitrate_names);
-        let delay = gtk::DropDown::from_strings(&["None", "0.5 s", "1 s", "2 s", "3 s"]);
-        let cpu_encoder = gtk::Switch::new();
-        cpu_encoder.set_valign(gtk::Align::Center);
-
-        let keyframe_names: Vec<String> = KEYFRAME_INTERVALS
-            .iter()
-            .map(|seconds| format!("{seconds} s"))
-            .collect();
-        let keyframe = string_dropdown(&keyframe_names);
-        keyframe.set_tooltip_text(Some(
-            "How often a full frame is sent unprompted. Viewers that lose the picture request one themselves, so longer intervals give a steadier stream; shorter ones recover sooner if a request is missed.",
-        ));
-        let retransmit_names: Vec<String> = RETRANSMIT_WINDOWS_MS
-            .iter()
-            .map(|ms| {
-                if *ms == 0 {
-                    "Off".to_owned()
-                } else {
-                    format!("{} s", ms / 1000)
-                }
-            })
-            .collect();
-        let retransmit = string_dropdown(&retransmit_names);
-        retransmit.set_tooltip_text(Some(
-            "How much recently sent audio and video is kept so it can be resent after a network dropout. Longer windows repair longer dropouts; Off never resends.",
-        ));
-        let drop_names: Vec<String> = DROP_AFTER_MS
-            .iter()
-            .map(|ms| {
-                if *ms == 0 {
-                    "Never".to_owned()
-                } else {
-                    format!("{ms} ms")
-                }
-            })
-            .collect();
-        let drop_late = string_dropdown(&drop_names);
-        let leaky = gtk::Switch::new();
-        leaky.set_valign(gtk::Align::Center);
-        leaky.set_tooltip_text(Some(
-            "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
-        ));
-
-        // Shows `prefs` in every widget; the handlers below then agree.
-        let show = {
-            let resolution = resolution.clone();
-            let framerate = framerate.clone();
-            let bitrate = bitrate.clone();
-            let delay = delay.clone();
-            let cpu_encoder = cpu_encoder.clone();
-            let keyframe = keyframe.clone();
-            let retransmit = retransmit.clone();
-            let drop_late = drop_late.clone();
-            let leaky = leaky.clone();
-            move |prefs: &CapturePreferences| {
-                resolution.set_selected(
-                    RESOLUTIONS
-                        .iter()
-                        .position(|(width, height, _)| {
-                            *width == prefs.width && *height == prefs.height
-                        })
-                        .unwrap_or(1) as u32,
-                );
-                framerate.set_selected(position(&FRAMERATES, &prefs.fps, 1));
-                bitrate.set_selected(
-                    prefs
-                        .bitrate_kbps
-                        .and_then(|kbps| BITRATES.iter().position(|value| *value == kbps))
-                        .map(|index| index + 1)
-                        .unwrap_or(0) as u32,
-                );
-                delay.set_selected(position(&STREAM_DELAYS, &prefs.stream_delay_ms, 0));
-                cpu_encoder.set_active(prefs.cpu_encoder);
-                keyframe.set_selected(position(&KEYFRAME_INTERVALS, &prefs.keyframe_secs, 0));
-                retransmit.set_selected(position(&RETRANSMIT_WINDOWS_MS, &prefs.retransmit_ms, 2));
-                drop_late.set_selected(position(&DROP_AFTER_MS, &prefs.drop_frames_after_ms, 2));
-                leaky.set_active(prefs.leaky_queue);
-            }
-        };
-        show(&current);
-
         let app = self.clone();
-        resolution.connect_selected_notify(move |dropdown| {
-            if let Some((width, height, _)) = RESOLUTIONS.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| {
-                    prefs.width = *width;
-                    prefs.height = *height;
-                });
-            }
-        });
-        let app = self.clone();
-        framerate.connect_selected_notify(move |dropdown| {
-            if let Some(fps) = FRAMERATES.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| prefs.fps = *fps);
-            }
-        });
-        let app = self.clone();
-        bitrate.connect_selected_notify(move |dropdown| {
-            let kbps = match dropdown.selected() as usize {
-                0 => None,
-                index => BITRATES.get(index - 1).copied(),
-            };
-            app.update_prefs(|prefs| prefs.bitrate_kbps = kbps);
-        });
-        let app = self.clone();
-        delay.connect_selected_notify(move |dropdown| {
-            if let Some(delay) = STREAM_DELAYS.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| prefs.stream_delay_ms = *delay);
-            }
-        });
-        let app = self.clone();
-        cpu_encoder.connect_active_notify(move |switch| {
-            let active = switch.is_active();
-            app.update_prefs(|prefs| prefs.cpu_encoder = active);
-        });
-        let app = self.clone();
-        keyframe.connect_selected_notify(move |dropdown| {
-            if let Some(seconds) = KEYFRAME_INTERVALS.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| prefs.keyframe_secs = *seconds);
-            }
-        });
-        let app = self.clone();
-        retransmit.connect_selected_notify(move |dropdown| {
-            if let Some(ms) = RETRANSMIT_WINDOWS_MS.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| prefs.retransmit_ms = *ms);
-            }
-        });
-        let app = self.clone();
-        drop_late.connect_selected_notify(move |dropdown| {
-            if let Some(ms) = DROP_AFTER_MS.get(dropdown.selected() as usize) {
-                app.update_prefs(|prefs| prefs.drop_frames_after_ms = *ms);
-            }
-        });
-        let app = self.clone();
-        leaky.connect_active_notify(move |switch| {
-            let active = switch.is_active();
-            app.update_prefs(|prefs| prefs.leaky_queue = active);
-        });
+        let apply: Apply = Rc::new(move |change| app.update_prefs(|prefs| change(prefs)));
+        let controls = quality_controls(&current, true, apply);
 
         let quality = adw::PreferencesGroup::new();
         quality.set_title("Stream Quality");
         quality.set_description(Some(
             "Used for your camera and Go Live. Automatic bitrate follows resolution and framerate. Changes apply the next time you start a camera or stream.",
         ));
-        quality.add(&setting_row("Resolution", &resolution));
-        quality.add(&setting_row("Framerate", &framerate));
-        quality.add(&setting_row("Bitrate", &bitrate));
-        quality.add(&setting_row("Go Live Delay", &delay));
-        let encoder_row = setting_row("Use Software Encoder (x264)", &cpu_encoder);
-        encoder_row.set_subtitle("Hardware encoding is used when available otherwise");
-        encoder_row.set_activatable_widget(Some(&cpu_encoder));
-        quality.add(&encoder_row);
+        for row in &controls.rows {
+            quality.add(row);
+        }
         section.append(&quality);
 
         let advanced = adw::PreferencesGroup::new();
         let expander = adw::ExpanderRow::new();
         expander.set_title("Advanced");
         expander.set_subtitle("Keyframes, dropout recovery and frame dropping");
-        expander.add_row(&setting_row("Keyframe Interval", &keyframe));
-        expander.add_row(&setting_row("Dropout Recovery Window", &retransmit));
-        let drop_row = setting_row("Drop Late Frames After", &drop_late);
-        drop_row.set_subtitle("Applies beyond the Go Live delay");
-        expander.add_row(&drop_row);
-        let leaky_row = setting_row("Drop Old Frames in the Capture Queue", &leaky);
-        leaky_row.set_activatable_widget(Some(&leaky));
-        expander.add_row(&leaky_row);
+        for row in &controls.advanced {
+            expander.add_row(row);
+        }
         advanced.add(&expander);
         section.append(&advanced);
 
@@ -774,6 +546,7 @@ impl AppState {
             "Puts resolution, framerate, bitrate, delay, encoder and the advanced settings back to their defaults.",
         ));
         let app = self.clone();
+        let show = controls.show;
         reset.connect_clicked(move |_| {
             app.update_prefs(CapturePreferences::reset_video);
             // Clone first: the widgets' handlers borrow the preferences.
@@ -820,22 +593,6 @@ impl AppState {
             },
         );
     }
-}
-
-/// Runs `future` on the Tokio runtime, then `done` with its result on the GTK
-/// thread. Unlike `AppState::spawn`, `done` may hold GTK objects.
-fn spawn_local<T: Send + 'static>(
-    app: &Rc<AppState>,
-    future: impl std::future::Future<Output = T> + Send + 'static,
-    done: impl FnOnce(&Rc<AppState>, T) + 'static,
-) {
-    let handle = app.runtime.spawn(future);
-    let app = app.clone();
-    glib::spawn_future_local(async move {
-        if let Ok(result) = handle.await {
-            done(&app, result);
-        }
-    });
 }
 
 fn start_mic_test(
@@ -896,96 +653,22 @@ fn restart_mic_test(app: &Rc<AppState>, panel: &Rc<Panel>, button: &gtk::Button)
     }
 }
 
-/// Encodes each captured frame and decodes it into the preview, so the test
-/// shows exactly what others would see with the current settings.
-fn preview_sink(
-    feed: Arc<VideoFeed>,
-) -> impl FnMut(kc_media::video::EncodedFrame) + Send + 'static {
-    move |frame| {
-        let keyframe = is_keyframe(&frame.data);
-        feed.push(frame.data, keyframe);
-    }
-}
-
 fn start_camera_test(app: &Rc<AppState>, panel: &Rc<Panel>) {
-    let preview = panel.camera.clone();
-    let Some((feed, generation)) = preview.begin() else {
-        app.set_status("Video preview is unavailable");
-        return;
-    };
     let access = panel.cameras.borrow().clone();
     let wanted = app.capture.borrow().camera.clone();
     let settings = app.capture.borrow().video_settings();
-    spawn_local(
+    start_camera_preview(
         app,
-        camera_test_source(access, wanted, settings, feed),
-        move |app, result| match result {
-            Ok(source) => preview.attach(generation, source),
-            Err(error) => {
-                if preview.generation.get() == generation {
-                    preview.stop();
-                }
-                app.set_status(&format!("Camera test: {error}"));
-            }
-        },
+        &panel.camera,
+        access,
+        CameraPick::Named(wanted),
+        settings,
     );
-}
-
-async fn camera_test_source(
-    access: Option<CameraAccess>,
-    wanted: String,
-    settings: VideoSettings,
-    feed: Arc<VideoFeed>,
-) -> Result<VideoSource, String> {
-    let access = match access {
-        Some(access) => access,
-        None => kc_media::portal::request_cameras()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "no camera available".to_owned())?,
-    };
-    let camera = access
-        .cameras
-        .iter()
-        .find(|camera| camera.name == wanted)
-        .and_then(|camera| access.select(camera.node_id))
-        .or_else(|| access.preferred())
-        .ok_or_else(|| "no camera available".to_owned())?;
-    VideoSource::camera_portal(camera, settings, preview_sink(feed))
-        .map_err(|error| error.to_string())
 }
 
 fn start_screen_test(app: &Rc<AppState>, panel: &Rc<Panel>) {
-    let preview = panel.screen.clone();
-    let Some((feed, generation)) = preview.begin() else {
-        app.set_status("Video preview is unavailable");
-        return;
-    };
-    let parent = app.window_identifier.borrow().clone();
     let settings = app.capture.borrow().video_settings();
-    spawn_local(
-        app,
-        async move {
-            let portal = tokio::time::timeout(
-                Duration::from_secs(120),
-                kc_media::portal::request(parent.as_deref()),
-            )
-            .await
-            .map_err(|_| "the screen picker timed out".to_owned())?
-            .map_err(|error| error.to_string())?;
-            VideoSource::screen(portal, settings, preview_sink(feed))
-                .map_err(|error| error.to_string())
-        },
-        move |app, result| match result {
-            Ok(source) => preview.attach(generation, source),
-            Err(error) => {
-                if preview.generation.get() == generation {
-                    preview.stop();
-                }
-                app.set_status(&format!("Screenshare test: {error}"));
-            }
-        },
-    );
+    start_screen_preview(app, &panel.screen, ShareSources::current(), None, settings);
 }
 
 // -- widgets -----------------------------------------------------------------
@@ -1021,25 +704,6 @@ fn field_label(text: &str) -> gtk::Label {
     label.set_xalign(0.0);
     label.add_css_class("heading");
     label
-}
-
-fn setting_row(title: &str, widget: &impl IsA<gtk::Widget>) -> adw::ActionRow {
-    let row = adw::ActionRow::builder().title(title).build();
-    widget.set_valign(gtk::Align::Center);
-    row.add_suffix(widget);
-    row
-}
-
-fn string_dropdown(names: &[String]) -> gtk::DropDown {
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    gtk::DropDown::from_strings(&refs)
-}
-
-fn position<T: PartialEq>(values: &[T], value: &T, fallback: usize) -> u32 {
-    values
-        .iter()
-        .position(|candidate| candidate == value)
-        .unwrap_or(fallback) as u32
 }
 
 /// "Default" and the devices, with the node names in the same order.

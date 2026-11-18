@@ -39,17 +39,44 @@ pub fn set_share_sources(sources: ShareSources) {
     SHARE_SOURCES.store(sources as u8, Ordering::Relaxed);
 }
 
-fn source_types() -> SourceType {
-    match SHARE_SOURCES.load(Ordering::Relaxed) {
-        1 => SourceType::MONITOR,
-        2 => SourceType::WINDOW,
-        _ => SourceType::MONITOR | SourceType::WINDOW,
+impl ShareSources {
+    /// The saved choice, as set by [`set_share_sources`].
+    pub fn current() -> Self {
+        match SHARE_SOURCES.load(Ordering::Relaxed) {
+            1 => Self::Screen,
+            2 => Self::Window,
+            _ => Self::ScreenOrWindow,
+        }
+    }
+
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::Screen,
+            2 => Self::Window,
+            _ => Self::ScreenOrWindow,
+        }
+    }
+
+    fn source_types(self) -> SourceType {
+        match self {
+            Self::Screen => SourceType::MONITOR,
+            Self::Window => SourceType::WINDOW,
+            Self::ScreenOrWindow => SourceType::MONITOR | SourceType::WINDOW,
+        }
     }
 }
 
 /// Shows the portal picker and returns a stream for the selected monitor or
 /// window. This must be called from a Tokio runtime with a running portal.
 pub async fn request(parent: Option<&ashpd::WindowIdentifier>) -> Result<ScreenCast> {
+    request_sources(parent, ShareSources::current()).await
+}
+
+/// Like [`request`], offering only `sources` in the picker.
+pub async fn request_sources(
+    parent: Option<&ashpd::WindowIdentifier>,
+    sources: ShareSources,
+) -> Result<ScreenCast> {
     let proxy = Screencast::new()
         .await
         .map_err(|error| Error::Message(format!("screencast portal: {error}")))?;
@@ -58,7 +85,7 @@ pub async fn request(parent: Option<&ashpd::WindowIdentifier>) -> Result<ScreenC
         .await
         .map_err(|error| Error::Message(format!("screencast session: {error}")))?;
     let options = SelectSourcesOptions::default()
-        .set_sources(source_types())
+        .set_sources(sources.source_types())
         .set_multiple(false)
         .set_cursor_mode(CursorMode::EMBEDDED);
     proxy

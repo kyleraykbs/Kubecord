@@ -355,3 +355,12 @@ dispatch; contains account data).
 - Audio devices are listed via `pulsedeviceprovider`; a general `DeviceMonitor` also probes cameras and floods the log with GstFractionRange criticals.
 - The channel sidebar is a `gtk::Paned` (default 340px, 220–480, persisted as `sidebar_width`). The settings gear sits in the user bar beside Deafen.
 - Dev aid: `KYLECORD_SETTINGS=account|voice` opens the panel 4 s after launch (pair with `KYLECORD_SCREENSHOT`).
+
+## Camera and Go Live popouts (2026-11-18)
+
+- The camera and screen buttons always open a popout (`kc-ui/src/video_setup.rs`) before anything is sent: "Ready to video chat?" and "Share Your Screen". Both offer an optional preview, the source, and one-time quality and Advanced settings (a copy of the prefs; Settings holds the permanent values). The share popout adds source type (screen/window/camera), Go Live delay, and a system-audio switch (`StartStream { audio }`).
+- A previewed screen goes live without a second picker: `Preview::take_screen_portal` pulls the `ScreenCast` out of the preview's `VideoSource`, and `Command::StartStream { portal }` hands it to the session, which reconnects to the same PipeWire node. A quality change restarts the preview the same way.
+- `quality_controls(initial, stream, apply)` builds the quality rows for both Settings (`apply` = `update_prefs`) and the popouts (`apply` = their local copy).
+- Clicking outside the visible `adw::Dialog` closes it (capture-phase `GestureClick` on the window in `connect_signals`).
+- A wrapping label in a horizontal box needs `max_width_chars(1)` + hexpand, otherwise its height is measured at full width and GTK logs "Allocation height too small".
+- Dev aid: `KYLECORD_POPUP=camera|share|profile` opens that popout 4 s after launch.

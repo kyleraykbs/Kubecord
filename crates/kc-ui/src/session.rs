@@ -18,7 +18,7 @@ use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
 use kc_media::decode::VideoFeed;
 use kc_media::delay::DelayedSender;
-use kc_media::portal::CameraAccess;
+use kc_media::portal::{CameraAccess, ScreenCast, ShareSources};
 use kc_media::video::{VideoSettings, VideoSource, is_keyframe};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
@@ -167,7 +167,6 @@ impl Session {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CameraPurpose {
     Camera,
-    Stream,
 }
 
 /// Voice work for one account, processed by its account loop.
@@ -195,12 +194,19 @@ pub enum VoiceCommand {
         parent: Option<Arc<ashpd::WindowIdentifier>>,
         settings: VideoSettings,
         delay_ms: u64,
+        /// What the screen picker offers.
+        sources: ShareSources,
+        /// A screen or window the user already picked (and previewed).
+        portal: Option<ScreenCast>,
+        /// Also share system audio.
+        audio: bool,
     },
     StartStreamCamera {
         access: CameraAccess,
         node_id: u32,
         settings: VideoSettings,
         delay_ms: u64,
+        audio: bool,
     },
     StopStream,
     /// Tune into the stream of someone in the current voice channel.
@@ -292,6 +298,9 @@ pub enum Command {
         parent: Option<Arc<ashpd::WindowIdentifier>>,
         settings: VideoSettings,
         delay_ms: u64,
+        sources: ShareSources,
+        portal: Option<ScreenCast>,
+        audio: bool,
     },
     StartStreamCamera {
         account: AccountId,
@@ -299,6 +308,7 @@ pub enum Command {
         node_id: u32,
         settings: VideoSettings,
         delay_ms: u64,
+        audio: bool,
     },
     StopStream {
         account: AccountId,
@@ -532,6 +542,9 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             parent,
             settings,
             delay_ms,
+            sources,
+            portal,
+            audio,
         } => {
             forward_voice(
                 account,
@@ -539,6 +552,9 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                     parent,
                     settings,
                     delay_ms,
+                    sources,
+                    portal,
+                    audio,
                 },
                 ui,
             )
@@ -567,6 +583,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             node_id,
             settings,
             delay_ms,
+            audio,
         } => {
             forward_voice(
                 account,
@@ -575,6 +592,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                     node_id,
                     settings,
                     delay_ms,
+                    audio,
                 },
                 ui,
             )
@@ -698,6 +716,9 @@ fn spawn_account(
             stream_parent: None,
             stream_settings: VideoSettings::default(),
             stream_delay_ms: 0,
+            stream_sources: ShareSources::ScreenOrWindow,
+            stream_portal: None,
+            stream_audio: true,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -884,10 +905,11 @@ fn spawn_account(
                             match result {
                                 Ok(source) => {
                                     let delay_ms = voice.stream_delay_ms;
+                                    let share_audio = voice.stream_audio;
                                     if let Some(connection) = &mut voice.stream_connection {
                                         tracing::info!("stream source ready");
                                         connection.source = Some(source);
-                                        if connection.audio.is_none() {
+                                        if connection.audio.is_none() && share_audio {
                                             match ScreenAudio::start(
                                                 connection.handle.clone(),
                                                 128_000,
@@ -962,6 +984,9 @@ struct VoiceRuntime {
     stream_parent: Option<Arc<ashpd::WindowIdentifier>>,
     stream_settings: VideoSettings,
     stream_delay_ms: u64,
+    stream_sources: ShareSources,
+    stream_portal: Option<ScreenCast>,
+    stream_audio: bool,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -1426,6 +1451,8 @@ async fn maybe_start_stream(
             let source_ui = ui.clone();
             let camera_source = voice.stream_camera.clone();
             let screen_parent = voice.stream_parent.clone();
+            let screen_sources = voice.stream_sources;
+            let prepared_portal = voice.stream_portal.take();
             let video_settings = voice.stream_settings.clone();
             handle
                 .set_retransmit_window(Duration::from_millis(video_settings.retransmit_ms as u64));
@@ -1469,11 +1496,21 @@ async fn maybe_start_stream(
                             .map_err(|error| error.to_string())
                         })
                 } else {
-                    let request = tokio::time::timeout(
-                        std::time::Duration::from_secs(120),
-                        kc_media::portal::request(screen_parent.as_deref()),
-                    )
-                    .await;
+                    // A screen picked (and previewed) in the share popup is
+                    // used as is; otherwise the picker opens now.
+                    let request = match prepared_portal {
+                        Some(portal) => Ok(Ok(portal)),
+                        None => {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                kc_media::portal::request_sources(
+                                    screen_parent.as_deref(),
+                                    screen_sources,
+                                ),
+                            )
+                            .await
+                        }
+                    };
                     match request {
                         Ok(Ok(portal)) => {
                             let first_frame = Arc::new(AtomicBool::new(false));
@@ -1946,6 +1983,9 @@ async fn apply_voice_command(
             parent,
             settings,
             delay_ms,
+            sources,
+            portal,
+            audio,
         } => {
             let target = voice
                 .connection
@@ -1968,6 +2008,9 @@ async fn apply_voice_command(
             voice.stream_parent = parent;
             voice.stream_settings = settings;
             voice.stream_delay_ms = delay_ms;
+            voice.stream_sources = sources;
+            voice.stream_portal = portal;
+            voice.stream_audio = audio;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1986,6 +2029,7 @@ async fn apply_voice_command(
             node_id,
             settings,
             delay_ms,
+            audio,
         } => {
             let target = voice
                 .connection
@@ -2008,6 +2052,8 @@ async fn apply_voice_command(
             voice.stream_parent = None;
             voice.stream_settings = settings;
             voice.stream_delay_ms = delay_ms;
+            voice.stream_portal = None;
+            voice.stream_audio = audio;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -2242,6 +2288,7 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
     voice.streaming = false;
     voice.stream_camera = None;
     voice.stream_parent = None;
+    voice.stream_portal = None;
     if let Some(connection) = voice.stream_connection.take() {
         drop(connection.source);
         drop(connection.audio);
@@ -2330,6 +2377,9 @@ mod tests {
             stream_parent: None,
             stream_settings: VideoSettings::default(),
             stream_delay_ms: 0,
+            stream_sources: ShareSources::ScreenOrWindow,
+            stream_portal: None,
+            stream_audio: true,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,

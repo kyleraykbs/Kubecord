@@ -60,6 +60,8 @@ pub struct CapturePreferences {
     pub share_source: u32,
     /// Width of the channel sidebar in pixels.
     pub sidebar_width: i32,
+    /// Start the camera preview as soon as the camera popup opens.
+    pub always_preview: bool,
 }
 
 /// Default and limits of the resizable channel sidebar.
@@ -89,6 +91,7 @@ impl Default for CapturePreferences {
             camera: String::new(),
             share_source: 0,
             sidebar_width: SIDEBAR_WIDTH,
+            always_preview: false,
         }
     }
 }

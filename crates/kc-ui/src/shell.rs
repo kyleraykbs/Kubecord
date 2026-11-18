@@ -325,6 +325,11 @@ impl AppState {
         user_name_label.set_wrap_mode(gtk::pango::WrapMode::Word);
         user_name_label.set_lines(2);
         user_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        // A small natural width lets the box hand the name the leftover
+        // space; measured at its full width, the wrapped height came out
+        // short of what the narrower allocation needed.
+        user_name_label.set_max_width_chars(1);
+        user_name_label.set_hexpand(true);
         user_name_label.add_css_class("heading");
 
         let user_status_label = gtk::Label::new(Some("Offline"));

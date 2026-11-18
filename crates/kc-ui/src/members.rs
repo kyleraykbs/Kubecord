@@ -462,23 +462,28 @@ impl AppState {
         // A floating profile card, like Discord's user popout.
         let popover = adw::Dialog::new();
         popover.set_title("Profile");
-        popover.set_content_width(360);
+        popover.set_content_width(460);
+        // A fixed height: the scroller underestimates wrapped text (the bio)
+        // and would hide the buttons at the end. Taller profiles scroll.
+        popover.set_content_height(620);
         popover.add_css_class("kc-profile");
         let _ = anchor;
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        content.set_width_request(280);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
         content.set_margin_top(4);
-        content.set_margin_bottom(8);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
+        content.set_margin_bottom(20);
+        content.set_margin_start(20);
+        content.set_margin_end(20);
 
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let picture = self.images.avatar(64, &name, Some(&avatar));
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let picture = self.images.avatar(96, &name, Some(&avatar));
         top.append(&avatar_with_status(&picture, &status));
         let names = gtk::Box::new(gtk::Orientation::Vertical, 0);
         names.set_valign(gtk::Align::Center);
-        let title = label(&name, &["title-3"]);
+        let title = label(&name, &["title-2"]);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        title.set_wrap(true);
+        title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         title.set_selectable(true);
         names.append(&title);
         let handle = label(&username, &["dim-label"]);
@@ -503,7 +508,7 @@ impl AppState {
         about.set_xalign(0.0);
         about.set_wrap(true);
         about.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        about.set_max_width_chars(36);
+        about.set_max_width_chars(48);
         about.set_selectable(true);
         about.set_visible(false);
         content.append(&about);
@@ -576,6 +581,8 @@ impl AppState {
             let message = gtk::Button::with_label("Message");
             message.add_css_class("suggested-action");
             message.set_hexpand(true);
+            // Start focus here: on a selectable label it selects the text.
+            popover.set_focus(Some(&message));
             let app = self.clone();
             let parent = popover.clone();
             message.connect_clicked(move |_| {
@@ -620,6 +627,7 @@ impl AppState {
             let edit = gtk::Button::with_label("Edit Profile");
             edit.add_css_class("suggested-action");
             edit.set_margin_top(4);
+            popover.set_focus(Some(&edit));
             let app = self.clone();
             let parent = popover.clone();
             edit.connect_clicked(move |_| {
@@ -629,12 +637,18 @@ impl AppState {
             content.append(&edit);
         }
 
+        // The header holds the close button; the scroller keeps long
+        // profiles inside the window, with room for short ones.
         let scroller = gtk::ScrolledWindow::new();
         scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroller.set_propagate_natural_height(true);
-        scroller.set_max_content_height(640);
+        scroller.set_vexpand(true);
         scroller.set_child(Some(&content));
-        popover.set_child(Some(&scroller));
+        let header = adw::HeaderBar::new();
+        header.set_show_title(false);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&scroller));
+        popover.set_child(Some(&view));
         popover.present(Some(&self.window));
 
         let about = glib::SendWeakRef::from(about.downgrade());
