@@ -13,8 +13,10 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use kc_media::decode::VideoFeed;
-use kc_media::portal::{CameraAccess, ScreenCast, ShareSources};
-use kc_media::video::{EncodedFrame, VideoSettings, VideoSource, is_keyframe};
+use kc_media::portal::{CameraAccess, ShareSources};
+use kc_media::video::{
+    EncodedFrame, FrameTap, PreparedCapture, VideoSettings, VideoSource, is_keyframe,
+};
 
 use crate::live::LiveVideo;
 use crate::session::{AccountId, CameraPurpose, Command};
@@ -40,6 +42,9 @@ pub(crate) struct Preview {
     idle_label: Cell<&'static str>,
     live: RefCell<Option<LiveVideo>>,
     source: RefCell<Option<VideoSource>>,
+    /// Where a screen preview's frames go, so going live can take the
+    /// running capture over instead of reconnecting to the screen.
+    tap: RefCell<Option<FrameTap>>,
     /// Bumped by every start and stop, so a capture that finishes starting
     /// after its preview was stopped is thrown away.
     generation: Cell<u64>,
@@ -66,6 +71,7 @@ impl Preview {
             idle_label: Cell::new(idle_label),
             live: RefCell::new(None),
             source: RefCell::new(None),
+            tap: RefCell::new(None),
             generation: Cell::new(0),
         });
         (preview, frame)
@@ -97,12 +103,19 @@ impl Preview {
         Some((feed, generation))
     }
 
-    fn finish(&self, app: &Rc<AppState>, generation: u64, result: Result<VideoSource, String>) {
+    fn finish(
+        &self,
+        app: &Rc<AppState>,
+        generation: u64,
+        result: Result<VideoSource, String>,
+        tap: Option<FrameTap>,
+    ) {
         match result {
             // A stale capture is dropped here, which stops it.
             Ok(source) => {
                 if self.generation.get() == generation && self.running() {
                     *self.source.borrow_mut() = Some(source);
+                    *self.tap.borrow_mut() = tap;
                 }
             }
             Err(error) => {
@@ -114,16 +127,19 @@ impl Preview {
         }
     }
 
-    /// Keeps the screen or window being previewed for the next capture.
-    pub(crate) fn take_screen_portal(&self) -> Option<ScreenCast> {
-        self.source
-            .borrow_mut()
-            .as_mut()
-            .and_then(VideoSource::take_screen_portal)
+    /// Takes a running screen preview's capture, still running, to go live
+    /// with. Its frames are dropped until the stream points the tap at
+    /// itself.
+    pub(crate) fn take_capture(&self) -> Option<PreparedCapture> {
+        let tap = self.tap.borrow_mut().take()?;
+        let source = self.source.borrow_mut().take()?;
+        tap.clear();
+        Some(PreparedCapture { source, tap })
     }
 
     pub(crate) fn stop(&self) {
         self.generation.set(self.generation.get() + 1);
+        self.tap.borrow_mut().take();
         self.source.borrow_mut().take();
         self.live.borrow_mut().take();
         self.picture.set_paintable(None::<&gtk::gdk::Paintable>);
@@ -175,17 +191,16 @@ pub(crate) fn start_camera_preview(
             VideoSource::camera_portal(camera, settings, preview_sink(feed))
                 .map_err(|error| error.to_string())
         },
-        move |app, result| preview.finish(app, generation, result),
+        move |app, result| preview.finish(app, generation, result, None),
     );
 }
 
-/// Previews a screen or window: `portal` when one was already picked,
-/// otherwise the picker opens.
+/// Opens the screen picker and previews the choice. The frames go through a
+/// tap, so the capture can become the stream later.
 pub(crate) fn start_screen_preview(
     app: &Rc<AppState>,
     preview: &Rc<Preview>,
     sources: ShareSources,
-    portal: Option<ScreenCast>,
     settings: VideoSettings,
 ) {
     let Some((feed, generation)) = preview.begin() else {
@@ -194,23 +209,23 @@ pub(crate) fn start_screen_preview(
     };
     let parent = app.window_identifier.borrow().clone();
     let preview = preview.clone();
+    let tap = FrameTap::default();
+    tap.set(preview_sink(feed));
+    let capture_tap = tap.clone();
     spawn_local(
         app,
         async move {
-            let portal = match portal {
-                Some(portal) => portal,
-                None => tokio::time::timeout(
-                    Duration::from_secs(120),
-                    kc_media::portal::request_sources(parent.as_deref(), sources),
-                )
-                .await
-                .map_err(|_| "the screen picker timed out".to_owned())?
-                .map_err(|error| error.to_string())?,
-            };
-            VideoSource::screen(portal, settings, preview_sink(feed))
+            let portal = tokio::time::timeout(
+                Duration::from_secs(120),
+                kc_media::portal::request_sources(parent.as_deref(), sources),
+            )
+            .await
+            .map_err(|_| "the screen picker timed out".to_owned())?
+            .map_err(|error| error.to_string())?;
+            VideoSource::screen(portal, settings, capture_tap.sink())
                 .map_err(|error| error.to_string())
         },
-        move |app, result| preview.finish(app, generation, result),
+        move |app, result| preview.finish(app, generation, result, Some(tap)),
     );
 }
 
@@ -738,8 +753,7 @@ impl AppState {
             }
         };
 
-        // Starts (or restarts) the preview. A screen being previewed is kept
-        // so a restart does not open the picker again.
+        // Starts the preview: the camera, or the screen picker.
         let start: Rc<dyn Fn()> = {
             let app = self.clone();
             let preview = preview.clone();
@@ -760,23 +774,30 @@ impl AppState {
                         settings,
                     );
                 } else {
-                    let portal = preview.take_screen_portal();
                     start_screen_preview(
                         &app,
                         &preview,
                         ShareSources::from_index(source.selected()),
-                        portal,
                         settings,
                     );
                 }
             })
         };
+        // A quality change restarts a camera preview. A screen preview stops
+        // instead: its capture cannot be reopened without the picker, and it
+        // must not go live with the old settings.
         let restart = {
             let preview = preview.clone();
             let start = start.clone();
+            let source = source.clone();
             move || {
-                if preview.running() {
+                if !preview.running() {
+                    return;
+                }
+                if source.selected() == CAMERA_SOURCE {
                     start();
+                } else {
+                    preview.stop();
                 }
             }
         };
@@ -891,8 +912,9 @@ impl AppState {
                 });
                 app.set_status("Starting camera stream…");
             } else {
-                // Go live with the screen being previewed, if there is one.
-                let portal = target.take_screen_portal();
+                // Go live with the capture being previewed, if there is one;
+                // otherwise the session opens the picker.
+                let capture = target.take_capture();
                 target.stop();
                 let parent = app.window_identifier.borrow().clone();
                 let _ = app.cmd_tx.try_send(Command::StartStream {
@@ -901,7 +923,7 @@ impl AppState {
                     settings,
                     delay_ms,
                     sources: ShareSources::from_index(source.selected()),
-                    portal,
+                    capture,
                     audio,
                 });
                 app.set_status("Starting screen share…");

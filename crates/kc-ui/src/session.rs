@@ -18,8 +18,8 @@ use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
 use kc_media::decode::VideoFeed;
 use kc_media::delay::DelayedSender;
-use kc_media::portal::{CameraAccess, ScreenCast, ShareSources};
-use kc_media::video::{VideoSettings, VideoSource, is_keyframe};
+use kc_media::portal::{CameraAccess, ShareSources};
+use kc_media::video::{EncodedFrame, PreparedCapture, VideoSettings, VideoSource, is_keyframe};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
 use tokio::sync::broadcast::error::RecvError;
@@ -196,8 +196,8 @@ pub enum VoiceCommand {
         delay_ms: u64,
         /// What the screen picker offers.
         sources: ShareSources,
-        /// A screen or window the user already picked (and previewed).
-        portal: Option<ScreenCast>,
+        /// The capture the user previewed, to carry on as the stream.
+        capture: Option<PreparedCapture>,
         /// Also share system audio.
         audio: bool,
     },
@@ -299,7 +299,7 @@ pub enum Command {
         settings: VideoSettings,
         delay_ms: u64,
         sources: ShareSources,
-        portal: Option<ScreenCast>,
+        capture: Option<PreparedCapture>,
         audio: bool,
     },
     StartStreamCamera {
@@ -543,7 +543,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             settings,
             delay_ms,
             sources,
-            portal,
+            capture,
             audio,
         } => {
             forward_voice(
@@ -553,7 +553,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                     settings,
                     delay_ms,
                     sources,
-                    portal,
+                    capture,
                     audio,
                 },
                 ui,
@@ -717,7 +717,7 @@ fn spawn_account(
             stream_settings: VideoSettings::default(),
             stream_delay_ms: 0,
             stream_sources: ShareSources::ScreenOrWindow,
-            stream_portal: None,
+            stream_capture: None,
             stream_audio: true,
             stream_pending: false,
             streaming: false,
@@ -985,7 +985,7 @@ struct VoiceRuntime {
     stream_settings: VideoSettings,
     stream_delay_ms: u64,
     stream_sources: ShareSources,
-    stream_portal: Option<ScreenCast>,
+    stream_capture: Option<PreparedCapture>,
     stream_audio: bool,
     stream_pending: bool,
     streaming: bool,
@@ -1452,7 +1452,7 @@ async fn maybe_start_stream(
             let camera_source = voice.stream_camera.clone();
             let screen_parent = voice.stream_parent.clone();
             let screen_sources = voice.stream_sources;
-            let prepared_portal = voice.stream_portal.take();
+            let prepared_capture = voice.stream_capture.take();
             let video_settings = voice.stream_settings.clone();
             handle
                 .set_retransmit_window(Duration::from_millis(video_settings.retransmit_ms as u64));
@@ -1496,76 +1496,82 @@ async fn maybe_start_stream(
                             .map_err(|error| error.to_string())
                         })
                 } else {
-                    // A screen picked (and previewed) in the share popup is
-                    // used as is; otherwise the picker opens now.
-                    let request = match prepared_portal {
-                        Some(portal) => Ok(Ok(portal)),
+                    let first_frame = Arc::new(AtomicBool::new(false));
+                    let frame_count = Arc::new(AtomicUsize::new(0));
+                    let watchdog_frames = frame_count.clone();
+                    let on_frame = {
+                        let video_delay = video_delay.clone();
+                        let last_frame = last_frame.clone();
+                        move |frame: EncodedFrame| {
+                            if let Ok(mut last) = last_frame.lock() {
+                                let gap = last.elapsed();
+                                if gap > Duration::from_millis(500) {
+                                    tracing::warn!(
+                                        gap_ms = gap.as_millis(),
+                                        "encoded screen frame gap"
+                                    );
+                                }
+                                *last = Instant::now();
+                            }
+                            frame_count.fetch_add(1, Ordering::Relaxed);
+                            if !first_frame.swap(true, Ordering::Relaxed) {
+                                tracing::info!(
+                                    bytes = frame.data.len(),
+                                    "stream first encoded video frame"
+                                );
+                            }
+                            video_delay.send(frame.data, frame.duration_ms);
+                        }
+                    };
+                    let result = match prepared_capture {
+                        // The capture previewed in the share popup carries on
+                        // as the stream: same screen, no second picker. A
+                        // keyframe lets viewers start at once.
+                        Some(prepared) => {
+                            tracing::info!("going live with the previewed capture");
+                            prepared.tap.set(on_frame);
+                            prepared.source.force_keyframe();
+                            Ok(prepared.source)
+                        }
                         None => {
-                            tokio::time::timeout(
+                            let request = tokio::time::timeout(
                                 std::time::Duration::from_secs(120),
                                 kc_media::portal::request_sources(
                                     screen_parent.as_deref(),
                                     screen_sources,
                                 ),
                             )
-                            .await
+                            .await;
+                            match request {
+                                Ok(Ok(portal)) => {
+                                    VideoSource::screen(portal, video_settings.clone(), on_frame)
+                                        .map_err(|error| error.to_string())
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%error, "screen capture source failed");
+                                    Err(error.to_string())
+                                }
+                                Err(_) => Err("screen picker timed out".to_owned()),
+                            }
                         }
                     };
-                    match request {
-                        Ok(Ok(portal)) => {
-                            let first_frame = Arc::new(AtomicBool::new(false));
-                            let frame_count = Arc::new(AtomicUsize::new(0));
-                            let watchdog_frames = frame_count.clone();
-                            let video_delay = video_delay.clone();
-                            let last_frame = last_frame.clone();
-                            let result =
-                                VideoSource::screen(portal, video_settings.clone(), move |frame| {
-                                    if let Ok(mut last) = last_frame.lock() {
-                                        let gap = last.elapsed();
-                                        if gap > Duration::from_millis(500) {
-                                            tracing::warn!(
-                                                gap_ms = gap.as_millis(),
-                                                "encoded screen frame gap"
-                                            );
-                                        }
-                                        *last = Instant::now();
-                                    }
-                                    frame_count.fetch_add(1, Ordering::Relaxed);
-                                    if !first_frame.swap(true, Ordering::Relaxed) {
-                                        tracing::info!(
-                                            bytes = frame.data.len(),
-                                            "stream first encoded video frame"
-                                        );
-                                    }
-                                    video_delay.send(frame.data, frame.duration_ms);
-                                })
-                                .map_err(|error| error.to_string());
-                            if result.is_ok() {
-                                let ui_events = source_ui.clone();
-                                let control = source_control.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                                    if watchdog_frames.load(Ordering::Relaxed) == 0 {
-                                        let _ = ui_events
-                                            .send(UiEvent::StreamError {
-                                                account,
-                                                message: "screen capture produced no frames"
-                                                    .to_owned(),
-                                            })
-                                            .await;
-                                        let _ =
-                                            control.send(VoiceControl::StreamClosed { generation });
-                                    }
-                                });
+                    if result.is_ok() {
+                        let ui_events = source_ui.clone();
+                        let control = source_control.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                            if watchdog_frames.load(Ordering::Relaxed) == 0 {
+                                let _ = ui_events
+                                    .send(UiEvent::StreamError {
+                                        account,
+                                        message: "screen capture produced no frames".to_owned(),
+                                    })
+                                    .await;
+                                let _ = control.send(VoiceControl::StreamClosed { generation });
                             }
-                            result
-                        }
-                        Ok(Err(error)) => {
-                            tracing::warn!(%error, "screen capture source failed");
-                            Err(error.to_string())
-                        }
-                        Err(_) => Err("screen picker timed out".to_owned()),
+                        });
                     }
+                    result
                 };
                 let _ = source_control.send(VoiceControl::StreamSource { generation, result });
             });
@@ -1984,7 +1990,7 @@ async fn apply_voice_command(
             settings,
             delay_ms,
             sources,
-            portal,
+            capture,
             audio,
         } => {
             let target = voice
@@ -2009,7 +2015,7 @@ async fn apply_voice_command(
             voice.stream_settings = settings;
             voice.stream_delay_ms = delay_ms;
             voice.stream_sources = sources;
-            voice.stream_portal = portal;
+            voice.stream_capture = capture;
             voice.stream_audio = audio;
             voice.stream_pending = true;
             voice.stream_key = None;
@@ -2052,7 +2058,7 @@ async fn apply_voice_command(
             voice.stream_parent = None;
             voice.stream_settings = settings;
             voice.stream_delay_ms = delay_ms;
-            voice.stream_portal = None;
+            voice.stream_capture = None;
             voice.stream_audio = audio;
             voice.stream_pending = true;
             voice.stream_key = None;
@@ -2288,7 +2294,7 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
     voice.streaming = false;
     voice.stream_camera = None;
     voice.stream_parent = None;
-    voice.stream_portal = None;
+    voice.stream_capture = None;
     if let Some(connection) = voice.stream_connection.take() {
         drop(connection.source);
         drop(connection.audio);
@@ -2378,7 +2384,7 @@ mod tests {
             stream_settings: VideoSettings::default(),
             stream_delay_ms: 0,
             stream_sources: ShareSources::ScreenOrWindow,
-            stream_portal: None,
+            stream_capture: None,
             stream_audio: true,
             stream_pending: false,
             streaming: false,

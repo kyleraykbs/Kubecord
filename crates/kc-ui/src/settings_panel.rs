@@ -668,7 +668,7 @@ fn start_camera_test(app: &Rc<AppState>, panel: &Rc<Panel>) {
 
 fn start_screen_test(app: &Rc<AppState>, panel: &Rc<Panel>) {
     let settings = app.capture.borrow().video_settings();
-    start_screen_preview(app, &panel.screen, ShareSources::current(), None, settings);
+    start_screen_preview(app, &panel.screen, ShareSources::current(), settings);
 }
 
 // -- widgets -----------------------------------------------------------------

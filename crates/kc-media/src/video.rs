@@ -16,6 +16,49 @@ pub struct EncodedFrame {
     pub duration_ms: u32,
 }
 
+/// Where a running capture sends its encoded frames. It can be pointed
+/// somewhere else while the capture runs, so a preview becomes a stream
+/// without restarting: reconnecting to a screen-cast node is not reliable,
+/// as some portals remove the node when its first consumer leaves.
+#[derive(Clone, Default)]
+pub struct FrameTap(Arc<Mutex<Option<FrameSink>>>);
+
+type FrameSink = Box<dyn FnMut(EncodedFrame) + Send>;
+
+impl FrameTap {
+    /// Sends frames to `sink` from now on.
+    pub fn set(&self, sink: impl FnMut(EncodedFrame) + Send + 'static) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(Box::new(sink));
+        }
+    }
+
+    /// Drops frames until the next [`FrameTap::set`].
+    pub fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+
+    /// The callback to hand the capture.
+    pub fn sink(&self) -> impl FnMut(EncodedFrame) + Send + 'static {
+        let tap = self.clone();
+        move |frame| {
+            if let Ok(mut slot) = tap.0.lock()
+                && let Some(sink) = slot.as_mut()
+            {
+                sink(frame);
+            }
+        }
+    }
+}
+
+/// A capture that is already running, with the tap its frames go through.
+pub struct PreparedCapture {
+    pub source: VideoSource,
+    pub tap: FrameTap,
+}
+
 pub struct VideoSource {
     pipeline: gst::Pipeline,
     stop: Arc<AtomicBool>,
@@ -476,6 +519,16 @@ impl VideoSource {
                     .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
                 element.set_property("fd", fd);
                 element.set_property("path", node_id.to_string());
+                // If the picked node goes away, stop instead of letting the
+                // session manager link the default video source (a camera)
+                // in its place.
+                if element.find_property("stream-properties").is_some() {
+                    let properties = gst::Structure::builder("props")
+                        .field("node.dont-fallback", "true")
+                        .field("node.dont-reconnect", "true")
+                        .build();
+                    element.set_property("stream-properties", properties);
+                }
                 Ok(())
             },
         )?;
@@ -556,15 +609,6 @@ impl VideoSource {
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Message("no pipewire source variant".into())))
-    }
-}
-
-impl VideoSource {
-    /// Takes the screen-cast portal session out of a screen capture, so a
-    /// new capture can reuse the screen or window the user already picked.
-    /// The capture itself stops when this source is dropped.
-    pub fn take_screen_portal(&mut self) -> Option<crate::portal::ScreenCast> {
-        self._portal.take()
     }
 }
 
@@ -697,6 +741,32 @@ impl Drop for VideoDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_tap_can_be_redirected_while_running() {
+        let frame = || EncodedFrame {
+            data: vec![0, 0, 0, 1],
+            duration_ms: 33,
+        };
+        let tap = FrameTap::default();
+        let mut capture = tap.sink();
+        let preview = Arc::new(Mutex::new(0));
+        let stream = Arc::new(Mutex::new(0));
+
+        let seen = preview.clone();
+        tap.set(move |_| *seen.lock().unwrap() += 1);
+        capture(frame());
+        // Handed over: nothing goes anywhere until the stream takes it.
+        tap.clear();
+        capture(frame());
+        let seen = stream.clone();
+        tap.set(move |_| *seen.lock().unwrap() += 1);
+        capture(frame());
+        capture(frame());
+
+        assert_eq!(*preview.lock().unwrap(), 1);
+        assert_eq!(*stream.lock().unwrap(), 2);
+    }
 
     #[test]
     fn required_elements_are_installed() {
