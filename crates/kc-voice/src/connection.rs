@@ -965,9 +965,15 @@ impl SessionState {
         let packet_type = packet[1];
         let fmt = packet[0] & 0x1F;
         if packet_type == 206 && (fmt == 1 || fmt == 4) {
-            // PSFB PLI (fmt 1) or FIR (fmt 4): header (8) + sender SSRC (4)
-            // + media source SSRC (4). A viewer requesting our outgoing
-            // stream must make the local encoder emit a keyframe now.
+            // The RTCP header is clear even when the rest is SRTCP. We have at
+            // most one outgoing video stream, so any PLI/FIR on this socket is
+            // a request for that stream and does not require decrypting the
+            // media-source SSRC.
+            if self.video_ssrc.is_some() {
+                let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                return;
+            }
+            // Fall back to the clear/decrypted media SSRC if one is available.
             let ssrc = u32::from_be_bytes([packet[12], packet[13], packet[14], packet[15]]);
             if self.video_ssrc == Some(ssrc) {
                 let _ = self.events.send(VoiceEvent::ForceKeyframe);
