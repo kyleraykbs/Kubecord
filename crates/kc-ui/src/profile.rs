@@ -168,6 +168,7 @@ impl AppState {
             servers.append(&placeholder("Loading…"));
             stack.add_titled(&scrolled(&friends), Some("friends"), "Mutual Friends");
             stack.add_titled(&scrolled(&servers), Some("servers"), "Mutual Servers");
+            stack.set_visible_child_name("friends");
         }
         let has_side = !activities.is_empty() || !is_me;
         let switcher = adw::InlineViewSwitcher::new();

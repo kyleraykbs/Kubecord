@@ -235,6 +235,11 @@ const CSS: &str = r#"
     background-color: alpha(black, 0.12);
 }
 
+.kc-userbar .kc-status-dot {
+    min-width: 12px;
+    min-height: 12px;
+}
+
 /* Compact controls, as in Discord, so the name gets the room. */
 .kc-userbar button.image-button {
     min-width: 28px;

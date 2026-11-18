@@ -313,9 +313,12 @@ impl AppState {
 
         // User bar, fixed at the bottom of the sidebar. The avatar and name
         // open the status and account menu.
-        let user_avatar = adw::Avatar::new(32, None, true);
+        let user_avatar = adw::Avatar::new(40, None, true);
         let user_avatar_slot = gtk::Overlay::new();
         user_avatar_slot.set_child(Some(&user_avatar));
+        // Hug the avatar: stretched to the bar's height, the slot put the
+        // status dot below the avatar instead of on its corner.
+        user_avatar_slot.set_valign(gtk::Align::Center);
 
         // Names wrap at spaces onto a second line; a single word too long
         // for the bar is cut with an ellipsis instead of broken.
