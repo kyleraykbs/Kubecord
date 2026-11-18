@@ -1,6 +1,7 @@
 //! GStreamer capture, codecs and rendering for kylecord.
 
 pub mod audio;
+pub mod delay;
 pub mod error;
 pub mod portal;
 pub mod video;

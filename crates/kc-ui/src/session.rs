@@ -9,13 +9,14 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kc_core::{Account, Snowflake, Token};
 use kc_gateway::session::GatewayHandle;
 use kc_gateway::{Gateway, GatewayEvent};
 use kc_http::HttpClient;
 use kc_media::audio::{ScreenAudio, VoiceAudio};
+use kc_media::delay::DelayedSender;
 use kc_media::portal::CameraAccess;
 use kc_media::video::{VideoSettings, VideoSource};
 use kc_state::{Guild, Store, StoreEvent, User};
@@ -131,11 +132,13 @@ pub enum VoiceCommand {
     StartStream {
         parent: Option<Arc<ashpd::WindowIdentifier>>,
         settings: VideoSettings,
+        delay_ms: u64,
     },
     StartStreamCamera {
         access: CameraAccess,
         node_id: u32,
         settings: VideoSettings,
+        delay_ms: u64,
     },
     StopStream,
     Subscribe {
@@ -223,12 +226,14 @@ pub enum Command {
         account: AccountId,
         parent: Option<Arc<ashpd::WindowIdentifier>>,
         settings: VideoSettings,
+        delay_ms: u64,
     },
     StartStreamCamera {
         account: AccountId,
         access: CameraAccess,
         node_id: u32,
         settings: VideoSettings,
+        delay_ms: u64,
     },
     StopStream {
         account: AccountId,
@@ -461,10 +466,15 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             account,
             parent,
             settings,
+            delay_ms,
         } => {
             forward_voice(
                 account,
-                VoiceCommand::StartStream { parent, settings },
+                VoiceCommand::StartStream {
+                    parent,
+                    settings,
+                    delay_ms,
+                },
                 ui,
             )
             .await;
@@ -491,6 +501,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             access,
             node_id,
             settings,
+            delay_ms,
         } => {
             forward_voice(
                 account,
@@ -498,6 +509,7 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
                     access,
                     node_id,
                     settings,
+                    delay_ms,
                 },
                 ui,
             )
@@ -611,6 +623,7 @@ fn spawn_account(
             stream_camera: None,
             stream_parent: None,
             stream_settings: VideoSettings::default(),
+            stream_delay_ms: 0,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -746,9 +759,29 @@ fn spawn_account(
                             }
                             match result {
                                 Ok(source) => {
+                                    let delay_ms = voice.stream_delay_ms;
                                     if let Some(connection) = &mut voice.stream_connection {
                                         tracing::info!("stream source ready");
                                         connection.source = Some(source);
+                                        if connection.audio.is_none() {
+                                            match ScreenAudio::start(
+                                                connection.handle.clone(),
+                                                128_000,
+                                                delay_ms,
+                                            ) {
+                                                Ok(audio) => connection.audio = Some(audio),
+                                                Err(error) => {
+                                                    let _ = ui
+                                                        .send(UiEvent::Error {
+                                                            account: Some(account),
+                                                            message: format!(
+                                                                "screen audio unavailable: {error}"
+                                                            ),
+                                                        })
+                                                        .await;
+                                                }
+                                            }
+                                        }
                                     } else {
                                         tracing::warn!("stream source ready but no stream connection");
                                     }
@@ -793,6 +826,7 @@ struct VoiceRuntime {
     stream_camera: Option<(CameraAccess, u32)>,
     stream_parent: Option<Arc<ashpd::WindowIdentifier>>,
     stream_settings: VideoSettings,
+    stream_delay_ms: u64,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -1055,22 +1089,10 @@ async fn maybe_start_stream(
     match kc_voice::connect(params, event_tx).await {
         Ok(handle) => {
             debug!(%key, %rtc_id, "go live stream connecting");
-            let audio = match ScreenAudio::start(handle.clone(), 128_000) {
-                Ok(audio) => Some(audio),
-                Err(error) => {
-                    let _ = ui
-                        .send(UiEvent::Error {
-                            account: Some(account),
-                            message: format!("screen audio unavailable: {error}"),
-                        })
-                        .await;
-                    None
-                }
-            };
             voice.stream_connection = Some(StreamConnection {
                 handle: handle.clone(),
                 source: None,
-                audio,
+                audio: None,
                 key,
             });
 
@@ -1128,17 +1150,24 @@ async fn maybe_start_stream(
             let camera_source = voice.stream_camera.clone();
             let screen_parent = voice.stream_parent.clone();
             let video_settings = voice.stream_settings.clone();
+            let stream_delay_ms = voice.stream_delay_ms;
+            let video_send = source_handle.clone();
+            let video_delay = DelayedSender::start(
+                Duration::from_millis(stream_delay_ms),
+                move |data: Vec<u8>, frame_ms| video_send.send_video(data, frame_ms),
+            );
             tokio::spawn(async move {
                 let result = if let Some((access, node_id)) = camera_source {
                     access
                         .select(node_id)
                         .ok_or_else(|| "selected camera is no longer available".to_owned())
                         .and_then(|camera| {
+                            let video_delay = video_delay.clone();
                             VideoSource::camera_portal(
                                 camera,
                                 video_settings.clone(),
                                 move |frame| {
-                                    source_handle.send_video(frame.data, frame.duration_ms);
+                                    video_delay.send(frame.data, frame.duration_ms);
                                 },
                             )
                             .map_err(|error| error.to_string())
@@ -1154,6 +1183,7 @@ async fn maybe_start_stream(
                             let first_frame = Arc::new(AtomicBool::new(false));
                             let frame_count = Arc::new(AtomicUsize::new(0));
                             let watchdog_frames = frame_count.clone();
+                            let video_delay = video_delay.clone();
                             let result = VideoSource::screen(
                                 portal,
                                 video_settings.clone(),
@@ -1165,7 +1195,7 @@ async fn maybe_start_stream(
                                             "stream first encoded video frame"
                                         );
                                     }
-                                    source_handle.send_video(frame.data, frame.duration_ms);
+                                    video_delay.send(frame.data, frame.duration_ms);
                                 },
                             )
                             .map_err(|error| error.to_string());
@@ -1548,7 +1578,11 @@ async fn apply_voice_command(
                 }
             }
         }
-        VoiceCommand::StartStream { parent, settings } => {
+        VoiceCommand::StartStream {
+            parent,
+            settings,
+            delay_ms,
+        } => {
             let target = voice
                 .connection
                 .as_ref()
@@ -1578,6 +1612,7 @@ async fn apply_voice_command(
             voice.stream_camera = None;
             voice.stream_parent = parent;
             voice.stream_settings = settings;
+            voice.stream_delay_ms = delay_ms;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1595,6 +1630,7 @@ async fn apply_voice_command(
             access,
             node_id,
             settings,
+            delay_ms,
         } => {
             let target = voice
                 .connection
@@ -1616,6 +1652,7 @@ async fn apply_voice_command(
             voice.stream_camera = Some((access, node_id));
             voice.stream_parent = None;
             voice.stream_settings = settings;
+            voice.stream_delay_ms = delay_ms;
             voice.stream_pending = true;
             voice.stream_key = None;
             voice.stream_rtc_id = None;
@@ -1774,6 +1811,7 @@ mod tests {
             stream_camera: None,
             stream_parent: None,
             stream_settings: VideoSettings::default(),
+            stream_delay_ms: 0,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,

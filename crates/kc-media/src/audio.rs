@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::delay::DelayedSender;
 use crate::error::{Error, Result};
 use kc_voice::VoiceHandle;
 
@@ -297,7 +298,7 @@ pub struct ScreenAudio {
 }
 
 impl ScreenAudio {
-    pub fn start(voice: VoiceHandle, bitrate: u32) -> Result<Self> {
+    pub fn start(voice: VoiceHandle, bitrate: u32, delay_ms: u64) -> Result<Self> {
         let encoder = Arc::new(Mutex::new(
             Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
                 .map_err(|error| Error::Message(format!("opus encoder: {error}")))?,
@@ -309,10 +310,14 @@ impl ScreenAudio {
 
         voice.set_speaking(2); // SOUNDSHARE
         let send_voice = voice.clone();
+        let delayed = DelayedSender::start(
+            std::time::Duration::from_millis(delay_ms),
+            move |packet, frame_ms| send_voice.send_soundshare_audio(packet, frame_ms),
+        );
         let capture = match Capture::start_monitor(move |frame| {
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
-                Ok(packet) => send_voice.send_soundshare_audio(packet, 20),
+                Ok(packet) => delayed.send(packet, 20),
                 Err(error) => debug!(%error, "screen audio encode failed"),
             }
         }) {

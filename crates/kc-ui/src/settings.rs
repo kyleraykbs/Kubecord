@@ -15,6 +15,8 @@ pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 
 pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
 
+pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapturePreferences {
@@ -23,6 +25,8 @@ pub struct CapturePreferences {
     pub fps: u32,
     /// `None` means derive the bitrate from resolution and framerate.
     pub bitrate_kbps: Option<u32>,
+    /// Fixed Go Live buffering delay in milliseconds.
+    pub stream_delay_ms: u64,
 }
 
 impl Default for CapturePreferences {
@@ -32,6 +36,7 @@ impl Default for CapturePreferences {
             height: 720,
             fps: 30,
             bitrate_kbps: None,
+            stream_delay_ms: 0,
         }
     }
 }
@@ -87,6 +92,9 @@ impl CapturePreferences {
         {
             self.bitrate_kbps = None;
         }
+        if !STREAM_DELAYS.contains(&self.stream_delay_ms) {
+            self.stream_delay_ms = 0;
+        }
     }
 }
 
@@ -114,6 +122,7 @@ mod tests {
             height: 1080,
             fps: 60,
             bitrate_kbps: Some(6000),
+            stream_delay_ms: 1000,
         };
         let settings = prefs.video_settings();
         assert_eq!(settings.bitrate_kbps, 6000);

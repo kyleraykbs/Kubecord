@@ -17,7 +17,9 @@ use kc_media::portal::{CameraAccess, CameraChoice};
 use kc_state::{Channel, ChannelType, Message, StoreEvent};
 
 use crate::markdown::{format_size, format_timestamp, render_markdown};
-use crate::settings::{BITRATES, CapturePreferences, FRAMERATES, RESOLUTIONS};
+use crate::settings::{
+    BITRATES, CapturePreferences, FRAMERATES, RESOLUTIONS, STREAM_DELAYS,
+};
 use crate::session::{
     self, AccountId, CameraPurpose, Command, ConnState, Session, UiEvent, VoiceUiState,
 };
@@ -870,10 +872,20 @@ impl AppState {
             .unwrap_or(0) as u32;
         bitrate.set_selected(bitrate_index);
 
+        let delay_names = ["None", "0.5 s", "1 s", "2 s", "3 s"];
+        let delay = gtk::DropDown::from_strings(&delay_names);
+        delay.set_selected(
+            STREAM_DELAYS
+                .iter()
+                .position(|delay| *delay == current.stream_delay_ms)
+                .unwrap_or(0) as u32,
+        );
+
         for (row, label_text, dropdown) in [
             (0, "Resolution", &resolution),
             (1, "Framerate", &framerate),
             (2, "Bitrate", &bitrate),
+            (3, "Go Live delay", &delay),
         ] {
             let label = gtk::Label::new(Some(label_text));
             label.set_xalign(0.0);
@@ -888,7 +900,7 @@ impl AppState {
         note.set_wrap(true);
         note.add_css_class("dim-label");
         note.add_css_class("caption");
-        grid.attach(&note, 0, 3, 2, 1);
+        grid.attach(&note, 0, 4, 2, 1);
         dialog.content_area().append(&grid);
 
         let app = self.clone();
@@ -908,6 +920,7 @@ impl AppState {
                 height,
                 fps,
                 bitrate_kbps,
+                stream_delay_ms: STREAM_DELAYS[delay.selected() as usize],
             };
             match prefs.save() {
                 Ok(()) => {
@@ -1413,11 +1426,13 @@ impl AppState {
                     }
                     CameraPurpose::Stream => {
                         let settings = app.capture.borrow().video_settings();
+                        let delay_ms = app.capture.borrow().stream_delay_ms;
                         let _ = app.cmd_tx.try_send(Command::StartStreamCamera {
                             account,
                             access: access.clone(),
                             node_id: camera.node_id,
                             settings,
+                            delay_ms,
                         });
                         app.set_status("Starting camera stream…");
                     }
@@ -1453,9 +1468,13 @@ impl AppState {
                 gtk::ResponseType::Accept => {
                     let parent = app.window_identifier.borrow().clone();
                     let settings = app.capture.borrow().video_settings();
-                    let _ = app
-                        .cmd_tx
-                        .try_send(Command::StartStream { account, parent, settings });
+                    let delay_ms = app.capture.borrow().stream_delay_ms;
+                    let _ = app.cmd_tx.try_send(Command::StartStream {
+                        account,
+                        parent,
+                        settings,
+                        delay_ms,
+                    });
                     app.set_status("Starting screen share…");
                 }
                 gtk::ResponseType::Other(1) => {
