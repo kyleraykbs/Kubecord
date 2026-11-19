@@ -11,6 +11,7 @@ mod live;
 mod markdown;
 mod members;
 mod menu;
+mod ping;
 mod player;
 mod profile;
 mod rail;

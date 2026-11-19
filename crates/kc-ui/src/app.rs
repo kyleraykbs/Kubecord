@@ -212,6 +212,45 @@ pub fn run() -> glib::ExitCode {
                             app_state.show_incoming_call(channel);
                         }
                     }
+                    // The signal bars and ping graph with made-up samples.
+                    "ping" => {
+                        let now = glib::DateTime::now_local()
+                            .map(|now| now.to_unix())
+                            .unwrap_or(0);
+                        {
+                            let mut history = app_state.ping_history.borrow_mut();
+                            for index in 0..48i64 {
+                                let millis = match index {
+                                    20 => Some(96),
+                                    33 => None,
+                                    _ => Some(22 + (index * 7 % 9) as u32),
+                                };
+                                history.push_back((now - (47 - index) * 5, millis));
+                            }
+                        }
+                        app_state.note_ping(Some(24));
+                        app_state.voice_panel.set_visible(true);
+                        let panel = app_state.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                            if let Some(popover) = panel.ping.button.popover() {
+                                popover.set_autohide(false);
+                                panel.ping.button.popup();
+                                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                                    glib::timeout_add_local_once(
+                                        Duration::from_millis(1200),
+                                        move || {
+                                            let _ = save_window_png(
+                                                &popover,
+                                                std::path::Path::new(&format!(
+                                                    "{path}.popover.png"
+                                                )),
+                                            );
+                                        },
+                                    );
+                                }
+                            }
+                        });
+                    }
                     "notice" => {
                         app_state.notify("You're typing unseen", None, 30);
                         app_state.notify(
@@ -473,6 +512,7 @@ impl AppState {
         self.capture_button
             .connect_clicked(move |_| app.show_settings());
 
+        self.connect_ping();
         self.render_typing_toggle();
         let app = self.clone();
         self.typing_toggle.connect_clicked(move |_| {
@@ -1337,6 +1377,7 @@ impl AppState {
                     }
                 }
                 if self.model.borrow().active == Some(account) {
+                    self.clear_ping();
                     self.clear_speaking();
                     self.focused_video.set(None);
                     self.render_voice_panel();
@@ -1357,6 +1398,11 @@ impl AppState {
             UiEvent::VoiceError { account, message } => {
                 if self.model.borrow().active == Some(account) {
                     self.set_status(&message);
+                }
+            }
+            UiEvent::VoicePing { account, millis } => {
+                if self.model.borrow().active == Some(account) {
+                    self.note_ping(millis);
                 }
             }
             UiEvent::CallRinging {

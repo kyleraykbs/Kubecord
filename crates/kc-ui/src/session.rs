@@ -377,6 +377,11 @@ pub enum UiEvent {
         account: AccountId,
         message: String,
     },
+    /// The call's ping was measured (`None`: no reply).
+    VoicePing {
+        account: AccountId,
+        millis: Option<u32>,
+    },
     /// A DM call started or stopped ringing us.
     CallRinging {
         account: AccountId,
@@ -1853,6 +1858,9 @@ async fn maybe_connect(
                         }
                         VoiceEvent::ForceKeyframe => {
                             let _ = control.send(VoiceControl::ForceCameraKeyframe { generation });
+                        }
+                        VoiceEvent::Ping { millis } => {
+                            let _ = ui.try_send(UiEvent::VoicePing { account, millis });
                         }
                         VoiceEvent::Error(message) => {
                             let _ = ui.send(UiEvent::VoiceError { account, message }).await;

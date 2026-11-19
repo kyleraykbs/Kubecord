@@ -949,6 +949,7 @@ async fn voice(
                     Some(VoiceEvent::VideoEnded { user_id }) => println!("video ended: {user_id}"),
                     Some(VoiceEvent::DaveReady) => println!("DAVE ready"),
                     Some(VoiceEvent::ForceKeyframe) => println!("force keyframe requested"),
+                    Some(VoiceEvent::Ping { millis }) => println!("ping: {millis:?} ms"),
                     Some(VoiceEvent::KeyframeRequest { user_id, .. }) => {
                         println!("keyframe requested by {user_id}");
                     }

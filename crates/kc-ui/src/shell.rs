@@ -59,6 +59,9 @@ pub(crate) struct AppState {
     pub voice_panel: gtk::Box,
     pub voice_channel_label: gtk::Label,
     pub voice_status_label: gtk::Label,
+    /// The call's signal bars and ping graph, and what they show.
+    pub ping: crate::ping::PingWidgets,
+    pub ping_history: RefCell<std::collections::VecDeque<crate::ping::Sample>>,
     pub voice_leave: gtk::Button,
     pub voice_mute: gtk::ToggleButton,
     pub voice_deafen: gtk::ToggleButton,
@@ -301,7 +304,9 @@ impl AppState {
         voice_text.set_hexpand(true);
         voice_text.append(&voice_connected);
         voice_text.append(&voice_channel_label);
+        let ping = crate::ping::PingWidgets::new();
         let voice_top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        voice_top.append(&ping.button);
         voice_top.append(&voice_text);
         voice_top.append(&voice_leave);
 
@@ -781,6 +786,8 @@ impl AppState {
             voice_panel,
             voice_channel_label,
             voice_status_label,
+            ping,
+            ping_history: RefCell::new(std::collections::VecDeque::new()),
             voice_leave,
             voice_mute,
             voice_deafen,

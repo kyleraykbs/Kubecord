@@ -100,6 +100,11 @@ pub enum VoiceEvent {
         ssrc: u32,
     },
     ForceKeyframe,
+    /// Round trip to the voice server over UDP, measured every few seconds;
+    /// `None` when the reply did not come back in time.
+    Ping {
+        millis: Option<u32>,
+    },
     Closed {
         code: Option<u16>,
         reason: String,
@@ -217,6 +222,10 @@ impl SentPackets {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
+/// How often the UDP keepalive goes out, and so how often the ping is
+/// measured. Discord's own client uses five seconds.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Counters for sent video over one reporting period, logged so a viewer's
 /// freeze can be matched to what the network asked of us.
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -230,6 +239,9 @@ struct SentStats {
     nack_requested: u64,
     nack_found: u64,
     audio_nack_requested: u64,
+    /// Video packets asked for a second time within a second: the first
+    /// resend did not arrive, or was not accepted.
+    nack_repeated: u64,
     /// Keyframes viewers asked for (PLI/FIR).
     keyframe_requests: u64,
     /// The longest the pacing queue got, in milliseconds of sending.
@@ -381,6 +393,11 @@ struct SessionState {
     video_queue_bytes: usize,
     /// What happened to the video being sent since the last report.
     sent: SentStats,
+    /// Keepalives sent and not yet echoed, for measuring the ping.
+    pings: VecDeque<(u32, std::time::Instant)>,
+    ping_counter: u32,
+    /// Video packets recently asked for again, to notice repeats.
+    recent_nacks: HashMap<u16, std::time::Instant>,
     /// Pacer send credit in bytes; refilled from elapsed time at the pacing rate.
     pace_credit: f64,
     pace_last: std::time::Instant,
@@ -599,6 +616,9 @@ async fn run(
         retransmits: VecDeque::new(),
         video_queue_bytes: 0,
         sent: SentStats::default(),
+        pings: VecDeque::new(),
+        ping_counter: 0,
+        recent_nacks: HashMap::new(),
         pace_credit: 0.0,
         pace_last: std::time::Instant::now(),
         video_rate_bps: 0.0,
@@ -640,7 +660,7 @@ async fn run(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
 
-    let mut keepalive = tokio::time::interval(Duration::from_secs(10));
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     keepalive.tick().await;
 
@@ -671,11 +691,7 @@ async fn run(
                     break;
                 }
             }
-            _ = keepalive.tick() => {
-                // Abaddon sends this two-byte UDP keepalive every 10 seconds so
-                // the NAT mapping and the SFU's SSRC state stay alive.
-                let _ = state.socket.send_to(&[0x13, 0x37], state.remote).await;
-            }
+            _ = keepalive.tick() => state.send_keepalive().await,
             _ = video_tick.tick() => {
                 state.pace_video().await?;
             }
@@ -1205,7 +1221,43 @@ impl SessionState {
         Ok(())
     }
 
+    /// Sends the UDP keepalive: eight bytes starting with a counter, which
+    /// the server echoes. It keeps the NAT mapping and the server's state
+    /// for us alive, and the time to the echo is the connection's ping.
+    async fn send_keepalive(&mut self) {
+        let now = std::time::Instant::now();
+        // An echo that has not come back by now counts as lost.
+        while self
+            .pings
+            .front()
+            .is_some_and(|(_, sent)| now.duration_since(*sent) >= KEEPALIVE_INTERVAL)
+        {
+            self.pings.pop_front();
+            let _ = self.events.send(VoiceEvent::Ping { millis: None });
+        }
+        self.ping_counter = self.ping_counter.wrapping_add(1);
+        let mut packet = [0u8; 8];
+        packet[..4].copy_from_slice(&self.ping_counter.to_le_bytes());
+        self.pings.push_back((self.ping_counter, now));
+        let _ = self.socket.send_to(&packet, self.remote).await;
+    }
+
     fn handle_udp(&mut self, packet: &[u8]) {
+        if packet.len() == 8 {
+            // A keepalive echoed back.
+            let counter = u32::from_le_bytes([packet[0], packet[1], packet[2], packet[3]]);
+            if let Some(index) = self.pings.iter().position(|(sent, _)| *sent == counter) {
+                let (_, sent) = self
+                    .pings
+                    .remove(index)
+                    .unwrap_or((0, std::time::Instant::now()));
+                let millis = sent.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                let _ = self.events.send(VoiceEvent::Ping {
+                    millis: Some(millis),
+                });
+            }
+            return;
+        }
         if is_rtcp(packet) {
             self.handle_rtcp(packet);
             return;
@@ -1564,6 +1616,7 @@ impl SessionState {
             dropped = sent.dropped,
             nack_requested = sent.nack_requested,
             nack_found = sent.nack_found,
+            nack_repeated = sent.nack_repeated,
             audio_nack_requested = sent.audio_nack_requested,
             keyframe_requests = sent.keyframe_requests,
             backlog_max_ms = sent.backlog_max_ms,
@@ -1740,6 +1793,18 @@ impl SessionState {
                     }
                 }
                 for sequence in want {
+                    if is_video {
+                        let now = std::time::Instant::now();
+                        if self
+                            .recent_nacks
+                            .insert(sequence, now)
+                            .is_some_and(|before| {
+                                now.duration_since(before) < Duration::from_secs(1)
+                            })
+                        {
+                            self.sent.nack_repeated += 1;
+                        }
+                    }
                     requested += 1;
                     if sample.len() < 8 {
                         sample.push(sequence);
@@ -1749,6 +1814,11 @@ impl SessionState {
                         self.retransmits.push_back(packet);
                     }
                 }
+            }
+            if self.recent_nacks.len() > 2048 {
+                let now = std::time::Instant::now();
+                self.recent_nacks
+                    .retain(|_, at| now.duration_since(*at) < Duration::from_secs(1));
             }
             if is_video {
                 self.sent.nack_requested += requested as u64;
