@@ -152,6 +152,64 @@ pub fn run() -> glib::ExitCode {
                     "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
                     "share" => app_state.show_share_popup(account),
                     "captcha" => app_state.test_captcha(),
+                    "notice" => {
+                        app_state.notify("You're typing unseen", None, 30);
+                        app_state.notify(
+                            "Incoming call from Latte",
+                            Some(("Join", Box::new(|| {}))),
+                            30,
+                        );
+                    }
+                    // The emoji picker in the first server, or in a DM; the
+                    // popover is its own surface, saved beside the window
+                    // screenshot as `<path>.popover.png`.
+                    "emoji" | "emoji-dm" => {
+                        if popup == "emoji" {
+                            if let Some(guild) =
+                                store.read(|state| state.guilds.keys().next().copied())
+                            {
+                                app_state.select_guild(guild);
+                            }
+                        } else if let Some(channel) = store.read(|state| {
+                            state
+                                .relationships
+                                .values()
+                                .find(|relationship| {
+                                    relationship.kind == kc_state::Relationship::FRIEND
+                                })
+                                .and_then(|relationship| state.dm_with(relationship.id).cloned())
+                        }) {
+                            app_state.open_channel(channel);
+                        }
+                        let picker = app_state.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                            // Without a real click there is no input grab to
+                            // take, so the screenshot's popover must not hide.
+                            if let Some(popover) = picker.emoji_button.popover() {
+                                popover.set_autohide(false);
+                            }
+                            picker.emoji_button.popup();
+                            if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                                let popover = picker.emoji_button.popover();
+                                glib::timeout_add_local_once(
+                                    Duration::from_millis(1500),
+                                    move || {
+                                        if let Some(popover) = popover {
+                                            let _ = save_window_png(
+                                                &popover,
+                                                std::path::Path::new(&format!(
+                                                    "{path}.popover.png"
+                                                )),
+                                            )
+                                            .map_err(|error| {
+                                                eprintln!("popover screenshot: {error}")
+                                            });
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                    }
                     // Opens the first server and types into the composer.
                     "compose" | "compose-empty" => {
                         let guild = store.read(|state| state.guilds.keys().next().copied());
@@ -244,13 +302,16 @@ pub fn run() -> glib::ExitCode {
 
 /// Renders a widget to a PNG without relying on a compositor. Used by
 /// `KYLECORD_SCREENSHOT` for visual checks of the GTK layout.
-fn save_window_png(window: &adw::ApplicationWindow, path: &std::path::Path) -> Result<(), String> {
-    let width = window.width() as f64;
-    let height = window.height() as f64;
+fn save_window_png(
+    window: &(impl IsA<gtk::Native> + IsA<gtk::Widget>),
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let width = window.upcast_ref::<gtk::Widget>().width() as f64;
+    let height = window.upcast_ref::<gtk::Widget>().height() as f64;
     if width <= 0.0 || height <= 0.0 {
         return Err("window has no size".into());
     }
-    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let paintable = gtk::WidgetPaintable::new(Some(window.upcast_ref::<gtk::Widget>()));
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, width, height);
     let node = snapshot.to_node().ok_or("empty render node")?;
@@ -1237,11 +1298,8 @@ impl AppState {
                         })
                         .flatten()
                         .unwrap_or_else(|| "Someone".to_owned());
-                    let toast = adw::Toast::new(&format!("Incoming call from {name}"));
-                    toast.set_button_label(Some("Join"));
-                    toast.set_timeout(20);
                     let app = self.clone();
-                    toast.connect_button_clicked(move |_| {
+                    let join = Box::new(move || {
                         let channel = app
                             .with_session(|session| {
                                 session
@@ -1254,7 +1312,11 @@ impl AppState {
                             app.join_call(&channel);
                         }
                     });
-                    self.toasts.add_toast(toast);
+                    self.notify(
+                        &format!("Incoming call from {name}"),
+                        Some(("Join", join)),
+                        20,
+                    );
                 }
             }
             UiEvent::VideoStarted {

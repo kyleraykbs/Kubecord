@@ -518,48 +518,71 @@ impl AppState {
 
     // -- emoji picker ----------------------------------------------------
 
+    /// The emoji picker: Server Emoji and Standard tabs. In DMs there are
+    /// no server emoji, so only Standard shows.
     fn build_emoji_picker(self: &Rc<Self>) {
+        use libadwaita as adw;
+
         let popover = gtk::Popover::new();
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.set_margin_top(8);
         content.set_margin_bottom(8);
         content.set_margin_start(8);
         content.set_margin_end(8);
 
+        let stack = adw::ViewStack::new();
+        let tabs = adw::InlineViewSwitcher::new();
+        tabs.set_stack(Some(&stack));
+        tabs.set_homogeneous(true);
+        tabs.add_css_class("flat");
+        content.append(&tabs);
+
+        // Server emoji: the account's usable custom emoji.
+        let server = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Search server emoji"));
-        content.append(&search);
-
+        server.append(&search);
         let sections = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let scroll = gtk::ScrolledWindow::new();
-        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroll.set_min_content_height(280);
-        scroll.set_min_content_width(336);
-        scroll.set_child(Some(&sections));
-        content.append(&scroll);
+        server.append(&picker_scroll(&sections));
+        let server_page = stack.add_titled(&server, Some("server"), "Server Emoji");
 
-        // The standard emoji set comes from GTK's own chooser.
-        let standard = gtk::Button::with_label("Standard Emoji…");
-        let app = self.clone();
-        let parent = popover.clone();
-        standard.connect_clicked(move |_| {
-            parent.popdown();
-            let chooser = gtk::EmojiChooser::new();
-            chooser.set_parent(&app.emoji_button);
-            let target = app.clone();
-            chooser.connect_emoji_picked(move |_, emoji| target.insert_composer_text(emoji));
-            chooser.connect_closed(|chooser| chooser.unparent());
-            chooser.popup();
-        });
-        content.append(&standard);
+        // Standard emoji, built the first time the tab opens.
+        let standard = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        stack.add_titled(&standard, Some("standard"), "Standard");
+        let built = Rc::new(std::cell::Cell::new(false));
+        let ensure_standard = {
+            let app = self.clone();
+            let standard = standard.clone();
+            let stack = stack.clone();
+            move || {
+                if stack.visible_child_name().as_deref() == Some("standard") && !built.replace(true)
+                {
+                    app.fill_standard_emoji(&standard);
+                }
+            }
+        };
+        let open = ensure_standard.clone();
+        stack.connect_visible_child_name_notify(move |_| open());
+
+        content.append(&stack);
         popover.set_child(Some(&content));
 
         let app = self.clone();
         let target = sections.clone();
         let entry = search.clone();
         popover.connect_show(move |_| {
-            entry.set_text("");
-            app.fill_emoji_sections(&target, "");
+            let in_dm = app
+                .with_session(|session| session.dm_mode || session.selected_guild.is_none())
+                .unwrap_or(true);
+            server_page.set_visible(!in_dm);
+            tabs.set_visible(!in_dm);
+            if in_dm {
+                stack.set_visible_child_name("standard");
+            } else {
+                entry.set_text("");
+                app.fill_emoji_sections(&target, "");
+            }
+            ensure_standard();
         });
         let app = self.clone();
         let target = sections.clone();
@@ -567,6 +590,78 @@ impl AppState {
             app.fill_emoji_sections(&target, &entry.text().to_lowercase());
         });
         self.emoji_button.set_popover(Some(&popover));
+    }
+
+    /// The Unicode emoji by category, with a search over names and
+    /// shortcodes.
+    fn fill_standard_emoji(self: &Rc<Self>, page: &gtk::Box) {
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("Search emoji"));
+        page.append(&search);
+        let groups = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        page.append(&picker_scroll(&groups));
+
+        let query = Rc::new(std::cell::RefCell::new(String::new()));
+        let mut parts: Vec<(gtk::Label, gtk::FlowBox, Rc<Vec<String>>)> = Vec::new();
+        for group in emojis::Group::iter() {
+            let heading = label(&group_title(group).to_uppercase(), &["kc-category"]);
+            let flow = gtk::FlowBox::new();
+            flow.set_selection_mode(gtk::SelectionMode::None);
+            flow.set_max_children_per_line(8);
+            flow.set_min_children_per_line(8);
+            flow.set_homogeneous(true);
+            let mut keys = Vec::new();
+            // Discord's emoji go up to Unicode 15.1; newer ones may be
+            // missing from the system emoji font and draw as boxes.
+            for emoji in group.emojis().filter(|emoji| {
+                emoji
+                    .skin_tone()
+                    .is_none_or(|tone| tone == emojis::SkinTone::Default)
+                    && emoji.unicode_version() <= emojis::UnicodeVersion::new(15, 1)
+            }) {
+                let button = gtk::Button::with_label(emoji.as_str());
+                button.add_css_class("flat");
+                button.add_css_class("kc-picker-emoji");
+                button.add_css_class("kc-standard-emoji");
+                let code = emoji.shortcode().unwrap_or(emoji.name());
+                button.set_tooltip_text(Some(&format!(":{code}:")));
+                let text = emoji.as_str();
+                let app = self.clone();
+                button.connect_clicked(move |_| app.insert_composer_text(text));
+                flow.insert(&button, -1);
+                let mut key = emoji.name().to_lowercase();
+                for code in emoji.shortcodes() {
+                    key.push(' ');
+                    key.push_str(code);
+                }
+                keys.push(key);
+            }
+            let keys = Rc::new(keys);
+            let matches = keys.clone();
+            let wanted = query.clone();
+            flow.set_filter_func(move |child| {
+                let wanted = wanted.borrow();
+                wanted.is_empty()
+                    || usize::try_from(child.index())
+                        .ok()
+                        .and_then(|index| matches.get(index))
+                        .is_some_and(|key| key.contains(wanted.as_str()))
+            });
+            groups.append(&heading);
+            groups.append(&flow);
+            parts.push((heading, flow, keys));
+        }
+        search.connect_search_changed(move |entry| {
+            let text = entry.text().to_lowercase();
+            *query.borrow_mut() = text.clone();
+            for (heading, flow, keys) in &parts {
+                flow.invalidate_filter();
+                // A category with nothing left disappears, heading and all.
+                let any = text.is_empty() || keys.iter().any(|key| key.contains(text.as_str()));
+                heading.set_visible(any);
+                flow.set_visible(any);
+            }
+        });
     }
 
     fn fill_emoji_sections(self: &Rc<Self>, sections: &gtk::Box, query: &str) {
@@ -1023,5 +1118,30 @@ impl AppState {
         } else {
             self.typing_toggle.add_css_class("kc-typing-hidden");
         }
+    }
+}
+
+/// The scrolled area under a picker's search entry.
+fn picker_scroll(child: &gtk::Box) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(280);
+    scroll.set_min_content_width(336);
+    scroll.set_child(Some(child));
+    scroll
+}
+
+/// A Unicode emoji category's name, as Discord shows it.
+fn group_title(group: emojis::Group) -> &'static str {
+    match group {
+        emojis::Group::SmileysAndEmotion => "Smileys & Emotion",
+        emojis::Group::PeopleAndBody => "People & Body",
+        emojis::Group::AnimalsAndNature => "Animals & Nature",
+        emojis::Group::FoodAndDrink => "Food & Drink",
+        emojis::Group::TravelAndPlaces => "Travel & Places",
+        emojis::Group::Activities => "Activities",
+        emojis::Group::Objects => "Objects",
+        emojis::Group::Symbols => "Symbols",
+        emojis::Group::Flags => "Flags",
     }
 }

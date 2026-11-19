@@ -233,6 +233,19 @@ const CSS: &str = r#"
     color: @accent_color;
 }
 
+/* Notices at the top of the window. */
+.kc-notice {
+    background-color: mix(@window_bg_color, @window_fg_color, 0.16);
+    border-radius: 999px;
+    padding: 4px 6px 4px 18px;
+    margin: 0 12px 6px 12px;
+    box-shadow: 0 2px 8px alpha(black, 0.35);
+}
+
+.kc-standard-emoji label {
+    font-size: 1.45em;
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;

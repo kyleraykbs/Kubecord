@@ -11,6 +11,8 @@ repository.workspace = true
 ashpd.workspace = true
 anyhow.workspace = true
 async-channel = "2"
+# Standard emoji for the picker: characters, names, groups, shortcodes.
+emojis = "0.9"
 glib.workspace = true
 gstreamer.workspace = true
 gtk = { workspace = true, features = ["v4_14"] }

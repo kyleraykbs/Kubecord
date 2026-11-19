@@ -423,21 +423,16 @@ impl AppState {
     /// Says Discord wants a captcha, which kylecord cannot show, and offers
     /// to finish in the browser where the user is signed in.
     pub(crate) fn captcha_needed(&self, text: &str, url: &str) {
-        let toast = adw::Toast::builder()
-            .title(text)
-            .button_label("Open in Browser")
-            .timeout(10)
-            .build();
         let window = self.window.clone();
         let url = url.to_owned();
-        toast.connect_button_clicked(move |_| {
+        let open = Box::new(move || {
             gtk::UriLauncher::new(&url).launch(
                 Some(&window),
                 None::<&gtk::gio::Cancellable>,
                 |_| {},
             );
         });
-        self.toasts.add_toast(toast);
+        self.notify(text, Some(("Open in Browser", open)), 10);
     }
 
     /// Blocks a user.

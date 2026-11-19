@@ -28,7 +28,8 @@ pub(crate) struct Model {
 pub(crate) struct AppState {
     pub window: adw::ApplicationWindow,
     pub stack: gtk::Stack,
-    pub toasts: adw::ToastOverlay,
+    /// Notices at the top of the window (see [`AppState::notify`]).
+    pub notices: gtk::Box,
 
     // Login.
     pub token_entry: gtk::PasswordEntry,
@@ -595,12 +596,12 @@ impl AppState {
         composer_box.append(&attach_button);
         composer_box.append(&composer_overlay);
         composer_box.append(&typing_toggle);
-        composer_box.append(&gif_button);
         composer_box.append(&emoji_button);
+        composer_box.append(&gif_button);
         // Padding lives on the children so the rounded background reaches
         // the edges.
         attach_button.set_margin_start(6);
-        emoji_button.set_margin_end(6);
+        gif_button.set_margin_end(6);
 
         let completion_list = gtk::ListBox::new();
         completion_list.set_selection_mode(gtk::SelectionMode::Browse);
@@ -718,9 +719,16 @@ impl AppState {
         body.append(&sidebar_paned);
         stack.add_named(&body, Some("chat"));
 
-        let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&stack));
-        window.set_content(Some(&toasts));
+        // Notices drop in at the top, under the header bars, where they do
+        // not cover the message box.
+        let notices = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        notices.set_halign(gtk::Align::Center);
+        notices.set_valign(gtk::Align::Start);
+        notices.set_margin_top(54);
+        let page = gtk::Overlay::new();
+        page.set_child(Some(&stack));
+        page.add_overlay(&notices);
+        window.set_content(Some(&page));
         window.set_size_request(720, 420);
 
         let images = ImageCache::new(runtime.clone());
@@ -728,7 +736,7 @@ impl AppState {
         Rc::new(Self {
             window,
             stack,
-            toasts,
+            notices,
             token_entry,
             label_entry,
             login_button,
@@ -822,15 +830,82 @@ impl AppState {
         })
     }
 
-    /// Shows a transient message at the bottom of the window. Empty text is
+    /// Shows a transient message at the top of the window. Empty text is
     /// ignored, so callers can pass a cleared status through.
     pub(crate) fn set_status(&self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let toast = adw::Toast::new(text);
-        toast.set_timeout(4);
-        self.toasts.add_toast(toast);
+        self.notify(text, None, 4);
+    }
+
+    /// A notice at the top of the window, with an optional action button.
+    /// It goes after `seconds`, or when closed or acted on; at most three
+    /// show at once.
+    pub(crate) fn notify(&self, text: &str, action: Option<(&str, NoticeAction)>, seconds: u32) {
+        let label = gtk::Label::new(Some(text));
+        label.set_wrap(true);
+        label.set_max_width_chars(60);
+        label.set_xalign(0.0);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("kc-notice");
+        row.append(&label);
+        let revealer = gtk::Revealer::new();
+        revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+        revealer.set_child(Some(&row));
+        if let Some((title, callback)) = action {
+            let button = gtk::Button::with_label(title);
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Center);
+            let notice = revealer.downgrade();
+            button.connect_clicked(move |_| {
+                callback();
+                if let Some(notice) = notice.upgrade() {
+                    dismiss_notice(&notice);
+                }
+            });
+            row.append(&button);
+        }
+        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.add_css_class("flat");
+        close.add_css_class("circular");
+        close.set_valign(gtk::Align::Center);
+        close.set_tooltip_text(Some("Dismiss"));
+        let notice = revealer.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(notice) = notice.upgrade() {
+                dismiss_notice(&notice);
+            }
+        });
+        row.append(&close);
+
+        self.notices.append(&revealer);
+        let shown = revealer.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(notice) = shown.upgrade() {
+                notice.set_reveal_child(true);
+            }
+        });
+        // The oldest makes way.
+        let mut showing = Vec::new();
+        let mut child = self.notices.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if let Ok(notice) = widget.downcast::<gtk::Revealer>()
+                && !notice.has_css_class("kc-leaving")
+            {
+                showing.push(notice);
+            }
+        }
+        for notice in showing.iter().take(showing.len().saturating_sub(3)) {
+            dismiss_notice(notice);
+        }
+        let notice = revealer.downgrade();
+        glib::timeout_add_seconds_local_once(seconds, move || {
+            if let Some(notice) = notice.upgrade() {
+                dismiss_notice(&notice);
+            }
+        });
     }
 
     /// Runs `future` on the Tokio runtime, then `done` with its result on the
@@ -871,4 +946,25 @@ impl AppState {
         let session = model.sessions.get_mut(&active)?;
         Some(write(session))
     }
+}
+
+/// What a notice's action button does.
+pub(crate) type NoticeAction = Box<dyn Fn()>;
+
+/// Slides a notice away, then removes it.
+fn dismiss_notice(notice: &gtk::Revealer) {
+    if notice.has_css_class("kc-leaving") {
+        return;
+    }
+    notice.add_css_class("kc-leaving");
+    notice.set_reveal_child(false);
+    let gone = notice.downgrade();
+    let wait = u64::from(notice.transition_duration()) + 50;
+    glib::timeout_add_local_once(std::time::Duration::from_millis(wait), move || {
+        if let Some(notice) = gone.upgrade()
+            && let Some(parent) = notice.parent().and_downcast::<gtk::Box>()
+        {
+            parent.remove(&notice);
+        }
+    });
 }
