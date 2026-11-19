@@ -14,6 +14,7 @@ use libadwaita::prelude::*;
 
 use kc_media::decode::VideoFeed;
 use kc_media::portal::{CameraAccess, ShareSources};
+use kc_media::share_audio::AudioApp;
 use kc_media::video::{
     EncodedFrame, FrameTap, PreparedCapture, VideoSettings, VideoSource, is_keyframe,
 };
@@ -561,6 +562,48 @@ pub(crate) fn quality_controls(
     }
 }
 
+/// Where a stream's sound can come from, in the order of
+/// `CapturePreferences::share_audio`.
+const AUDIO_MODES: [&str; 4] = [
+    "No Sound",
+    "Desktop Audio",
+    "One Application",
+    "Patchbay Node",
+];
+
+/// What each of [`AUDIO_MODES`] does.
+const AUDIO_MODE_HELP: [&str; 4] = [
+    "The stream is silent.",
+    "Everything playing to your default output, except kylecord itself, so viewers don't hear the call back.",
+    "Only the program chosen below, wherever it plays. Programs are listed while they have sound open; Refresh looks again.",
+    "Adds an output named kylecord Go Live while you stream. Connect anything to it in your patchbay, or choose it as a program's output; viewers hear what reaches it.",
+];
+
+/// Keeps the program chosen for one-program sound, for this stream and
+/// the next.
+fn remember_program(
+    app: &Rc<AppState>,
+    prefs: &Rc<RefCell<CapturePreferences>>,
+    chosen: &AudioApp,
+) {
+    // A program listed while silent carries a note in its name.
+    let name = chosen
+        .name
+        .strip_suffix(" (no sound right now)")
+        .unwrap_or(&chosen.name)
+        .to_owned();
+    let key = chosen.key.clone();
+    {
+        let mut prefs = prefs.borrow_mut();
+        prefs.share_audio_app = Some(key.clone());
+        prefs.share_audio_app_name = Some(name.clone());
+    }
+    app.update_prefs(move |prefs| {
+        prefs.share_audio_app = Some(key.clone());
+        prefs.share_audio_app_name = Some(name.clone());
+    });
+}
+
 pub(crate) fn setting_row(title: &str, widget: &impl IsA<gtk::Widget>) -> adw::ActionRow {
     let row = adw::ActionRow::builder().title(title).build();
     widget.set_valign(gtk::Align::Center);
@@ -817,6 +860,173 @@ impl AppState {
 
     /// The Go Live popout: what to share, an optional preview, and one-time
     /// stream settings. A previewed screen goes live without asking again.
+    /// Where the stream's sound comes from: a choice of none, all desktop
+    /// sound, one program, or a node for a patchbay. With one program, a
+    /// list of programs that have sound and a button to look again. The
+    /// choice is kept for next time.
+    fn stream_audio_controls(self: &Rc<Self>, prefs: Rc<RefCell<CapturePreferences>>) -> gtk::Box {
+        let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        group.append(&caption("Stream Audio"));
+        let modes: Vec<String> = AUDIO_MODES.iter().map(|name| (*name).to_owned()).collect();
+        let mode = string_dropdown(&modes);
+        mode.set_selected(prefs.borrow().share_audio.min(AUDIO_MODES.len() as u32 - 1));
+        group.append(&mode);
+        let help = gtk::Label::new(Some(AUDIO_MODE_HELP[mode.selected() as usize]));
+        help.set_xalign(0.0);
+        help.set_wrap(true);
+        help.add_css_class("dim-label");
+        help.add_css_class("caption");
+        group.append(&help);
+
+        // The program, for one-program sound.
+        let program = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        program.set_margin_top(6);
+        program.append(&caption("Application"));
+        let picker = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let list = gtk::DropDown::from_strings(&["Looking…"]);
+        list.set_hexpand(true);
+        list.set_sensitive(false);
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.set_tooltip_text(Some("Look again for programs with sound"));
+        picker.append(&list);
+        picker.append(&refresh);
+        program.append(&picker);
+        program.set_visible(mode.selected() == 2);
+        group.append(&program);
+
+        // The programs in the list, in its order.
+        let shown: Rc<RefCell<Vec<AudioApp>>> = Rc::default();
+        // Set while the list is being refilled, which also selects.
+        let filling = Rc::new(Cell::new(false));
+
+        let fill: Rc<dyn Fn()> = {
+            let app = self.clone();
+            let list = list.clone();
+            let shown = shown.clone();
+            let filling = filling.clone();
+            let prefs = prefs.clone();
+            Rc::new(move || {
+                list.set_sensitive(false);
+                let list = list.clone();
+                let shown = shown.clone();
+                let filling = filling.clone();
+                let prefs = prefs.clone();
+                spawn_local(
+                    &app,
+                    async {
+                        tokio::task::spawn_blocking(kc_media::share_audio::applications)
+                            .await
+                            .unwrap_or_else(|error| {
+                                Err(kc_media::error::Error::Message(error.to_string()))
+                            })
+                    },
+                    move |app, found| {
+                        let (mut apps, problem) = match found {
+                            Ok(apps) => (apps, None),
+                            Err(error) => (Vec::new(), Some(error.to_string())),
+                        };
+                        // The program chosen before stays choosable while it
+                        // has no sound open; it is connected once it does.
+                        let (saved, saved_name) = {
+                            let prefs = prefs.borrow();
+                            (
+                                prefs.share_audio_app.clone(),
+                                prefs.share_audio_app_name.clone(),
+                            )
+                        };
+                        if let Some(key) = &saved
+                            && !apps.iter().any(|candidate| &candidate.key == key)
+                        {
+                            apps.insert(
+                                0,
+                                AudioApp {
+                                    key: key.clone(),
+                                    name: format!(
+                                        "{} (no sound right now)",
+                                        saved_name.unwrap_or_else(|| key.clone())
+                                    ),
+                                },
+                            );
+                        }
+                        filling.set(true);
+                        if apps.is_empty() {
+                            let text = match &problem {
+                                Some(_) => "Could not list programs",
+                                None => "No programs have sound open",
+                            };
+                            list.set_model(Some(&gtk::StringList::new(&[text])));
+                            list.set_tooltip_text(problem.as_deref());
+                        } else {
+                            let names: Vec<&str> = apps
+                                .iter()
+                                .map(|candidate| candidate.name.as_str())
+                                .collect();
+                            list.set_model(Some(&gtk::StringList::new(&names)));
+                            list.set_tooltip_text(None);
+                            let index = saved
+                                .and_then(|key| {
+                                    apps.iter().position(|candidate| candidate.key == key)
+                                })
+                                .unwrap_or(0);
+                            list.set_selected(index as u32);
+                            list.set_sensitive(true);
+                        }
+                        filling.set(false);
+                        if let Some(problem) = problem {
+                            tracing::warn!(%problem, "could not list programs with sound");
+                        }
+                        let first = apps.get(list.selected() as usize).cloned();
+                        *shown.borrow_mut() = apps;
+                        // With nothing chosen before, the first one is.
+                        if prefs.borrow().share_audio_app.is_none()
+                            && let Some(first) = first
+                        {
+                            remember_program(app, &prefs, &first);
+                        }
+                    },
+                );
+            })
+        };
+
+        {
+            let app = self.clone();
+            let shown = shown.clone();
+            let prefs = prefs.clone();
+            list.connect_selected_notify(move |list| {
+                if filling.get() {
+                    return;
+                }
+                if let Some(chosen) = shown.borrow().get(list.selected() as usize) {
+                    remember_program(&app, &prefs, chosen);
+                }
+            });
+        }
+        {
+            let fill = fill.clone();
+            refresh.connect_clicked(move |_| fill());
+        }
+        {
+            let app = self.clone();
+            let program = program.clone();
+            let fill = fill.clone();
+            let listed = Cell::new(false);
+            mode.connect_selected_notify(move |row| {
+                let chosen = row.selected();
+                help.set_label(AUDIO_MODE_HELP[chosen as usize]);
+                prefs.borrow_mut().share_audio = chosen;
+                app.update_prefs(|prefs| prefs.share_audio = chosen);
+                program.set_visible(chosen == 2);
+                if chosen == 2 && !listed.replace(true) {
+                    fill();
+                }
+            });
+        }
+        if mode.selected() == 2 {
+            fill();
+        }
+        group
+    }
+
     pub(crate) fn show_share_popup(self: &Rc<Self>, account: AccountId) {
         let Popout {
             dialog,
@@ -843,13 +1053,7 @@ impl AppState {
         page.append(&camera_list);
         let camera_access: Rc<RefCell<Option<CameraAccess>>> = Rc::new(RefCell::new(None));
 
-        let audio = gtk::Switch::new();
-        audio.set_active(true);
-        let audio_row = setting_row("Share System Audio", &audio);
-        audio_row.set_activatable_widget(Some(&audio));
-        let audio_group = adw::PreferencesGroup::new();
-        audio_group.add(&audio_row);
-        page.append(&audio_group);
+        page.append(&self.stream_audio_controls(prefs.clone()));
 
         let selected_camera = {
             let access = camera_access.clone();
@@ -1003,7 +1207,11 @@ impl AppState {
         action.connect_clicked(move |_| {
             let settings = prefs.borrow().video_settings();
             let delay_ms = prefs.borrow().stream_delay_ms;
-            let audio = audio.is_active();
+            let audio = prefs.borrow().audio_share();
+            if prefs.borrow().share_audio == 2 && audio.is_none() {
+                app.set_status("Choose the program to share sound from");
+                return;
+            }
             if source.selected() == CAMERA_SOURCE {
                 let Some((access, node_id)) = selected_camera() else {
                     app.set_status("No camera available");

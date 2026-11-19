@@ -85,12 +85,16 @@
               inherit cargoArtifacts;
               pname = "kylecord";
               version = "0.1.0";
-              gappsWrapperArgs = [
-                "--prefix"
-                "GST_PLUGIN_SYSTEM_PATH_1_0"
-                ":"
-                (lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins)
-              ];
+              # Arguments for the launcher wrapGAppsHook writes. (Set as an
+              # attribute they are ignored; the hook's own list is added to.)
+              # Go Live sound uses pw-cli, pw-dump and pw-link; the system's
+              # own come first, matching its PipeWire.
+              preFixup = ''
+                gappsWrapperArgs+=(
+                  --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}"
+                  --suffix PATH : "${lib.makeBinPath [ pkgs.pipewire ]}"
+                )
+              '';
               meta = {
                 description = "A Discord client";
                 license = lib.licenses.gpl3Only;

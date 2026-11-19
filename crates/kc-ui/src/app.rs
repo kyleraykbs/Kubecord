@@ -145,6 +145,12 @@ pub fn run() -> glib::ExitCode {
         if let Ok(popup) = std::env::var("KYLECORD_POPUP") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
+                // The share popup needs no account until Go Live is pressed,
+                // so it can be looked at without signing in.
+                if popup == "share" && app_state.active().is_none() {
+                    app_state.show_share_popup(0);
+                    return;
+                }
                 let Some((account, _, store)) = app_state.active() else {
                     return;
                 };

@@ -14,6 +14,8 @@ use tracing::debug;
 use crate::delay::DelayedSender;
 use crate::error::{Error, Result};
 use crate::receive::{ReceiveStats, RemoteAudio};
+use crate::share_audio::{AudioShare, Linker, VirtualOutput};
+
 use kc_voice::VoiceHandle;
 
 const SAMPLE_RATE: u32 = 48_000;
@@ -58,9 +60,34 @@ impl Capture {
         Self::start_with_source(&pipeline, on_frame)
     }
 
+    /// Captures what is played into the output named `node_name` (its
+    /// monitor), such as kylecord's own [`VirtualOutput`].
+    pub fn start_monitor_of(
+        node_name: &str,
+        on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Result<Self> {
+        let pipeline = format!(
+            "pulsesrc device=\"{node_name}.monitor\" client-name=kylecord \
+             ! audioconvert ! audioresample \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
+             ! appsink name=sink sync=false max-buffers=8 drop=true"
+        );
+        Self::start_with_source(&pipeline, on_frame)
+    }
+
     fn start_with_source(
         source: &str,
+        on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Result<Self> {
+        Self::start_configured(source, on_frame, |_| {})
+    }
+
+    /// Starts `source`, letting `configure` set what a launch line cannot
+    /// before it plays.
+    fn start_configured(
+        source: &str,
         mut on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+        configure: impl FnOnce(&gst::Pipeline),
     ) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
         let element = gst::parse::launch(source)
@@ -68,6 +95,7 @@ impl Capture {
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| Error::Message("capture pipeline is not a pipeline".into()))?;
+        configure(&pipeline);
         let appsink = pipeline
             .by_name("sink")
             .and_then(|element| element.downcast::<gstreamer_app::AppSink>().ok())
@@ -122,16 +150,87 @@ impl Drop for Capture {
     }
 }
 
+/// Sound captured for a stream. Everything goes through a virtual output
+/// of kylecord's own (`kylecord Go Live`), recorded from its monitor:
+/// kylecord connects other programs into it, or a patchbay does.
+pub struct SharedSound {
+    // Dropped in this order: stop connecting, stop recording, then remove
+    // the output.
+    _linker: Option<Linker>,
+    _capture: Capture,
+    _output: Option<VirtualOutput>,
+}
+
+impl SharedSound {
+    /// Starts capturing `share` in 20 ms stereo frames.
+    pub fn start(
+        share: &AudioShare,
+        on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Result<Self> {
+        if !crate::share_audio::tools_available() {
+            return match share {
+                // Desktop sound can still come from the default output's
+                // monitor, kylecord's own sound included.
+                AudioShare::Desktop => {
+                    tracing::warn!(
+                        "pw-cli, pw-dump or pw-link missing; sharing everything the default output plays"
+                    );
+                    Ok(Self {
+                        _linker: None,
+                        _capture: Capture::start_monitor(on_frame)?,
+                        _output: None,
+                    })
+                }
+                _ => Err(Error::Message(
+                    "this needs PipeWire's pw-cli, pw-dump and pw-link".into(),
+                )),
+            };
+        }
+        let name = match share {
+            // The same name every time, so a patchbay remembers it.
+            AudioShare::Node => crate::share_audio::NODE_NAME.to_owned(),
+            // A name of its own, so the linker finds this output and not
+            // another kylecord's.
+            _ => format!(
+                "{}-{}-{}",
+                crate::share_audio::NODE_NAME,
+                std::process::id(),
+                CAPTURE_COUNT.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        let output = VirtualOutput::create(&name)?;
+        let capture = Capture::start_monitor_of(&name, on_frame)?;
+        let linker = match share {
+            AudioShare::Node => None,
+            share => Some(Linker::start(name, share.clone())),
+        };
+        tracing::info!(?share, "sharing sound with the stream");
+        Ok(Self {
+            _linker: linker,
+            _capture: capture,
+            _output: Some(output),
+        })
+    }
+}
+
+/// Numbers each stream sound capture, for unique node names.
+static CAPTURE_COUNT: AtomicU32 = AtomicU32::new(0);
+
 /// System-audio capture for a Go Live stream connection. The stream's audio
 /// SSRC is separate from the parent voice connection; Discord expects this on
 /// the stream connection with the SOUNDSHARE speaking flag.
 pub struct ScreenAudio {
-    _capture: Capture,
+    _sound: SharedSound,
     voice: VoiceHandle,
 }
 
 impl ScreenAudio {
-    pub fn start(voice: VoiceHandle, bitrate: u32, delay_ms: u64) -> Result<Self> {
+    pub fn start(
+        voice: VoiceHandle,
+        bitrate: u32,
+        delay_ms: u64,
+        share: AudioShare,
+    ) -> Result<Self> {
         let encoder = Arc::new(Mutex::new(
             Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
                 .map_err(|error| Error::Message(format!("opus encoder: {error}")))?,
@@ -147,22 +246,22 @@ impl ScreenAudio {
             std::time::Duration::from_millis(delay_ms),
             move |packet, frame_ms| send_voice.send_soundshare_audio(packet, frame_ms),
         );
-        let capture = match Capture::start_monitor(move |frame| {
+        let on_frame = move |frame: Vec<i16>| {
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
                 Ok(packet) => delayed.send(packet, 20),
                 Err(error) => debug!(%error, "screen audio encode failed"),
             }
-        }) {
-            Ok(capture) => capture,
+        };
+        let sound = match SharedSound::start(&share, on_frame) {
+            Ok(sound) => sound,
             Err(error) => {
                 voice.set_speaking(0);
                 return Err(error);
             }
         };
-
         Ok(Self {
-            _capture: capture,
+            _sound: sound,
             voice,
         })
     }

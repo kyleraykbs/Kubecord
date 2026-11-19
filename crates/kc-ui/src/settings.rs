@@ -73,6 +73,13 @@ pub struct CapturePreferences {
     /// What the screen-share picker offers: 0 screens and windows, 1
     /// screens, 2 windows.
     pub share_source: u32,
+    /// Where a stream's sound comes from: 0 none, 1 everything playing
+    /// (except kylecord), 2 one program, 3 a node for a patchbay.
+    pub share_audio: u32,
+    /// The program shared when `share_audio` is 2, by its
+    /// [`kc_media::share_audio::AudioApp::key`], and the name it showed.
+    pub share_audio_app: Option<String>,
+    pub share_audio_app_name: Option<String>,
     /// Width of the channel sidebar in pixels.
     pub sidebar_width: i32,
     /// Start the camera preview as soon as the camera popup opens.
@@ -134,6 +141,9 @@ impl Default for CapturePreferences {
             output_volume: 1.0,
             camera: String::new(),
             share_source: 0,
+            share_audio: 1,
+            share_audio_app: None,
+            share_audio_app_name: None,
             sidebar_width: SIDEBAR_WIDTH,
             always_preview: false,
             captcha_in_app: true,
@@ -192,6 +202,21 @@ impl CapturePreferences {
         let mut prefs: Self = serde_json::from_slice(&bytes).unwrap_or_default();
         prefs.normalize();
         prefs
+    }
+
+    /// Where a stream's sound comes from, or `None` for no sound. Choosing
+    /// one program without having picked it shares nothing.
+    pub fn audio_share(&self) -> Option<kc_media::share_audio::AudioShare> {
+        use kc_media::share_audio::AudioShare;
+        match self.share_audio {
+            1 => Some(AudioShare::Desktop),
+            2 => self
+                .share_audio_app
+                .clone()
+                .map(|key| AudioShare::Application { key }),
+            3 => Some(AudioShare::Node),
+            _ => None,
+        }
     }
 
     /// Pushes the chosen devices and volumes into the media pipelines.
@@ -286,6 +311,9 @@ impl CapturePreferences {
         }
         if self.camera_format > 2 {
             self.camera_format = 0;
+        }
+        if self.share_audio > 3 {
+            self.share_audio = 1;
         }
         if self.share_source > 2 {
             self.share_source = 0;

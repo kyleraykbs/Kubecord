@@ -19,6 +19,7 @@ use kc_media::audio::{ScreenAudio, VoiceAudio};
 use kc_media::decode::VideoFeed;
 use kc_media::delay::DelayedSender;
 use kc_media::portal::{CameraAccess, ShareSources};
+use kc_media::share_audio::AudioShare;
 use kc_media::video::{EncodedFrame, PreparedCapture, VideoSettings, VideoSource, is_keyframe};
 use kc_state::{Guild, Store, StoreEvent, User};
 use kc_voice::{self, VoiceEvent, VoiceHandle, VoiceParams};
@@ -204,15 +205,15 @@ pub enum VoiceCommand {
         sources: ShareSources,
         /// The capture the user previewed, to carry on as the stream.
         capture: Option<Box<PreparedCapture>>,
-        /// Also share system audio.
-        audio: bool,
+        /// Where the stream's sound comes from; `None` shares none.
+        audio: Option<AudioShare>,
     },
     StartStreamCamera {
         access: CameraAccess,
         node_id: u32,
         settings: VideoSettings,
         delay_ms: u64,
-        audio: bool,
+        audio: Option<AudioShare>,
     },
     StopStream,
     /// Tune into the stream of someone in the current voice channel.
@@ -306,7 +307,7 @@ pub enum Command {
         delay_ms: u64,
         sources: ShareSources,
         capture: Option<Box<PreparedCapture>>,
-        audio: bool,
+        audio: Option<AudioShare>,
     },
     StartStreamCamera {
         account: AccountId,
@@ -314,7 +315,7 @@ pub enum Command {
         node_id: u32,
         settings: VideoSettings,
         delay_ms: u64,
-        audio: bool,
+        audio: Option<AudioShare>,
     },
     StopStream {
         account: AccountId,
@@ -738,7 +739,7 @@ fn spawn_account(
             stream_delay_ms: 0,
             stream_sources: ShareSources::ScreenOrWindow,
             stream_capture: None,
-            stream_audio: true,
+            stream_audio: Some(AudioShare::Desktop),
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -983,7 +984,7 @@ fn spawn_account(
                             match result {
                                 Ok(source) => {
                                     let delay_ms = voice.stream_delay_ms;
-                                    let share_audio = voice.stream_audio;
+                                    let share_audio = voice.stream_audio.clone();
                                     if let Some(connection) = &mut voice.stream_connection {
                                         tracing::info!("stream source ready");
                                         if voice.stream_settings.adaptive_bitrate {
@@ -993,11 +994,14 @@ fn spawn_account(
                                             voice.stream_settings.keyframe_gap_secs,
                                         )));
                                         connection.source = Some(*source);
-                                        if connection.audio.is_none() && share_audio {
+                                        if connection.audio.is_none()
+                                            && let Some(share) = share_audio
+                                        {
                                             match ScreenAudio::start(
                                                 connection.handle.clone(),
                                                 128_000,
                                                 delay_ms,
+                                                share,
                                             ) {
                                                 Ok(audio) => connection.audio = Some(audio),
                                                 Err(error) => {
@@ -1070,7 +1074,7 @@ struct VoiceRuntime {
     stream_delay_ms: u64,
     stream_sources: ShareSources,
     stream_capture: Option<Box<PreparedCapture>>,
-    stream_audio: bool,
+    stream_audio: Option<AudioShare>,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -2659,7 +2663,7 @@ mod tests {
             stream_delay_ms: 0,
             stream_sources: ShareSources::ScreenOrWindow,
             stream_capture: None,
-            stream_audio: true,
+            stream_audio: Some(AudioShare::Desktop),
             stream_pending: false,
             streaming: false,
             stream_generation: 0,

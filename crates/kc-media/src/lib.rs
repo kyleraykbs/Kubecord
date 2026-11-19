@@ -8,6 +8,7 @@ pub mod error;
 pub mod mjpeg;
 pub mod portal;
 pub mod receive;
+pub mod share_audio;
 pub mod video;
 
 pub use error::{Error, Result};

@@ -113,6 +113,52 @@ async fn main() -> Result<()> {
                 Err(error) => println!("failed: {error} (captcha: {})", error.is_captcha()),
             }
         }
+        "share-audio" => {
+            // `share-audio list`, or `share-audio desktop|node|app <key>
+            // [seconds]`: captures as Go Live would and prints the level
+            // each second. Nothing is sent anywhere.
+            use kc_media::share_audio::{AudioShare, applications};
+            let mode = filtered.get(1).map(String::as_str).unwrap_or("list");
+            if mode == "list" {
+                for app in applications()? {
+                    println!("{}\t{}", app.key, app.name);
+                }
+                return Ok(());
+            }
+            let (share, rest) = match mode {
+                "desktop" => (AudioShare::Desktop, 2),
+                "node" => (AudioShare::Node, 2),
+                "app" => (
+                    AudioShare::Application {
+                        key: filtered
+                            .get(2)
+                            .context("usage: share-audio app <key>")?
+                            .clone(),
+                    },
+                    3,
+                ),
+                other => bail!("unknown share-audio mode {other}"),
+            };
+            let seconds: u64 = filtered.get(rest).and_then(|s| s.parse().ok()).unwrap_or(5);
+            let level = std::sync::Arc::new(std::sync::Mutex::new((0u64, 0f64)));
+            let sink = level.clone();
+            let _sound = kc_media::audio::SharedSound::start(&share, move |frame| {
+                let energy: f64 = frame.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+                let mut level = sink.lock().unwrap();
+                level.0 += 1;
+                level.1 += energy / frame.len() as f64;
+            })?;
+            for second in 1..=seconds {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let (frames, energy) = std::mem::take(&mut *level.lock().unwrap());
+                let rms = if frames > 0 {
+                    (energy / frames as f64).sqrt()
+                } else {
+                    0.0
+                };
+                println!("{second}s: {frames} frames, rms {rms:.0}");
+            }
+        }
         "raw" => {
             let path = filtered.get(1).context("usage: raw /api/path")?;
             let value = http.get_raw(path).await?;
