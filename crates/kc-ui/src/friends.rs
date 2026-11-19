@@ -212,12 +212,19 @@ impl AppState {
                     let Some((_, http, _)) = app.active() else {
                         return;
                     };
-                    app.spawn(
-                        async move { http.accept_friend(id).await },
-                        |app, result| {
-                            if let Err(error) = result {
-                                app.set_status(&format!("Could not accept: {error}"));
-                            }
+                    app.with_captcha(
+                        "Discord wants to make sure you're human before it accepts this friend request.",
+                        move |captcha| {
+                            let http = http.clone();
+                            async move { http.accept_friend(id, captcha.as_ref()).await }
+                        },
+                        move |app, result| match result {
+                            Ok(()) => {}
+                            Err(error) if error.is_captcha() => app.captcha_needed(
+                                "Discord wants a captcha solved to accept this friend request.",
+                                &format!("https://discord.com/users/{id}"),
+                            ),
+                            Err(error) => app.set_status(&format!("Could not accept: {error}")),
                         },
                     );
                 });
@@ -249,8 +256,13 @@ impl AppState {
             return;
         };
         let shown = username.clone();
-        self.spawn(
-            async move { http.add_friend(&username).await },
+        self.with_captcha(
+            "Discord wants to make sure you're human before it sends your friend request.",
+            move |captcha| {
+                let http = http.clone();
+                let username = username.clone();
+                async move { http.add_friend(&username, captcha.as_ref()).await }
+            },
             move |app, result| match result {
                 Ok(()) => app.set_status(&format!("Friend request sent to {shown}")),
                 Err(error) if error.is_captcha() => app.captcha_needed(

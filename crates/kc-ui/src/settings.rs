@@ -62,6 +62,9 @@ pub struct CapturePreferences {
     pub sidebar_width: i32,
     /// Start the camera preview as soon as the camera popup opens.
     pub always_preview: bool,
+    /// Show Discord's captchas in kylecord instead of sending the user to
+    /// the browser.
+    pub captcha_in_app: bool,
 }
 
 /// Default and limits of the resizable channel sidebar.
@@ -92,6 +95,7 @@ impl Default for CapturePreferences {
             share_source: 0,
             sidebar_width: SIDEBAR_WIDTH,
             always_preview: false,
+            captcha_in_app: true,
         }
     }
 }

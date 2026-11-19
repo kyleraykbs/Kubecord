@@ -105,6 +105,7 @@ impl AppState {
             )),
             Some("voice"),
         );
+        pages.add_named(&page_scroll(&self.compatibility_page()), Some("compat"));
 
         let content_view = adw::ToolbarView::new();
         content_view.add_top_bar(&adw::HeaderBar::new());
@@ -114,9 +115,14 @@ impl AppState {
         // Categories, under Discord's two headings.
         let categories = gtk::ListBox::new();
         categories.add_css_class("navigation-sidebar");
-        let entries: [(&str, &str, &str); 2] = [
+        let entries: [(&str, &str, &str); 3] = [
             ("account", "My Account", "avatar-default-symbolic"),
             ("voice", "Voice & Video", "audio-input-microphone-symbolic"),
+            (
+                "compat",
+                "Compatibility",
+                "network-transmit-receive-symbolic",
+            ),
         ];
         for (_, title, icon) in entries {
             let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -203,6 +209,56 @@ impl AppState {
     }
 
     // -- my account ----------------------------------------------------------
+
+    // -- compatibility -------------------------------------------------------
+
+    /// How kylecord handles Discord's checks that expect the official app.
+    fn compatibility_page(self: &Rc<Self>) -> gtk::Box {
+        let page = page_box();
+        page.append(&section_title("Compatibility"));
+        let intro = gtk::Label::new(Some(
+            "How kylecord handles the checks Discord makes for the official app.",
+        ));
+        intro.set_xalign(0.0);
+        intro.set_wrap(true);
+        intro.add_css_class("dim-label");
+        page.append(&intro);
+
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Captchas");
+        group.set_description(Some(
+            "Discord sometimes asks for a captcha, for example before it sends a friend request.",
+        ));
+        let in_app = adw::SwitchRow::new();
+        in_app.set_title("Solve Captchas in kylecord");
+        in_app.set_subtitle(if crate::captcha::AVAILABLE {
+            "Show the captcha here and send the request again once it is solved. When this is off, or the captcha fails, you can finish in your browser instead."
+        } else {
+            "This build of kylecord was made without the captcha view, so captchas are finished in your browser."
+        });
+        in_app.set_active(crate::captcha::AVAILABLE && self.capture.borrow().captcha_in_app);
+        in_app.set_sensitive(crate::captcha::AVAILABLE);
+        let app = self.clone();
+        in_app.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.captcha_in_app = active);
+        });
+        group.add(&in_app);
+
+        let test_row = adw::ActionRow::builder()
+            .title("Test the Captcha View")
+            .subtitle("Opens a test captcha that always passes. Nothing is sent to Discord.")
+            .build();
+        let test = gtk::Button::with_label("Test");
+        test.set_valign(gtk::Align::Center);
+        test.set_sensitive(crate::captcha::AVAILABLE);
+        let app = self.clone();
+        test.connect_clicked(move |_| app.test_captcha());
+        test_row.add_suffix(&test);
+        group.add(&test_row);
+        page.append(&group);
+        page
+    }
 
     fn account_page(self: &Rc<Self>, dialog: &adw::Dialog) -> gtk::Box {
         let page = page_box();

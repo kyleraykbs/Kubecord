@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                 .and_then(|user| user["id"].as_str())
                 .and_then(|id| id.parse::<u64>().ok())
                 .context("no DM recipient with that username")?;
-            match http.accept_friend(kc_core::Snowflake(id)).await {
+            match http.accept_friend(kc_core::Snowflake(id), None).await {
                 Ok(()) => println!("friend request sent"),
                 Err(error) => println!("failed: {error} (captcha: {})", error.is_captcha()),
             }

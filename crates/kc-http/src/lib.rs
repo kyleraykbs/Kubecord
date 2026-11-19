@@ -5,7 +5,7 @@ pub mod client;
 pub mod error;
 mod rate_limit;
 
-pub use client::{Gif, GifCategory, HttpClient, Outgoing, SearchPage};
+pub use client::{CaptchaAnswer, Gif, GifCategory, HttpClient, Outgoing, SearchPage};
 pub use error::{ApiError, Error, Result};
 
 pub const API_BASE: &str = "https://discord.com/api/v9";

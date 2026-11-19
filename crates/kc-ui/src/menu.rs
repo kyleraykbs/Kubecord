@@ -394,9 +394,12 @@ impl AppState {
         let Some((_, http, _)) = self.active() else {
             return;
         };
-        crate::video_setup::spawn_local(
-            self,
-            async move { http.accept_friend(user_id).await },
+        self.with_captcha(
+            "Discord wants to make sure you're human before it sends your friend request.",
+            move |captcha| {
+                let http = http.clone();
+                async move { http.accept_friend(user_id, captcha.as_ref()).await }
+            },
             move |app, result| match result {
                 Ok(()) => {
                     app.set_status("Friend request sent");

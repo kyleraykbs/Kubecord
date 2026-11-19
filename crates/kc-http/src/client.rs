@@ -160,6 +160,20 @@ impl HttpClient {
         body: Option<&Value>,
         context: Option<&Value>,
     ) -> Result<Value> {
+        self.request_json_full(method, path, body, context, None)
+            .await
+    }
+
+    /// A request that may carry a solved captcha, for retrying one that
+    /// Discord answered with [`Error::Captcha`].
+    async fn request_json_full(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        context: Option<&Value>,
+        captcha: Option<&CaptchaAnswer>,
+    ) -> Result<Value> {
         let route = normalise_route(method.as_str(), path);
 
         for attempt in 0..MAX_ATTEMPTS {
@@ -171,6 +185,12 @@ impl HttpClient {
             }
             if let Some(context) = context {
                 request = request.header("x-context-properties", base64_json(context));
+            }
+            if let Some(captcha) = captcha {
+                request = request.header("x-captcha-key", &captcha.key);
+                if let Some(rqtoken) = &captcha.rqtoken {
+                    request = request.header("x-captcha-rqtoken", rqtoken);
+                }
             }
 
             let response = request.send().await?;
@@ -419,24 +439,30 @@ impl HttpClient {
     // -- relationships ---------------------------------------------------
 
     /// Sends a friend request by unique username.
-    pub async fn add_friend(&self, username: &str) -> Result<()> {
-        self.request_json_in(
+    pub async fn add_friend(&self, username: &str, captcha: Option<&CaptchaAnswer>) -> Result<()> {
+        self.request_json_full(
             Method::POST,
             "/users/@me/relationships",
             Some(&json!({ "username": username, "discriminator": null })),
             Some(&json!({ "location": "Add Friend" })),
+            captcha,
         )
         .await?;
         Ok(())
     }
 
     /// Accepts an incoming request or sends one to a known user.
-    pub async fn accept_friend(&self, user_id: Snowflake) -> Result<()> {
-        self.request_json_in(
+    pub async fn accept_friend(
+        &self,
+        user_id: Snowflake,
+        captcha: Option<&CaptchaAnswer>,
+    ) -> Result<()> {
+        self.request_json_full(
             Method::PUT,
             &format!("/users/@me/relationships/{user_id}"),
             Some(&json!({})),
             Some(&json!({ "location": "Friends" })),
+            captcha,
         )
         .await?;
         Ok(())
@@ -1005,6 +1031,14 @@ fn encode_emoji(emoji: &str) -> String {
         }
     }
     out
+}
+
+/// A solved captcha: the widget's response token, and the request token
+/// from the challenge.
+#[derive(Clone, Debug)]
+pub struct CaptchaAnswer {
+    pub key: String,
+    pub rqtoken: Option<String>,
 }
 
 /// The error for a failed response. A captcha challenge has its own shape

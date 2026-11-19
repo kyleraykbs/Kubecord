@@ -151,6 +151,7 @@ pub fn run() -> glib::ExitCode {
                 match popup.as_str() {
                     "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
                     "share" => app_state.show_share_popup(account),
+                    "captcha" => app_state.test_captcha(),
                     "profile-guild" => {
                         let guild = store.read(|state| state.guilds.keys().next().copied());
                         if let Some(guild) = guild {
@@ -200,7 +201,13 @@ pub fn run() -> glib::ExitCode {
         if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
             let window = state.window.clone();
             let app = app.clone();
-            glib::timeout_add_local_once(Duration::from_secs(7), move || {
+            // `KYLECORD_SCREENSHOT_DELAY` (seconds) waits longer, for pages
+            // that load from the network.
+            let delay = std::env::var("KYLECORD_SCREENSHOT_DELAY")
+                .ok()
+                .and_then(|secs| secs.parse::<u64>().ok())
+                .unwrap_or(7);
+            glib::timeout_add_local_once(Duration::from_secs(delay), move || {
                 if let Err(error) = save_window_png(&window, std::path::Path::new(&path)) {
                     eprintln!("could not save screenshot: {error}");
                 }

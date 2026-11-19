@@ -62,6 +62,10 @@
             libadwaita
             opus
             pipewire
+            # The in-app captcha view (the `captcha` feature); WebKit needs
+            # glib-networking for TLS.
+            webkitgtk_6_0
+            glib-networking
           ] ++ gstPlugins;
 
           commonArgs = {
@@ -112,6 +116,8 @@
               export XDG_DATA_DIRS="${pkgs.libadwaita}/share:${pkgs.gtk4}/share:${pkgs.gsettings-desktop-schemas}/share:$XDG_DATA_DIRS"
               export GST_PLUGIN_SYSTEM_PATH_1_0="${lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}:$GST_PLUGIN_SYSTEM_PATH_1_0"
               export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+              # TLS for the captcha view's WebKit (the package's wrapper adds it).
+              export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules:$GIO_EXTRA_MODULES"
             '';
           };
 
