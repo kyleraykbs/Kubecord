@@ -13,7 +13,9 @@ pub const RESOLUTIONS: [(u32, u32, &str); 4] = [
 
 pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 
-pub const KEYFRAME_INTERVALS: [u32; 4] = [2, 4, 6, 10];
+/// Seconds between scheduled Go Live keyframes; zero sends them only when
+/// needed.
+pub const KEYFRAME_INTERVALS: [u32; 5] = [0, 2, 4, 6, 10];
 
 pub const DROP_AFTER_MS: [u32; 6] = [0, 100, 250, 500, 1000, 2000];
 
@@ -31,7 +33,11 @@ pub struct CapturePreferences {
     pub fps: u32,
     /// `None` means derive the bitrate from resolution and framerate.
     pub bitrate_kbps: Option<u32>,
-    /// Seconds between IDR keyframes.
+    /// Seconds between scheduled Go Live keyframes; zero sends them only
+    /// when a viewer asks or packets are lost.
+    /// Stored under a new name so the old two-second default, which made
+    /// viewers hitch, does not carry over.
+    #[serde(rename = "stream_keyframe_secs")]
     pub keyframe_secs: u32,
     /// Drop a frame when it has waited this long beyond the configured delay.
     /// Zero disables dropping.
@@ -95,7 +101,7 @@ impl Default for CapturePreferences {
             height: 720,
             fps: 30,
             bitrate_kbps: None,
-            keyframe_secs: 2,
+            keyframe_secs: 0,
             drop_frames_after_ms: 250,
             leaky_queue: true,
             retransmit_ms: 2000,
@@ -222,7 +228,7 @@ impl CapturePreferences {
             self.stream_delay_ms = 0;
         }
         if !KEYFRAME_INTERVALS.contains(&self.keyframe_secs) {
-            self.keyframe_secs = 2;
+            self.keyframe_secs = 0;
         }
         if !DROP_AFTER_MS.contains(&self.drop_frames_after_ms) {
             self.drop_frames_after_ms = 250;
@@ -284,6 +290,20 @@ mod tests {
         assert_eq!(settings.bitrate_kbps, 6000);
         assert_eq!(settings.drop_frames_after_ms, 500);
         assert!(!settings.leaky_queue);
+    }
+
+    #[test]
+    fn the_old_keyframe_schedule_does_not_carry_over() {
+        // A settings file from before keyframes became on-demand.
+        let old = r#"{"width":1280,"height":720,"fps":30,"keyframe_secs":2}"#;
+        let mut prefs: CapturePreferences = serde_json::from_str(old).unwrap();
+        prefs.normalize();
+        assert_eq!(prefs.keyframe_secs, 0);
+        assert_eq!(prefs.video_settings().keyframe_secs, 0);
+        // A schedule chosen since then is kept.
+        let chosen = r#"{"stream_keyframe_secs":4}"#;
+        let prefs: CapturePreferences = serde_json::from_str(chosen).unwrap();
+        assert_eq!(prefs.keyframe_secs, 4);
     }
 
     #[test]

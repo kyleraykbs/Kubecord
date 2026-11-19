@@ -286,11 +286,14 @@ pub(crate) fn quality_controls(
 
     let keyframe_names: Vec<String> = KEYFRAME_INTERVALS
         .iter()
-        .map(|seconds| format!("{seconds} s"))
+        .map(|seconds| match seconds {
+            0 => "Only when needed".to_owned(),
+            seconds => format!("Every {seconds} s"),
+        })
         .collect();
     let keyframe = string_dropdown(&keyframe_names);
     keyframe.set_tooltip_text(Some(
-        "For Go Live: how often a full frame is sent unprompted. Viewers that lose the picture request one themselves, so longer intervals give a steadier stream; shorter ones recover sooner if a request is missed. Your camera sends full frames only when one is needed.",
+        "For Go Live: whether full frames are also sent on a schedule. One is always sent when a viewer asks or packets are lost, which is all the official client does; scheduled ones made viewers hitch. Your camera never schedules them.",
     ));
     let retransmit_names: Vec<String> = RETRANSMIT_WINDOWS_MS
         .iter()
@@ -455,8 +458,8 @@ pub(crate) fn quality_controls(
     leaky_row.set_activatable_widget(Some(&leaky));
     let advanced = vec![
         {
-            let row = setting_row("Keyframe Interval", &keyframe);
-            row.set_subtitle("Go Live only; a camera sends keyframes when needed");
+            let row = setting_row("Scheduled Keyframes", &keyframe);
+            row.set_subtitle("Scheduled full frames for Go Live; they can make viewers hitch");
             row
         },
         setting_row("Dropout Recovery Window", &retransmit),
