@@ -224,6 +224,13 @@ impl AppState {
                 http,
                 channel,
             });
+            // Discord now shows you typing; so does the typing line.
+            if let Some(me) = self
+                .with_session(|session| session.user.as_ref().map(|user| user.id))
+                .flatten()
+            {
+                self.note_typing(channel, me);
+            }
         }
     }
 

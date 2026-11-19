@@ -1458,11 +1458,8 @@ impl AppState {
 
     // -- typing ----------------------------------------------------------
 
+    /// Someone, you included, is typing in `channel`.
     pub(crate) fn note_typing(self: &Rc<Self>, channel: Snowflake, user_id: Snowflake) {
-        let me = self.with_session(|session| session.user.as_ref().map(|user| user.id));
-        if me.flatten() == Some(user_id) {
-            return;
-        }
         self.with_session_mut(|session| {
             let list = session.typing.entry(channel).or_default();
             list.retain(|(id, _)| *id != user_id);
@@ -1489,6 +1486,7 @@ impl AppState {
         let names = self
             .with_session_mut(|session| {
                 let channel = session.selected_channel?;
+                let me = session.user.as_ref().map(|user| user.id);
                 let list = session.typing.get_mut(&channel)?;
                 list.retain(|(_, seen)| {
                     seen.elapsed().as_secs() < u64::from(crate::app::TYPING_TIMEOUT_SECS)
@@ -1496,21 +1494,63 @@ impl AppState {
                 let ids: Vec<Snowflake> = list.iter().map(|(id, _)| *id).collect();
                 let guild = session.selected_guild.filter(|_| !session.dm_mode);
                 Some(session.store.read(|state| {
-                    ids.iter()
+                    // Everyone else by name, then you.
+                    let mut names: Vec<String> = ids
+                        .iter()
+                        .filter(|id| Some(**id) != me)
                         .filter_map(|id| state.users.get(id))
                         .map(|user| state.display_name(guild, user))
-                        .collect::<Vec<_>>()
+                        .collect();
+                    if me.is_some_and(|me| ids.contains(&me)) {
+                        names.push(YOU.to_owned());
+                    }
+                    names
                 }))
             })
             .flatten()
             .unwrap_or_default();
-        let text = match names.as_slice() {
-            [] => String::new(),
-            [one] => format!("{one} is typing…"),
-            [one, two] => format!("{one} and {two} are typing…"),
-            [one, two, three] => format!("{one}, {two} and {three} are typing…"),
-            _ => "Several people are typing…".to_owned(),
-        };
-        self.typing_label.set_label(&text);
+        self.typing_label.set_label(&typing_text(&names));
+    }
+}
+
+/// Stands for the account in the typing line.
+const YOU: &str = "you";
+
+/// "A is typing…", "A and B are typing…", "A, B and you are typing…":
+/// everyone by name.
+fn typing_text(names: &[String]) -> String {
+    let Some((last, rest)) = names.split_last() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        if last == YOU {
+            return "You are typing…".to_owned();
+        }
+        return format!("{last} is typing…");
+    }
+    format!("{} and {last} are typing…", rest.join(", "))
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn everyone_typing_is_named() {
+        assert_eq!(typing_text(&[]), "");
+        assert_eq!(typing_text(&names(&["Ana"])), "Ana is typing…");
+        assert_eq!(typing_text(&names(&["you"])), "You are typing…");
+        assert_eq!(
+            typing_text(&names(&["Ana", "you"])),
+            "Ana and you are typing…"
+        );
+        assert_eq!(
+            typing_text(&names(&["Ana", "Bo", "Cy", "Dee", "you"])),
+            "Ana, Bo, Cy, Dee and you are typing…"
+        );
     }
 }

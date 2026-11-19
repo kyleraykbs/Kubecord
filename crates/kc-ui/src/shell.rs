@@ -464,7 +464,8 @@ impl AppState {
         messages_column.append(&spacer);
         messages_column.append(&history_spinner);
         messages_column.append(&messages_list);
-        messages_column.set_margin_bottom(16);
+        // The typing line above the composer supplies the rest of the gap.
+        messages_column.set_margin_bottom(4);
 
         let messages_scroll = gtk::ScrolledWindow::new();
         messages_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -612,38 +613,32 @@ impl AppState {
         blocked_label.set_margin_bottom(12);
         blocked_label.set_visible(false);
 
+        // "Someone is typing", just above the bar. Its line is reserved so
+        // the bar does not move when someone starts typing.
         let typing_label = gtk::Label::new(None);
         typing_label.set_xalign(0.0);
         typing_label.set_margin_start(8);
+        typing_label.set_margin_bottom(2);
         typing_label.add_css_class("caption");
         typing_label.add_css_class("dim-label");
         typing_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        typing_label.set_height_request(18);
+        typing_label.set_valign(gtk::Align::End);
 
         let composer_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
         composer_area.set_margin_start(16);
         composer_area.set_margin_end(16);
         // The same gap below the bar as beside it.
         composer_area.set_margin_bottom(16);
+        composer_area.append(&typing_label);
         composer_area.append(&context_bar);
         composer_area.append(&upload_tray);
         composer_area.append(&composer_box);
         composer_area.append(&blocked_label);
 
-        // "Someone is typing" sits in the gap under the bar, over it rather
-        // than below it, so the gap stays as wide as the sides and the bar
-        // does not move when someone starts typing.
-        typing_label.set_valign(gtk::Align::End);
-        typing_label.set_margin_start(16 + 8);
-        typing_label.set_margin_end(16);
-        typing_label.set_can_target(false);
-        typing_label.add_css_class("kc-typing");
-        let composer_dock = gtk::Overlay::new();
-        composer_dock.set_child(Some(&composer_area));
-        composer_dock.add_overlay(&typing_label);
-
         let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat_column.append(&message_stack);
-        chat_column.append(&composer_dock);
+        chat_column.append(&composer_area);
 
         // -- member list -------------------------------------------------
         let members_count_label = gtk::Label::new(None);

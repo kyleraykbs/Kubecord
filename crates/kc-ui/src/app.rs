@@ -158,7 +158,11 @@ pub fn run() -> glib::ExitCode {
                         if let Some(guild) = guild {
                             app_state.select_guild(guild);
                         }
-                        app_state.typing_label.set_label("Someone is typing…");
+                        // Text for the layout check only: no typing notice
+                        // goes to Discord.
+                        app_state.with_session_mut(|session| {
+                            session.last_typing = Some(std::time::Instant::now());
+                        });
                         app_state.composer.buffer().set_text(if popup == "compose" {
                             "dfsdfsdfsdf"
                         } else {
