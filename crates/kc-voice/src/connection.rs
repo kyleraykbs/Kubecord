@@ -226,6 +226,16 @@ struct VideoPacket {
     payload: Vec<u8>,
     marker: bool,
     timestamp: u32,
+    place: PacketPlace,
+    sent: std::time::Instant,
+}
+
+/// Where a packet sits in its frame, for the log.
+#[derive(Clone, Copy, Debug, Default)]
+struct PacketPlace {
+    index: u16,
+    count: u16,
+    keyframe: bool,
 }
 
 /// Recently sent video packets by sequence number, bounded like
@@ -275,6 +285,8 @@ fn rtx_payload(original_sequence: u16, payload: &[u8]) -> Vec<u8> {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
+/// The least time between keyframes forced because packets were lost.
+const LOSS_KEYFRAME_SPACING: Duration = Duration::from_secs(3);
 /// How often the ping is measured.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -436,7 +448,9 @@ struct SessionState {
     seq_video: u16,
     ts_audio: u32,
     ts_video: u32,
-    video_queue: VecDeque<(Vec<u8>, bool, u32)>,
+    video_queue: VecDeque<(Vec<u8>, bool, u32, PacketPlace)>,
+    /// When a keyframe was last forced because packets were lost.
+    last_loss_keyframe: Option<std::time::Instant>,
     sent_video: SentVideo,
     /// Sequence number of the next packet on the retransmission stream.
     seq_rtx: u16,
@@ -667,12 +681,14 @@ async fn run(
         ts_audio: now_millis() as u32,
         ts_video: now_millis() as u32,
         video_queue: VecDeque::new(),
+        last_loss_keyframe: None,
         sent_video: SentVideo::default(),
         seq_rtx: 0,
         test_drop: std::env::var("KYLECORD_TEST_DROP_VIDEO")
             .ok()
             .and_then(|every| every.parse().ok())
-            .filter(|every| *every > 1),
+            .filter(|every| *every > 1)
+            .inspect(|every| info!(every, "TEST: withholding video packets")),
         sent_audio: SentPackets::default(),
         retransmit_window: DEFAULT_RETRANSMIT_WINDOW,
         retransmits: VecDeque::new(),
@@ -847,6 +863,7 @@ impl SessionState {
             }
             Command::SendVideo { frame, frame_ms } => {
                 let frame_size = frame.len();
+                let keyframe = rtp::is_keyframe(&frame);
                 if self.video_ssrc.is_none() {
                     tracing::debug!(bytes = frame_size, "dropping video frame: no video ssrc");
                     return Ok(true);
@@ -910,9 +927,21 @@ impl SessionState {
                         );
                         self.last_backlog_warn = Some(std::time::Instant::now());
                     }
-                    for (payload, marker) in packets {
+                    let count = packets.len() as u16;
+                    if keyframe {
+                        // Seen next to resend requests, this shows whether
+                        // keyframes are what goes missing.
+                        info!(bytes = frame_size, packets = count, "sending a keyframe");
+                    }
+                    for (index, (payload, marker)) in packets.into_iter().enumerate() {
                         self.video_queue_bytes += payload.len();
-                        self.video_queue.push_back((payload, marker, timestamp));
+                        let place = PacketPlace {
+                            index: index as u16,
+                            count,
+                            keyframe,
+                        };
+                        self.video_queue
+                            .push_back((payload, marker, timestamp, place));
                     }
                 }
                 self.ts_video = self.ts_video.wrapping_add(video_rtp_step(frame_ms));
@@ -977,10 +1006,11 @@ impl SessionState {
             if let Some(packet) = self.retransmits.pop_front() {
                 self.pace_credit -= packet.len() as f64;
                 let _ = self.socket.send_to(&packet, self.remote).await;
-            } else if let Some((payload, marker, timestamp)) = self.video_queue.pop_front() {
+            } else if let Some((payload, marker, timestamp, place)) = self.video_queue.pop_front() {
                 self.video_queue_bytes = self.video_queue_bytes.saturating_sub(payload.len());
                 self.pace_credit -= (payload.len() + PACKET_OVERHEAD) as f64;
-                self.send_rtp_video(&payload, marker, timestamp).await?;
+                self.send_rtp_video(&payload, marker, timestamp, place)
+                    .await?;
             } else {
                 break;
             }
@@ -1093,7 +1123,13 @@ impl SessionState {
         self.srtp.encrypt(&header, &payload).ok()
     }
 
-    async fn send_rtp_video(&mut self, payload: &[u8], marker: bool, timestamp: u32) -> Result<()> {
+    async fn send_rtp_video(
+        &mut self,
+        payload: &[u8],
+        marker: bool,
+        timestamp: u32,
+        place: PacketPlace,
+    ) -> Result<()> {
         let ssrc = self.video_ssrc.unwrap_or(self.audio_ssrc);
         let sequence = self.seq_video;
         let header = RtpHeader::write(marker, PT_H264, sequence, timestamp, ssrc);
@@ -1105,6 +1141,8 @@ impl SessionState {
                 payload: payload.to_vec(),
                 marker,
                 timestamp,
+                place,
+                sent: std::time::Instant::now(),
             },
             self.retransmit_window,
         );
@@ -1876,6 +1914,9 @@ impl SessionState {
             let mut requested = 0usize;
             let mut found = 0usize;
             let mut sample = Vec::new();
+            // For the log: each packet as sequence:index/count in its frame
+            // (K for a keyframe) and how long ago it was first sent.
+            let mut detail: Vec<String> = Vec::new();
             while offset + 4 <= cleartext.len() {
                 let pid = u16::from_be_bytes([cleartext[offset], cleartext[offset + 1]]);
                 let blp = u16::from_be_bytes([cleartext[offset + 2], cleartext[offset + 3]]);
@@ -1912,6 +1953,15 @@ impl SessionState {
                         }
                     } else if let Some(original) = self.sent_video.get(sequence) {
                         found += 1;
+                        if detail.len() < 6 {
+                            detail.push(format!(
+                                "{sequence}:{}/{}{}@{}ms",
+                                original.place.index,
+                                original.place.count,
+                                if original.place.keyframe { "K" } else { "" },
+                                original.sent.elapsed().as_millis()
+                            ));
+                        }
                         if let Some(packet) = self.retransmission(sequence, &original) {
                             self.retransmits.push_back(packet);
                         }
@@ -1926,13 +1976,25 @@ impl SessionState {
             if is_video {
                 // Logged as it happens, so a hitch someone saw can be matched
                 // to the second.
-                info!(requested, found, "video packets asked for again");
-                // Resending the packets has not been seen to unfreeze a
-                // viewer on its own: they waited for the next scheduled
-                // keyframe, up to the whole keyframe interval. A keyframe
-                // now ends the freeze in a fraction of a second. The encoder
-                // limits how often these go out.
-                let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                info!(
+                    requested,
+                    found,
+                    packets = detail.join(" "),
+                    "video packets asked for again"
+                );
+                // A viewer that got a damaged frame stays frozen until a
+                // keyframe, and has not been seen to ask us for one, so one
+                // is sent on loss. Only now and then: sent on every request
+                // they fed a loop, each keyframe followed by more requests.
+                let now = std::time::Instant::now();
+                if found < requested
+                    || self
+                        .last_loss_keyframe
+                        .is_none_or(|last| now.duration_since(last) >= LOSS_KEYFRAME_SPACING)
+                {
+                    self.last_loss_keyframe = Some(now);
+                    let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                }
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;
             } else {
@@ -2164,6 +2226,8 @@ mod tests {
             payload: vec![1, 2, 3],
             marker: true,
             timestamp: 90_000,
+            place: PacketPlace::default(),
+            sent: std::time::Instant::now(),
         };
         sent.insert(7, packet, Duration::from_secs(1));
         let kept = sent.get(7).unwrap();
@@ -2181,6 +2245,8 @@ mod tests {
             payload: vec![0],
             marker: false,
             timestamp: 0,
+            place: PacketPlace::default(),
+            sent: std::time::Instant::now(),
         }
     }
 
