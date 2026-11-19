@@ -100,8 +100,8 @@ pub enum VoiceEvent {
         ssrc: u32,
     },
     ForceKeyframe,
-    /// Round trip to the voice server over UDP, measured every few seconds;
-    /// `None` when the reply did not come back in time.
+    /// Round trip to the voice server (a heartbeat and its acknowledgement),
+    /// measured every few seconds; `None` when none came back in time.
     Ping {
         millis: Option<u32>,
     },
@@ -222,9 +222,8 @@ impl SentPackets {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
-/// How often the UDP keepalive goes out, and so how often the ping is
-/// measured. Discord's own client uses five seconds.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the ping is measured.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Counters for sent video over one reporting period, logged so a viewer's
 /// freeze can be matched to what the network asked of us.
@@ -393,9 +392,9 @@ struct SessionState {
     video_queue_bytes: usize,
     /// What happened to the video being sent since the last report.
     sent: SentStats,
-    /// Keepalives sent and not yet echoed, for measuring the ping.
-    pings: VecDeque<(u32, std::time::Instant)>,
-    ping_counter: u32,
+    /// The heartbeat sent and not yet acknowledged, for measuring the ping:
+    /// its timestamp value and when it went out.
+    ping_pending: Option<(u64, std::time::Instant)>,
     /// Video packets recently asked for again, to notice repeats.
     recent_nacks: HashMap<u16, std::time::Instant>,
     /// Pacer send credit in bytes; refilled from elapsed time at the pacing rate.
@@ -616,8 +615,7 @@ async fn run(
         retransmits: VecDeque::new(),
         video_queue_bytes: 0,
         sent: SentStats::default(),
-        pings: VecDeque::new(),
-        ping_counter: 0,
+        ping_pending: None,
         recent_nacks: HashMap::new(),
         pace_credit: 0.0,
         pace_last: std::time::Instant::now(),
@@ -656,11 +654,13 @@ async fn run(
     send_json(&mut state.write, json!({"op": 15, "d": {"any": 100}})).await?;
     let _ = state.events.send(ready_event);
 
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat));
+    // Heartbeats double as the ping measurement, so they go out at least
+    // every `PING_INTERVAL`, more often than the server asks.
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(heartbeat).min(PING_INTERVAL));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
 
-    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    let mut keepalive = tokio::time::interval(Duration::from_secs(10));
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     keepalive.tick().await;
 
@@ -686,12 +686,24 @@ async fn run(
                 state.report_sent();
             }
             _ = heartbeat.tick() => {
-                let payload = json!({"op": 3, "d": {"t": now_millis(), "seq_ack": state.last_binary_seq}});
+                // A heartbeat still unacknowledged counts as a lost ping.
+                if state.ping_pending.take().is_some() {
+                    let _ = state.events.send(VoiceEvent::Ping { millis: None });
+                }
+                let stamp = now_millis();
+                let payload = json!({"op": 3, "d": {"t": stamp, "seq_ack": state.last_binary_seq}});
                 if send_json(&mut state.write, payload).await.is_err() {
                     break;
                 }
+                state.ping_pending = Some((stamp, std::time::Instant::now()));
             }
-            _ = keepalive.tick() => state.send_keepalive().await,
+            _ = keepalive.tick() => {
+                // Abaddon sends this two-byte UDP keepalive every 10 seconds so
+                // the NAT mapping and the SFU's SSRC state stay alive. (The
+                // server does not echo an eight-byte counter keepalive, so it
+                // cannot be used to measure the ping.)
+                let _ = state.socket.send_to(&[0x13, 0x37], state.remote).await;
+            }
             _ = video_tick.tick() => {
                 state.pace_video().await?;
             }
@@ -1121,7 +1133,18 @@ impl SessionState {
             }
             // What the server wants from our own outgoing video.
             15 => debug!(wants = %d, "media sink wants"),
-            6 => {}
+            // Heartbeat acknowledged: the time since it was sent is the ping.
+            6 => {
+                if let Some((stamp, sent)) = self.ping_pending
+                    && d["t"].as_u64().is_none_or(|echoed| echoed == stamp)
+                {
+                    self.ping_pending = None;
+                    let millis = sent.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                    let _ = self.events.send(VoiceEvent::Ping {
+                        millis: Some(millis),
+                    });
+                }
+            }
             _ => debug!(op, "unhandled voice gateway op"),
         }
         Ok(true)
@@ -1221,43 +1244,7 @@ impl SessionState {
         Ok(())
     }
 
-    /// Sends the UDP keepalive: eight bytes starting with a counter, which
-    /// the server echoes. It keeps the NAT mapping and the server's state
-    /// for us alive, and the time to the echo is the connection's ping.
-    async fn send_keepalive(&mut self) {
-        let now = std::time::Instant::now();
-        // An echo that has not come back by now counts as lost.
-        while self
-            .pings
-            .front()
-            .is_some_and(|(_, sent)| now.duration_since(*sent) >= KEEPALIVE_INTERVAL)
-        {
-            self.pings.pop_front();
-            let _ = self.events.send(VoiceEvent::Ping { millis: None });
-        }
-        self.ping_counter = self.ping_counter.wrapping_add(1);
-        let mut packet = [0u8; 8];
-        packet[..4].copy_from_slice(&self.ping_counter.to_le_bytes());
-        self.pings.push_back((self.ping_counter, now));
-        let _ = self.socket.send_to(&packet, self.remote).await;
-    }
-
     fn handle_udp(&mut self, packet: &[u8]) {
-        if packet.len() == 8 {
-            // A keepalive echoed back.
-            let counter = u32::from_le_bytes([packet[0], packet[1], packet[2], packet[3]]);
-            if let Some(index) = self.pings.iter().position(|(sent, _)| *sent == counter) {
-                let (_, sent) = self
-                    .pings
-                    .remove(index)
-                    .unwrap_or((0, std::time::Instant::now()));
-                let millis = sent.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                let _ = self.events.send(VoiceEvent::Ping {
-                    millis: Some(millis),
-                });
-            }
-            return;
-        }
         if is_rtcp(packet) {
             self.handle_rtcp(packet);
             return;
@@ -1821,6 +1808,9 @@ impl SessionState {
                     .retain(|_, at| now.duration_since(*at) < Duration::from_secs(1));
             }
             if is_video {
+                // Logged as it happens, so a hitch someone saw can be matched
+                // to the second.
+                info!(requested, found, "video packets asked for again");
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;
             } else {
@@ -1849,7 +1839,7 @@ impl SessionState {
                 .get(8..12)
                 .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
             if media == self.video_ssrc || media == Some(0) {
-                tracing::debug!(fmt, ?media, "viewer requested keyframe (PLI/FIR)");
+                info!(fmt, "a viewer asked for a keyframe");
                 self.sent.keyframe_requests += 1;
                 let _ = self.events.send(VoiceEvent::ForceKeyframe);
             }
