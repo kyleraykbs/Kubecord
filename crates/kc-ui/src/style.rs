@@ -446,6 +446,17 @@ const CSS: &str = r#"
     background-color: alpha(black, 0.72);
 }
 
+/* In the corner the controls appear in: up top until the pointer comes
+   over the video, then below the controls. */
+.kc-video-info-yields {
+    transition: margin 120ms ease;
+}
+
+.kc-tile:hover .kc-video-info-yields,
+.kc-popout:hover .kc-video-info-yields {
+    margin-top: 34px;
+}
+
 /* Profile card: an opaque surface so the ring around the avatar, in the
    same colour, cuts cleanly into the banner. */
 .kc-profile-card {

@@ -755,8 +755,12 @@ impl AppState {
             panel.set_halign(gtk::Align::Start);
             panel.set_valign(gtk::Align::Start);
             panel.set_margin_start(6);
-            // Clear of the controls, which share this corner on a tile.
-            panel.set_margin_top(if stage { 6 } else { 40 });
+            panel.set_margin_top(6);
+            // On a tile the controls share this corner while the pointer
+            // is over it, and the panel moves down out of their way.
+            if !stage {
+                panel.add_css_class("kc-video-info-yields");
+            }
             tile.add_overlay(&panel);
         }
 
@@ -849,7 +853,8 @@ impl AppState {
         panel.set_halign(gtk::Align::Start);
         panel.set_valign(gtk::Align::Start);
         panel.set_margin_start(6);
-        panel.set_margin_top(40);
+        panel.set_margin_top(6);
+        panel.add_css_class("kc-video-info-yields");
         panel.set_visible(self.video_info.borrow().shown(key));
         view.add_overlay(&panel);
         let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);

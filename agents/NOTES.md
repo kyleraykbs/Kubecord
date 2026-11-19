@@ -531,3 +531,5 @@ dispatch; contains account data).
 
 - The voice panel's ping bars are 13×11 in a `kc-ping-button` (rounded rectangle, 6 px radius, no `circular`). Lit bars take the icon's CSS colour, set per state by `kc-ping-good` / `kc-ping-fair` / `kc-ping-poor` = `@success_bg_color` / `@warning_bg_color` / `@error_bg_color`, the same as the online / idle / dnd status dots. Unlit bars are faint in the button's colour. "Voice Connected" uses `kc-voice-connected` (`@success_bg_color`) instead of libadwaita's `success`, so a good connection matches it.
 - `KYLECORD_VIDEO_DEMO` also shows the voice panel, with a made-up ping from `KYLECORD_DEMO_PING` (ms, default 40).
+
+- Info panel position: on grid tiles and pop-outs the panel sits in the top corner (margin 6) and the `kc-video-info-yields` class adds 34px top margin while the tile/pop-out is hovered, so it moves below the controls. The enlarged tile keeps its controls on the right, so its panel never moves.
