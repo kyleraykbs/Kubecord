@@ -56,8 +56,13 @@ pub struct CapturePreferences {
     /// How long sent packets are kept to repair a network dropout by
     /// retransmission. Zero disables retransmission.
     pub retransmit_ms: u32,
-    /// Fixed Go Live buffering delay in milliseconds.
+    /// Fixed Go Live buffering delay in milliseconds. Saved under a new
+    /// name since 2026-11-19 so the old default of one second, which also
+    /// delayed every recovery from loss by a second, does not carry over.
+    #[serde(rename = "go_live_delay_ms")]
     pub stream_delay_ms: u64,
+    /// Send every video packet a second time, 20 ms later.
+    pub send_twice: bool,
     /// Force the software x264 encoder instead of trying VA-API first.
     pub cpu_encoder: bool,
     /// Microphone device node name; empty for the system default.
@@ -133,7 +138,8 @@ impl Default for CapturePreferences {
             drop_frames_after_ms: 250,
             leaky_queue: true,
             retransmit_ms: 2000,
-            stream_delay_ms: 1000,
+            stream_delay_ms: 0,
+            send_twice: false,
             cpu_encoder: false,
             input_device: String::new(),
             output_device: String::new(),
@@ -189,6 +195,7 @@ impl CapturePreferences {
             adaptive_bitrate: self.bitrate_kbps.is_none(),
             loss_keyframe_ms: self.loss_keyframe_ms,
             keyframe_gap_secs: self.keyframe_gap_secs,
+            send_twice: self.send_twice,
         }
     }
 
@@ -251,6 +258,7 @@ impl CapturePreferences {
         self.leaky_queue = defaults.leaky_queue;
         self.retransmit_ms = defaults.retransmit_ms;
         self.stream_delay_ms = defaults.stream_delay_ms;
+        self.send_twice = defaults.send_twice;
         self.cpu_encoder = defaults.cpu_encoder;
         self.camera_format = defaults.camera_format;
         self.loss_keyframe_ms = defaults.loss_keyframe_ms;
@@ -284,7 +292,7 @@ impl CapturePreferences {
             self.bitrate_kbps = None;
         }
         if !STREAM_DELAYS.contains(&self.stream_delay_ms) {
-            self.stream_delay_ms = 1000;
+            self.stream_delay_ms = 0;
         }
         if !KEYFRAME_INTERVALS.contains(&self.keyframe_secs) {
             self.keyframe_secs = 0;
@@ -368,7 +376,8 @@ mod tests {
         let prefs = CapturePreferences::default();
         assert_eq!((prefs.width, prefs.height, prefs.fps), (1280, 720, 30));
         assert_eq!(prefs.bitrate_kbps, None);
-        assert_eq!(prefs.stream_delay_ms, 1000);
+        assert_eq!(prefs.stream_delay_ms, 0);
+        assert!(!prefs.send_twice);
         assert_eq!(prefs.keyframe_secs, 0);
         assert!(prefs.log_to_file && !prefs.log_detailed);
         // Automatic bitrate stays within what Discord carries for a stream.

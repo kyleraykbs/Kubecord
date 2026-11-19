@@ -248,6 +248,8 @@ pub struct VideoSettings {
     /// viewer who lost packets on their own connection recovers without
     /// having to ask. Zero: only when asked or on loss.
     pub keyframe_gap_secs: u32,
+    /// Send every video packet a second time, 20 ms later.
+    pub send_twice: bool,
 }
 
 /// Follows how the network treats the video and picks a bitrate for it:
@@ -360,6 +362,7 @@ impl Default for VideoSettings {
             adaptive_bitrate: true,
             loss_keyframe_ms: 1000,
             keyframe_gap_secs: 5,
+            send_twice: false,
         }
     }
 }

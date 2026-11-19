@@ -1679,6 +1679,7 @@ async fn maybe_start_stream(
             let video_settings = voice.stream_settings.clone();
             handle
                 .set_retransmit_window(Duration::from_millis(video_settings.retransmit_ms as u64));
+            handle.set_redundancy(video_settings.send_twice);
             handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(
                 video_settings.loss_keyframe_ms,
             )));
@@ -2048,6 +2049,7 @@ async fn start_camera(
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
     handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
+    handle.set_redundancy(settings.send_twice);
     handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(settings.loss_keyframe_ms)));
     let adapt = settings.adaptive_bitrate.then_some(settings.bitrate_kbps);
     let keyframe_gap = Duration::from_secs(u64::from(settings.keyframe_gap_secs));

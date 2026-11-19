@@ -338,6 +338,7 @@ pub(crate) fn quality_controls(
         })
         .collect();
     let keyframe_gap = string_dropdown(&gap_names);
+    let send_twice = gtk::Switch::new();
     let leaky = gtk::Switch::new();
     leaky.set_tooltip_text(Some(
         "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
@@ -355,6 +356,7 @@ pub(crate) fn quality_controls(
         let drop_late = drop_late.clone();
         let loss_keyframes = loss_keyframes.clone();
         let keyframe_gap = keyframe_gap.clone();
+        let send_twice = send_twice.clone();
         let leaky = leaky.clone();
         Rc::new(move |prefs: &CapturePreferences| {
             resolution.set_selected(
@@ -383,6 +385,7 @@ pub(crate) fn quality_controls(
                 1,
             ));
             keyframe_gap.set_selected(position(&KEYFRAME_GAPS, &prefs.keyframe_gap_secs, 2));
+            send_twice.set_active(prefs.send_twice);
             leaky.set_active(prefs.leaky_queue);
         })
     };
@@ -469,6 +472,11 @@ pub(crate) fn quality_controls(
             target(&move |prefs| prefs.keyframe_gap_secs = seconds);
         }
     });
+    let target = apply.clone();
+    send_twice.connect_active_notify(move |switch| {
+        let active = switch.is_active();
+        target(&move |prefs| prefs.send_twice = active);
+    });
     let target = apply;
     leaky.connect_active_notify(move |switch| {
         let active = switch.is_active();
@@ -503,7 +511,7 @@ pub(crate) fn quality_controls(
         rows.push(guided(
             "Go Live Delay",
             &delay,
-            "Holds your stream back so frames leave at an even pace, which smooths uneven capture. Recovering from lost packets takes this much longer. 1 s is a good balance; None if you need viewers in step with you.",
+            "Holds your stream back so frames leave at an even pace. It also holds back the full frame that repairs a freeze, so with a delay every such freeze lasts at least that long. None is best for most; add delay only if the picture stutters without it.",
         ));
     }
     let encoder_row = setting_row("Use Software Encoder (x264)", &cpu_encoder);
@@ -525,6 +533,12 @@ pub(crate) fn quality_controls(
         &drop_late,
         "A frame that waits this long past the Go Live delay is skipped instead of sent late, so the stream stays current. 250 ms is a good default; Never sends everything, however late.",
     );
+    let twice_row = setting_row("Send Packets Twice", &send_twice);
+    twice_row.set_subtitle(
+        "Sends every video packet again 20 ms later, so a lost one is usually replaced before viewers notice. It doubles your video upload: use it when the connection drops packets but has room to spare, and not to rescue a bitrate that is already too high.",
+    );
+    twice_row.set_subtitle_lines(0);
+    twice_row.set_activatable_widget(Some(&send_twice));
     let leaky_row = setting_row("Drop Old Frames in the Capture Queue", &leaky);
     leaky_row.set_subtitle(
         "When encoding falls behind, skip to the newest picture instead of building up delay. Leave on.",
@@ -552,6 +566,7 @@ pub(crate) fn quality_controls(
             &keyframe_gap,
             "Sends a full frame whenever none has gone out for this long, so a viewer who lost packets on their own connection recovers without having to ask. Loss on your side and viewer requests already send them sooner. 5 s is a good default; choose Off if the picture hitches at this rhythm.",
         ),
+        twice_row,
         drop_row,
         leaky_row,
     ];

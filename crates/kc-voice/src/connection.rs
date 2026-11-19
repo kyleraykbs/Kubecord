@@ -236,6 +236,43 @@ struct VideoPacket {
     timestamp: u32,
     place: PacketPlace,
     sent: std::time::Instant,
+    /// How long the socket had been quiet (no video packet) before this
+    /// one left, for the log: lost packets that follow a pause point at
+    /// something other than a crowded link.
+    idle_before: Duration,
+}
+
+/// Every video packet sent a second time a little later, on the
+/// retransmission stream, so one that is lost is usually replaced before
+/// the server has to ask. Doubles the video upload.
+#[derive(Default)]
+struct Redundancy {
+    enabled: bool,
+    /// Packets whose second copy is still to go, oldest first.
+    due: VecDeque<(std::time::Instant, u16)>,
+}
+
+impl Redundancy {
+    /// Long enough that a short burst of loss does not take both copies,
+    /// short enough to beat the round trip of being asked.
+    const OFFSET: Duration = Duration::from_millis(20);
+
+    fn sent(&mut self, sequence: u16, now: std::time::Instant) {
+        if self.enabled {
+            self.due.push_back((now + Self::OFFSET, sequence));
+        }
+    }
+
+    /// The packets whose second copy is due.
+    fn take_due(&mut self, now: std::time::Instant) -> Vec<u16> {
+        let mut due = Vec::new();
+        while self.due.front().is_some_and(|(at, _)| *at <= now) {
+            if let Some((_, sequence)) = self.due.pop_front() {
+                due.push(sequence);
+            }
+        }
+        due
+    }
 }
 
 /// Where a packet sits in its frame, for the log.
@@ -318,6 +355,12 @@ struct SentStats {
     /// Video packets asked for a second time within a second: the first
     /// resend did not arrive, or was not accepted.
     nack_repeated: u64,
+    /// Packets asked for again that were the first of their frame, and
+    /// that left after a pause of 5 ms or more.
+    nack_first: u64,
+    nack_after_pause: u64,
+    /// Second copies sent (see [`Redundancy`]).
+    sent_twice: u64,
     /// Keyframes viewers asked for (PLI/FIR).
     keyframe_requests: u64,
     /// The longest the pacing queue got, in milliseconds of sending.
@@ -361,6 +404,7 @@ enum Command {
     SetVideo(bool),
     SetRetransmitWindow(Duration),
     SetLossKeyframeSpacing(Duration),
+    SetRedundancy(bool),
     Disconnect,
 }
 
@@ -408,6 +452,11 @@ impl VoiceHandle {
     /// themselves crowd a struggling connection.
     pub fn set_loss_keyframe_spacing(&self, spacing: Duration) {
         let _ = self.tx.send(Command::SetLossKeyframeSpacing(spacing));
+    }
+
+    /// Sends every video packet twice (see [`Redundancy`]).
+    pub fn set_redundancy(&self, enabled: bool) {
+        let _ = self.tx.send(Command::SetRedundancy(enabled));
     }
 
     pub fn set_retransmit_window(&self, window: Duration) {
@@ -490,6 +539,9 @@ struct SessionState {
     sent_audio: SentPackets,
     retransmit_window: Duration,
     retransmits: VecDeque<Vec<u8>>,
+    redundancy: Redundancy,
+    /// When the last video packet left, to measure pauses before packets.
+    last_video_send: Option<std::time::Instant>,
     /// Payload bytes waiting in `video_queue`.
     video_queue_bytes: usize,
     /// What happened to the video being sent since the last report.
@@ -727,6 +779,8 @@ async fn run(
         sent_audio: SentPackets::default(),
         retransmit_window: DEFAULT_RETRANSMIT_WINDOW,
         retransmits: VecDeque::new(),
+        redundancy: Redundancy::default(),
+        last_video_send: None,
         video_queue_bytes: 0,
         sent: SentStats::default(),
         ping_pending: None,
@@ -1007,6 +1061,13 @@ impl SessionState {
                 self.video_enabled = enabled;
                 self.send_video_state().await?;
             }
+            Command::SetRedundancy(enabled) => {
+                tracing::info!(enabled, "sending video packets twice");
+                self.redundancy.enabled = enabled;
+                if !enabled {
+                    self.redundancy.due.clear();
+                }
+            }
             Command::SetLossKeyframeSpacing(spacing) => {
                 self.loss_keyframe_spacing = spacing.max(Duration::from_millis(250));
             }
@@ -1043,7 +1104,9 @@ impl SessionState {
     /// as one burst, with a floor so a scene change after a quiet screen is
     /// not held back.
     fn pacing_bytes_per_sec(&self) -> f64 {
-        (self.video_rate_bps * PACING_FACTOR).max(PACING_FLOOR_BPS) / 8.0
+        // Second copies go through the same pacer.
+        let copies = if self.redundancy.enabled { 2.0 } else { 1.0 };
+        (self.video_rate_bps * PACING_FACTOR * copies).max(PACING_FLOOR_BPS) / 8.0
     }
 
     /// Sends queued video at the pacing rate. The old pacer sent 1 packet/ms
@@ -1053,6 +1116,14 @@ impl SessionState {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(self.pace_last).as_secs_f64();
         self.pace_last = now;
+        for sequence in self.redundancy.take_due(now) {
+            if let Some(original) = self.sent_video.get(sequence)
+                && let Some(packet) = self.retransmission(sequence, &original)
+            {
+                self.sent.sent_twice += 1;
+                self.retransmits.push_back(packet);
+            }
+        }
         let rate = self.pacing_bytes_per_sec();
         // Idle credit is capped so a quiet period cannot be spent as a burst.
         let cap = (rate * 0.005).max(MAX_PAYLOAD as f64);
@@ -1191,6 +1262,12 @@ impl SessionState {
         let header = RtpHeader::write(marker, PT_H264, sequence, timestamp, ssrc);
         self.seq_video = self.seq_video.wrapping_add(1);
         let packet = self.srtp.encrypt(&header, payload)?;
+        let now = std::time::Instant::now();
+        let idle_before = self
+            .last_video_send
+            .map(|last| now.duration_since(last))
+            .unwrap_or_default();
+        self.last_video_send = Some(now);
         self.sent_video.insert(
             sequence,
             VideoPacket {
@@ -1198,10 +1275,12 @@ impl SessionState {
                 marker,
                 timestamp,
                 place,
-                sent: std::time::Instant::now(),
+                sent: now,
+                idle_before,
             },
             self.retransmit_window,
         );
+        self.redundancy.sent(sequence, now);
         self.net_sent += 1;
         if self
             .test_drop
@@ -1822,6 +1901,9 @@ impl SessionState {
             nack_requested = sent.nack_requested,
             nack_found = sent.nack_found,
             nack_repeated = sent.nack_repeated,
+            nack_first = sent.nack_first,
+            nack_after_pause = sent.nack_after_pause,
+            sent_twice = sent.sent_twice,
             audio_nack_requested = sent.audio_nack_requested,
             keyframe_requests = sent.keyframe_requests,
             backlog_max_ms = sent.backlog_max_ms,
@@ -2026,13 +2108,23 @@ impl SessionState {
                         }
                     } else if let Some(original) = self.sent_video.get(sequence) {
                         found += 1;
+                        if original.place.index == 0 {
+                            self.sent.nack_first += 1;
+                        }
+                        if original.idle_before >= Duration::from_millis(5) {
+                            self.sent.nack_after_pause += 1;
+                        }
                         if detail.len() < 6 {
+                            // sequence:place in frame[K]@age, then the pause
+                            // before it was sent and its size.
                             detail.push(format!(
-                                "{sequence}:{}/{}{}@{}ms",
+                                "{sequence}:{}/{}{}@{}ms,p{:.1},b{}",
                                 original.place.index,
                                 original.place.count,
                                 if original.place.keyframe { "K" } else { "" },
-                                original.sent.elapsed().as_millis()
+                                original.sent.elapsed().as_millis(),
+                                original.idle_before.as_secs_f64() * 1000.0,
+                                original.payload.len()
                             ));
                         }
                         if let Some(packet) = self.retransmission(sequence, &original) {
@@ -2307,6 +2399,7 @@ mod tests {
             timestamp: 90_000,
             place: PacketPlace::default(),
             sent: std::time::Instant::now(),
+            idle_before: Duration::ZERO,
         };
         sent.insert(7, packet, Duration::from_secs(1));
         let kept = sent.get(7).unwrap();
@@ -2319,6 +2412,36 @@ mod tests {
         assert_eq!(sent.len(), 0);
     }
 
+    #[test]
+    fn second_copies_come_due_a_little_after_the_first() {
+        let start = std::time::Instant::now();
+        let mut redundancy = Redundancy::default();
+        // Off: nothing is scheduled.
+        redundancy.sent(1, start);
+        assert!(
+            redundancy
+                .take_due(start + Duration::from_secs(1))
+                .is_empty()
+        );
+
+        redundancy.enabled = true;
+        redundancy.sent(10, start);
+        redundancy.sent(11, start + Duration::from_millis(5));
+        assert!(
+            redundancy
+                .take_due(start + Duration::from_millis(19))
+                .is_empty()
+        );
+        // Each copy waits its own 20 ms, in the order sent.
+        assert_eq!(redundancy.take_due(start + Duration::from_millis(20)), [10]);
+        assert_eq!(redundancy.take_due(start + Duration::from_millis(40)), [11]);
+        assert!(
+            redundancy
+                .take_due(start + Duration::from_secs(1))
+                .is_empty()
+        );
+    }
+
     fn kept_packet() -> VideoPacket {
         VideoPacket {
             payload: vec![0],
@@ -2326,6 +2449,7 @@ mod tests {
             timestamp: 0,
             place: PacketPlace::default(),
             sent: std::time::Instant::now(),
+            idle_before: Duration::ZERO,
         }
     }
 

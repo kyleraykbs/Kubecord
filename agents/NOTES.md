@@ -484,3 +484,12 @@ dispatch; contains account data).
 
 - Log: picker cancelled → the StreamSource error branch called `teardown_stream` (local only, no `stream_delete`) → the next Go Live's `stream_create` got no STREAM_CREATE back (the old stream still existed on Discord) → `stream_pending` stayed true and every later Go Live returned silently until restart.
 - Fixed: a failed or cancelled screen source and `StreamClosed` both use `stop_stream` (sends `stream_delete`). A portal cancel is `kc_media::Error::Cancelled` (ashpd `ResponseError::Cancelled`) and shows no error. Every Go Live arms `StreamStartTimeout { attempt }` (15 s); if Discord still has not answered, the attempt is given up with an error. The control handling moved out of the account loop into `handle_voice_control` so tests can drive it.
+
+## Hitch theories, delay default, send-twice, loss-position logging (2026-11-19)
+
+- A 24-minute 720p30 Go Live at a fixed bitrate (~3.9 Mbit/s, set one-time in the popup; REMB 4200) lost a steady 3.3% in single packets, all resent. 46% of the lost packets were index 0 of their frame (only 557 of 28,291 were in keyframes). Cause unknown. With the 1 s loss-keyframe spacing that meant 1,365 keyframes (about one a second). An earlier call at ~1.9 Mbit/s lost 0.10%, in bursts.
+- The Go Live delay (`DelayedSender`) also delays forced keyframes, so any freeze that needs a keyframe lasts at least the delay. Default is now 0; the pref is saved as `go_live_delay_ms` so the old 1 s default does not carry over (`stream_delay_ms` in old files is ignored).
+- "Send Packets Twice" (Advanced, pref `send_twice`, off by default): `Redundancy` queues each video packet's second copy 20 ms later as an RTX packet through the pacer (pacing rate doubles). `VoiceHandle::set_redundancy`. Whether Discord's SFU uses unsolicited RTX is NOT yet confirmed; kylecord's own receiver ignores duplicates. Log: `sent_twice` in "sent video".
+- To explain the first-packet losses: each NACK entry is now `seq:index/count[K]@age,p<pause ms before it was sent>,b<bytes>`, and "sent video" counts `nack_first` and `nack_after_pause` (pause ≥ 5 ms). If lost packets mostly follow a pause, look at what a sender-side pause does (pacer credit lets the first ~3 packets of a frame leave back to back; NIC/Wi-Fi wake-up); if not, at their size.
+- Not done, still the strongest candidate: no keyframe when every NACKed packet was resent.
+- The ping graph measures the voice gateway (TCP websocket) every 5 s; it cannot show short UDP loss, which is what causes hitches.
