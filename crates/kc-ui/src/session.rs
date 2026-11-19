@@ -743,6 +743,7 @@ fn spawn_account(
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
+            stream_attempt: 0,
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
@@ -917,125 +918,7 @@ fn spawn_account(
                 }
                 control = control_rx.recv() => {
                     let Some(control) = control else { break };
-                    match control {
-                        VoiceControl::Closed { generation } => {
-                            if generation == voice.generation && voice.connection.is_some() {
-                                teardown_voice(&mut voice, account, &ui, true).await;
-                            }
-                        }
-                        VoiceControl::VideoNetwork {
-                            generation,
-                            stream,
-                            sent,
-                            lost,
-                            remb_kbps,
-                        } => {
-                            let source = if stream {
-                                (generation == voice.stream_generation)
-                                    .then_some(voice.stream_connection.as_ref())
-                                    .flatten()
-                                    .and_then(|connection| connection.source.as_ref())
-                            } else {
-                                (generation == voice.generation)
-                                    .then_some(voice.connection.as_ref())
-                                    .flatten()
-                                    .and_then(|connection| connection.camera.as_ref())
-                            };
-                            if let Some(source) = source {
-                                source.network_report(sent, lost, remb_kbps);
-                            }
-                        }
-                        VoiceControl::ForceCameraKeyframe { generation } => {
-                            if generation == voice.generation
-                                && let Some(connection) = &voice.connection
-                                && let Some(source) = &connection.camera
-                            {
-                                source.force_keyframe();
-                            }
-                        }
-                        VoiceControl::StreamReady { generation } => {
-                            if generation == voice.stream_generation
-                                && voice.stream_connection.is_some()
-                            {
-                                voice.streaming = true;
-                                let _ = ui.send(UiEvent::StreamStarted { account }).await;
-                            }
-                        }
-                        VoiceControl::WatchClosed { generation } => {
-                            if voice
-                                .watch
-                                .as_ref()
-                                .is_some_and(|watch| watch.generation == generation)
-                            {
-                                stop_watching(&mut voice, account, &ui, true).await;
-                            }
-                        }
-                        VoiceControl::StreamClosed { generation } => {
-                            if generation == voice.stream_generation
-                                && voice.stream_connection.is_some()
-                            {
-                                teardown_stream(&mut voice, account, &ui, true).await;
-                            }
-                        }
-                        VoiceControl::StreamSource { generation, result } => {
-                            if generation != voice.stream_generation {
-                                continue;
-                            }
-                            match result {
-                                Ok(source) => {
-                                    let delay_ms = voice.stream_delay_ms;
-                                    let share_audio = voice.stream_audio.clone();
-                                    if let Some(connection) = &mut voice.stream_connection {
-                                        tracing::info!("stream source ready");
-                                        if voice.stream_settings.adaptive_bitrate {
-                                            source.adapt_bitrate(voice.stream_settings.bitrate_kbps);
-                                        }
-                                        source.set_keyframe_gap(Duration::from_secs(u64::from(
-                                            voice.stream_settings.keyframe_gap_secs,
-                                        )));
-                                        connection.source = Some(*source);
-                                        if connection.audio.is_none()
-                                            && let Some(share) = share_audio
-                                        {
-                                            match ScreenAudio::start(
-                                                connection.handle.clone(),
-                                                128_000,
-                                                delay_ms,
-                                                share,
-                                            ) {
-                                                Ok(audio) => connection.audio = Some(audio),
-                                                Err(error) => {
-                                                    let _ = ui
-                                                        .send(UiEvent::Error {
-                                                            account: Some(account),
-                                                            message: format!(
-                                                                "screen audio unavailable: {error}"
-                                                            ),
-                                                        })
-                                                        .await;
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        tracing::warn!("stream source ready but no stream connection");
-                                    }
-                                }
-                                Err(message) => {
-                                    let _ =
-                                        ui.send(UiEvent::StreamError { account, message }).await;
-                                    teardown_stream(&mut voice, account, &ui, true).await;
-                                }
-                            }
-                        }
-                        VoiceControl::ForceKeyframe { generation } => {
-                            if generation == voice.stream_generation
-                                && let Some(connection) = &voice.stream_connection
-                                && let Some(source) = &connection.source
-                            {
-                                source.force_keyframe();
-                            }
-                        }
-                    }
+                    handle_voice_control(&mut voice, control, account, &ui).await;
                 }
             }
         }
@@ -1078,6 +961,9 @@ struct VoiceRuntime {
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
+    /// Counts Go Live requests, to tell a stale start timeout from the
+    /// current one.
+    stream_attempt: u64,
     /// Someone else's stream being watched.
     watch: Option<Watch>,
     watch_generation: u64,
@@ -1273,6 +1159,11 @@ enum VoiceControl {
     ForceCameraKeyframe {
         generation: u64,
     },
+    /// A Go Live asked for `STREAM_START_TIMEOUT` ago; if Discord has not
+    /// answered it, it is given up.
+    StreamStartTimeout {
+        attempt: u64,
+    },
     /// How the camera's (or, with `stream`, the stream's) video is faring
     /// on the network, for adapting its bitrate.
     VideoNetwork {
@@ -1285,6 +1176,147 @@ enum VoiceControl {
     WatchClosed {
         generation: u64,
     },
+}
+
+/// Acts on a signal from one of the account's voice connections (see
+/// [`VoiceControl`]).
+async fn handle_voice_control(
+    voice: &mut VoiceRuntime,
+    control: VoiceControl,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+) {
+    match control {
+        VoiceControl::Closed { generation } => {
+            if generation == voice.generation && voice.connection.is_some() {
+                teardown_voice(voice, account, ui, true).await;
+            }
+        }
+        VoiceControl::VideoNetwork {
+            generation,
+            stream,
+            sent,
+            lost,
+            remb_kbps,
+        } => {
+            let source = if stream {
+                (generation == voice.stream_generation)
+                    .then_some(voice.stream_connection.as_ref())
+                    .flatten()
+                    .and_then(|connection| connection.source.as_ref())
+            } else {
+                (generation == voice.generation)
+                    .then_some(voice.connection.as_ref())
+                    .flatten()
+                    .and_then(|connection| connection.camera.as_ref())
+            };
+            if let Some(source) = source {
+                source.network_report(sent, lost, remb_kbps);
+            }
+        }
+        VoiceControl::ForceCameraKeyframe { generation } => {
+            if generation == voice.generation
+                && let Some(connection) = &voice.connection
+                && let Some(source) = &connection.camera
+            {
+                source.force_keyframe();
+            }
+        }
+        VoiceControl::StreamReady { generation } => {
+            if generation == voice.stream_generation && voice.stream_connection.is_some() {
+                voice.streaming = true;
+                let _ = ui.send(UiEvent::StreamStarted { account }).await;
+            }
+        }
+        VoiceControl::WatchClosed { generation } => {
+            if voice
+                .watch
+                .as_ref()
+                .is_some_and(|watch| watch.generation == generation)
+            {
+                stop_watching(voice, account, ui, true).await;
+            }
+        }
+        VoiceControl::StreamClosed { generation } => {
+            if generation == voice.stream_generation && voice.stream_connection.is_some() {
+                // Deleted on Discord too (harmless if it is gone
+                // already), so the next Go Live is answered.
+                stop_stream(voice, account, ui, true).await;
+            }
+        }
+        VoiceControl::StreamStartTimeout { attempt } => {
+            if attempt == voice.stream_attempt && voice.stream_pending {
+                tracing::warn!("Discord did not start the stream in time");
+                let _ = ui
+                    .send(UiEvent::StreamError {
+                        account,
+                        message: "Discord didn't start the stream. Try again.".to_owned(),
+                    })
+                    .await;
+                stop_stream(voice, account, ui, true).await;
+            }
+        }
+        VoiceControl::StreamSource { generation, result } => {
+            if generation != voice.stream_generation {
+                return;
+            }
+            match result {
+                Ok(source) => {
+                    let delay_ms = voice.stream_delay_ms;
+                    let share_audio = voice.stream_audio.clone();
+                    if let Some(connection) = &mut voice.stream_connection {
+                        tracing::info!("stream source ready");
+                        if voice.stream_settings.adaptive_bitrate {
+                            source.adapt_bitrate(voice.stream_settings.bitrate_kbps);
+                        }
+                        source.set_keyframe_gap(Duration::from_secs(u64::from(
+                            voice.stream_settings.keyframe_gap_secs,
+                        )));
+                        connection.source = Some(*source);
+                        if connection.audio.is_none()
+                            && let Some(share) = share_audio
+                        {
+                            match ScreenAudio::start(
+                                connection.handle.clone(),
+                                128_000,
+                                delay_ms,
+                                share,
+                            ) {
+                                Ok(audio) => connection.audio = Some(audio),
+                                Err(error) => {
+                                    let _ = ui
+                                        .send(UiEvent::Error {
+                                            account: Some(account),
+                                            message: format!("screen audio unavailable: {error}"),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!("stream source ready but no stream connection");
+                    }
+                }
+                Err(message) => {
+                    // Closing the picker is a choice, not an error.
+                    if message != PICKER_CANCELLED {
+                        let _ = ui.send(UiEvent::StreamError { account, message }).await;
+                    }
+                    // Discord already has the stream: delete it, or
+                    // it never answers the next Go Live.
+                    stop_stream(voice, account, ui, true).await;
+                }
+            }
+        }
+        VoiceControl::ForceKeyframe { generation } => {
+            if generation == voice.stream_generation
+                && let Some(connection) = &voice.stream_connection
+                && let Some(source) = &connection.source
+            {
+                source.force_keyframe();
+            }
+        }
+    }
 }
 
 async fn handle_voice_state(
@@ -1747,6 +1779,10 @@ async fn maybe_start_stream(
                                 Ok(Ok(portal)) => {
                                     VideoSource::screen(portal, video_settings.clone(), on_frame)
                                         .map_err(|error| error.to_string())
+                                }
+                                Ok(Err(kc_media::Error::Cancelled)) => {
+                                    tracing::info!("screen picker cancelled");
+                                    Err(PICKER_CANCELLED.to_owned())
                                 }
                                 Ok(Err(error)) => {
                                     tracing::warn!(%error, "screen capture source failed");
@@ -2261,6 +2297,8 @@ async fn apply_voice_command(
             voice.stream_capture = capture;
             voice.stream_audio = audio;
             voice.stream_pending = true;
+            voice.stream_attempt = voice.stream_attempt.wrapping_add(1);
+            give_up_unanswered_stream(voice.stream_attempt, control_tx);
             voice.stream_key = None;
             voice.stream_rtc_id = None;
             voice.stream_token = None;
@@ -2304,6 +2342,8 @@ async fn apply_voice_command(
             voice.stream_capture = None;
             voice.stream_audio = audio;
             voice.stream_pending = true;
+            voice.stream_attempt = voice.stream_attempt.wrapping_add(1);
+            give_up_unanswered_stream(voice.stream_attempt, control_tx);
             voice.stream_key = None;
             voice.stream_rtc_id = None;
             voice.stream_token = None;
@@ -2489,6 +2529,22 @@ async fn stop_watching(
         .await;
 }
 
+/// How long Discord gets to answer a Go Live before it is given up. It
+/// answers in well under a second; without a limit, an unanswered one
+/// would block every later Go Live.
+const STREAM_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a screen-picker result reads as when the picker was closed.
+const PICKER_CANCELLED: &str = "screen picker cancelled";
+
+fn give_up_unanswered_stream(attempt: u64, control_tx: &mpsc::UnboundedSender<VoiceControl>) {
+    let control = control_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(STREAM_START_TIMEOUT).await;
+        let _ = control.send(VoiceControl::StreamStartTimeout { attempt });
+    });
+}
+
 async fn stop_stream(
     voice: &mut VoiceRuntime,
     account: AccountId,
@@ -2667,10 +2723,102 @@ mod tests {
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
+            stream_attempt: 0,
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
         }
+    }
+
+    /// What the interface was told, by kind.
+    fn told(rx: &async_channel::Receiver<UiEvent>) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            kinds.push(match event {
+                UiEvent::StreamError { .. } => "error",
+                UiEvent::StreamStopped { .. } => "stopped",
+                _ => "other",
+            });
+        }
+        kinds
+    }
+
+    /// A voice runtime whose Go Live Discord has accepted, waiting for its
+    /// screen to be picked.
+    fn picking_a_screen() -> VoiceRuntime {
+        let (handle, _events, task) = Gateway::new(Token::new("test")).start();
+        task.abort();
+        let mut voice = runtime(handle);
+        voice.stream_key = Some("guild:5:12:1".to_owned());
+        voice.stream_generation = 7;
+        voice
+    }
+
+    #[tokio::test]
+    async fn closing_the_screen_picker_ends_the_stream_quietly() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let mut voice = picking_a_screen();
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::StreamSource {
+                generation: 7,
+                result: Err(PICKER_CANCELLED.to_owned()),
+            },
+            0,
+            &ui_tx,
+        )
+        .await;
+        // No error, and nothing left to block the next Go Live.
+        assert_eq!(told(&ui_rx), ["stopped"]);
+        assert!(voice.stream_key.is_none() && !voice.stream_pending && !voice.streaming);
+    }
+
+    #[tokio::test]
+    async fn a_screen_that_fails_to_start_is_reported_and_ended() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let mut voice = picking_a_screen();
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::StreamSource {
+                generation: 7,
+                result: Err("screencast start: no portal".to_owned()),
+            },
+            0,
+            &ui_tx,
+        )
+        .await;
+        assert_eq!(told(&ui_rx), ["error", "stopped"]);
+        assert!(voice.stream_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_go_live_is_given_up() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (handle, _events, task) = Gateway::new(Token::new("test")).start();
+        task.abort();
+        let mut voice = runtime(handle);
+        voice.stream_pending = true;
+        voice.stream_attempt = 3;
+        // The timeout of an earlier attempt changes nothing.
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::StreamStartTimeout { attempt: 2 },
+            0,
+            &ui_tx,
+        )
+        .await;
+        assert!(told(&ui_rx).is_empty());
+        assert!(voice.stream_pending);
+        // This attempt's does: the next Go Live is free to start.
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::StreamStartTimeout { attempt: 3 },
+            0,
+            &ui_tx,
+        )
+        .await;
+        assert_eq!(told(&ui_rx), ["error", "stopped"]);
+        assert!(!voice.stream_pending);
     }
 
     #[tokio::test]

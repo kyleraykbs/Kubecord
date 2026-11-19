@@ -97,7 +97,10 @@ pub async fn request_sources(
         .await
         .map_err(|error| Error::Message(format!("screencast start: {error}")))?
         .response()
-        .map_err(|error| Error::Message(format!("screencast response: {error}")))?;
+        .map_err(|error| match error {
+            ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => Error::Cancelled,
+            error => Error::Message(format!("screencast response: {error}")),
+        })?;
 
     let stream = response
         .streams()
