@@ -352,6 +352,18 @@ impl AppState {
         self.capture_button
             .connect_clicked(move |_| app.show_settings());
 
+        self.render_typing_toggle();
+        let app = self.clone();
+        self.typing_toggle.connect_clicked(move |_| {
+            let send = !app.capture.borrow().send_typing;
+            app.set_send_typing(send);
+            app.set_status(if send {
+                "Others can see when you're typing"
+            } else {
+                "You're typing unseen"
+            });
+        });
+
         // Clicking outside a dialog closes it, as in Discord.
         let outside = gtk::GestureClick::new();
         outside.set_button(0);

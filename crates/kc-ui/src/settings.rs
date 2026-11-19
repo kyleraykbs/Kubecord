@@ -65,6 +65,8 @@ pub struct CapturePreferences {
     /// Show Discord's captchas in kylecord instead of sending the user to
     /// the browser.
     pub captcha_in_app: bool,
+    /// Tell Discord when you are typing, so others see it.
+    pub send_typing: bool,
 }
 
 /// Default and limits of the resizable channel sidebar.
@@ -96,6 +98,7 @@ impl Default for CapturePreferences {
             sidebar_width: SIDEBAR_WIDTH,
             always_preview: false,
             captcha_in_app: true,
+            send_typing: true,
         }
     }
 }

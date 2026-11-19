@@ -117,6 +117,8 @@ pub(crate) struct AppState {
     pub upload_tray: gtk::Box,
     pub attach_button: gtk::Button,
     pub gif_button: gtk::MenuButton,
+    /// Whether others see you typing; mirrors the setting in Features.
+    pub typing_toggle: gtk::Button,
     pub emoji_button: gtk::MenuButton,
     pub blocked_label: gtk::Label,
     pub completion: gtk::Popover,
@@ -562,6 +564,12 @@ impl AppState {
         attach_button.set_valign(gtk::Align::Center);
         attach_button.add_css_class("circular");
 
+        // Shows and switches whether others see you typing.
+        let typing_toggle = gtk::Button::new();
+        typing_toggle.add_css_class("flat");
+        typing_toggle.add_css_class("circular");
+        typing_toggle.set_valign(gtk::Align::Center);
+
         let gif_button = gtk::MenuButton::new();
         gif_button.add_css_class("flat");
         // A child label instead of `set_label`, which adds a menu arrow.
@@ -586,6 +594,7 @@ impl AppState {
         composer_box.add_css_class("kc-composer");
         composer_box.append(&attach_button);
         composer_box.append(&composer_overlay);
+        composer_box.append(&typing_toggle);
         composer_box.append(&gif_button);
         composer_box.append(&emoji_button);
         // Padding lives on the children so the rounded background reaches
@@ -783,6 +792,7 @@ impl AppState {
             upload_tray,
             attach_button,
             gif_button,
+            typing_toggle,
             emoji_button,
             blocked_label,
             completion,

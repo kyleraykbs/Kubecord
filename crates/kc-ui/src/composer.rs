@@ -203,6 +203,10 @@ impl AppState {
             return;
         }
 
+        // Typing unseen: no notice goes to Discord.
+        if !self.capture.borrow().send_typing {
+            return;
+        }
         let target = self.with_session_mut(|session| {
             let channel = session.selected_channel?;
             if session.editing.is_some() {
@@ -989,4 +993,35 @@ fn remember_token(display: String, raw: String) {
             tokens.sort_by_key(|(display, _)| std::cmp::Reverse(display.len()));
         }
     });
+}
+
+impl AppState {
+    /// Sets whether others see you typing, from the bar or from Settings.
+    pub(crate) fn set_send_typing(self: &Rc<Self>, send: bool) {
+        self.update_prefs(|prefs| prefs.send_typing = send);
+        self.render_typing_toggle();
+    }
+
+    /// Shows the typing setting on the message bar's button.
+    pub(crate) fn render_typing_toggle(&self) {
+        let send = self.capture.borrow().send_typing;
+        let (icon, tooltip) = if send {
+            (
+                "view-reveal-symbolic",
+                "Others can see when you're typing. Click to type unseen.",
+            )
+        } else {
+            (
+                "view-conceal-symbolic",
+                "You're typing unseen. Click to let others see when you're typing.",
+            )
+        };
+        self.typing_toggle.set_icon_name(icon);
+        self.typing_toggle.set_tooltip_text(Some(tooltip));
+        if send {
+            self.typing_toggle.remove_css_class("kc-typing-hidden");
+        } else {
+            self.typing_toggle.add_css_class("kc-typing-hidden");
+        }
+    }
 }

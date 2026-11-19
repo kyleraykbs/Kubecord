@@ -227,6 +227,12 @@ const CSS: &str = r#"
     margin-bottom: 0;
 }
 
+/* Typing unseen: the bar's eye button in the accent colour, so the
+   setting is noticeable. */
+.kc-typing-hidden {
+    color: @accent_color;
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;

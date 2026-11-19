@@ -105,6 +105,7 @@ impl AppState {
             )),
             Some("voice"),
         );
+        pages.add_named(&page_scroll(&self.features_page()), Some("features"));
         pages.add_named(&page_scroll(&self.compatibility_page()), Some("compat"));
 
         let content_view = adw::ToolbarView::new();
@@ -115,9 +116,10 @@ impl AppState {
         // Categories, under Discord's two headings.
         let categories = gtk::ListBox::new();
         categories.add_css_class("navigation-sidebar");
-        let entries: [(&str, &str, &str); 3] = [
+        let entries: [(&str, &str, &str); 4] = [
             ("account", "My Account", "avatar-default-symbolic"),
             ("voice", "Voice & Video", "audio-input-microphone-symbolic"),
+            ("features", "Features", "view-reveal-symbolic"),
             (
                 "compat",
                 "Compatibility",
@@ -209,6 +211,33 @@ impl AppState {
     }
 
     // -- my account ----------------------------------------------------------
+
+    // -- features ------------------------------------------------------------
+
+    /// Client behaviour you can switch, some of it unlike Discord's app.
+    fn features_page(self: &Rc<Self>) -> gtk::Box {
+        let page = page_box();
+        page.append(&section_title("Features"));
+        let intro = gtk::Label::new(Some("Things kylecord can do your way."));
+        intro.set_xalign(0.0);
+        intro.set_wrap(true);
+        intro.add_css_class("dim-label");
+        page.append(&intro);
+
+        let typing = adw::PreferencesGroup::new();
+        typing.set_title("Typing");
+        let show = adw::SwitchRow::new();
+        show.set_title("Show When You're Typing");
+        show.set_subtitle(
+            "Let others see that you're typing. Turn it off to type unseen. The eye button in the message box switches this too.",
+        );
+        show.set_active(self.capture.borrow().send_typing);
+        let app = self.clone();
+        show.connect_active_notify(move |row| app.set_send_typing(row.is_active()));
+        typing.add(&show);
+        page.append(&typing);
+        page
+    }
 
     // -- compatibility -------------------------------------------------------
 
