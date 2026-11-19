@@ -152,6 +152,18 @@ pub fn run() -> glib::ExitCode {
                     "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
                     "share" => app_state.show_share_popup(account),
                     "captcha" => app_state.test_captcha(),
+                    // Opens the first server and types into the composer.
+                    "compose" | "compose-empty" => {
+                        let guild = store.read(|state| state.guilds.keys().next().copied());
+                        if let Some(guild) = guild {
+                            app_state.select_guild(guild);
+                        }
+                        app_state.composer.buffer().set_text(if popup == "compose" {
+                            "dfsdfsdfsdf"
+                        } else {
+                            ""
+                        });
+                    }
                     "profile-guild" => {
                         let guild = store.read(|state| state.guilds.keys().next().copied());
                         if let Some(guild) = guild {

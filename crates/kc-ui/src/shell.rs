@@ -530,8 +530,8 @@ impl AppState {
         let composer = gtk::TextView::new();
         composer.set_wrap_mode(gtk::WrapMode::WordChar);
         composer.set_accepts_tab(false);
-        composer.set_top_margin(10);
-        composer.set_bottom_margin(10);
+        composer.set_top_margin(16);
+        composer.set_bottom_margin(16);
         composer.set_left_margin(4);
         composer.set_right_margin(4);
 
@@ -558,8 +558,7 @@ impl AppState {
         composer_hint.set_valign(gtk::Align::Center);
 
         let attach_button = icon_button("list-add-symbolic", "Attach Files");
-        attach_button.set_valign(gtk::Align::End);
-        attach_button.set_margin_bottom(4);
+        attach_button.set_valign(gtk::Align::Center);
         attach_button.add_css_class("circular");
 
         let gif_button = gtk::MenuButton::new();
@@ -567,16 +566,14 @@ impl AppState {
         // A child label instead of `set_label`, which adds a menu arrow.
         gif_button.set_child(Some(&gtk::Label::new(Some("GIF"))));
         gif_button.set_tooltip_text(Some("Send a GIF"));
-        gif_button.set_valign(gtk::Align::End);
-        gif_button.set_margin_bottom(4);
+        gif_button.set_valign(gtk::Align::Center);
         gif_button.set_direction(gtk::ArrowType::Up);
 
         let emoji_button = gtk::MenuButton::new();
         emoji_button.add_css_class("flat");
         emoji_button.add_css_class("circular");
         emoji_button.set_tooltip_text(Some("Emoji"));
-        emoji_button.set_valign(gtk::Align::End);
-        emoji_button.set_margin_bottom(4);
+        emoji_button.set_valign(gtk::Align::Center);
         emoji_button.set_direction(gtk::ArrowType::Up);
         if icon_available("face-smile-symbolic") {
             emoji_button.set_icon_name("face-smile-symbolic");

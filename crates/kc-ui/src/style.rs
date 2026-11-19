@@ -210,6 +210,23 @@ const CSS: &str = r#"
     background: none;
 }
 
+/* The scrollbar's minimum length set the composer's minimum height: a
+   one-line message sat at the top of a box a line too tall. A short
+   minimum lets the box follow the text; long messages still scroll. */
+.kc-composer scrollbar.vertical slider {
+    min-height: 12px;
+}
+
+.kc-composer scrollbar.vertical,
+.kc-composer scrollbar.vertical range,
+.kc-composer scrollbar.vertical trough {
+    min-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;
