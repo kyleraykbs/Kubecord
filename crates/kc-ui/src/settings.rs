@@ -178,7 +178,7 @@ impl Default for CapturePreferences {
             retransmit_ms: 2000,
             stream_delay_ms: 0,
             send_twice: false,
-            cpu_encoder: false,
+            cpu_encoder: true,
             input_device: String::new(),
             output_device: String::new(),
             input_volume: 1.0,
@@ -504,6 +504,8 @@ mod tests {
         assert_eq!(prefs.stream_delay_ms, 0);
         assert!(!prefs.send_twice);
         assert_eq!(prefs.keyframe_secs, 0);
+        // The processor encodes: every viewer can play what x264 makes.
+        assert!(prefs.cpu_encoder);
         assert!(prefs.log_to_file && !prefs.log_detailed);
         // Automatic bitrate stays within what Discord carries for a stream.
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1280, 720, 30), 1935);
@@ -589,7 +591,7 @@ mod tests {
             height: 1080,
             fps: 60,
             bitrate_kbps: Some(8000),
-            cpu_encoder: true,
+            cpu_encoder: false,
             leaky_queue: false,
             input_device: "mic".into(),
             output_volume: 0.5,

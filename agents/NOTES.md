@@ -533,3 +533,10 @@ dispatch; contains account data).
 - `KYLECORD_VIDEO_DEMO` also shows the voice panel, with a made-up ping from `KYLECORD_DEMO_PING` (ms, default 40).
 
 - Info panel position: on grid tiles and pop-outs the panel sits in the top corner (margin 6) and the `kc-video-info-yields` class adds 34px top margin while the tile/pop-out is hovered, so it moves below the controls. The enlarged tile keeps its controls on the right, so its panel never moves.
+
+- Hardware encoding (vah264enc) never loaded for viewers: WebRTC receivers rewrite any SPS whose VUI lacks a bitstream restriction, allows reordering, or has `max_dec_frame_buffering > max_num_ref_frames` (`SpsVuiRewriter`, run in the H.264 depacketizer). VA-API on AMD declares 2 with 1 reference frame. The SPS is unencrypted but authenticated under DAVE, so the receiver's edit makes every keyframe fail decryption. Official clients rewrite before encrypting; `kc_media::h264::conform` now does the same (same rules), applied to every encoded frame where it leaves the pipeline. x264's SPS already passes and comes back byte for byte.
+- `conform` also drops filler NAL units (type 12): AMD CBR pads each frame to its share of the bitrate (914 KB of a 1 MB test clip was filler).
+- `vah264enc key-int-max` only goes to 1024; a larger value is refused with a GLib critical and the encoder falls back to a keyframe every second. Clamped (`HARDWARE_KEYFRAME_DISTANCE`), so "only when asked" on hardware still means one every 1024 frames.
+- On this GPU a live `bitrate` change makes vah264enc emit a keyframe, and its keyframes are ~3× x264's (167 KB vs 60 KB at 4 Mbit 720p; `cpb-size` has no effect). Adaptive bitrate on hardware therefore changes at most every 10 s (`HARDWARE_BITRATE_SPACING`).
+- Default is now the CPU encoder (`cpu_encoder: true`); a saved `false` is kept.
+- Not verified against an official client: no second account to watch with. Verified: SPS check on real vah264enc output, independent parse, avdec_h264 decode of the corrected stream.

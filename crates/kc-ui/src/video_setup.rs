@@ -655,7 +655,7 @@ pub(crate) fn quality_controls(
     }
     let encoder_row = setting_row("Use Software Encoder (x264)", &cpu_encoder);
     encoder_row.set_subtitle(
-        "Off uses your graphics card when it can, which saves processor time. Turn on if the picture is corrupted or the stream will not start.",
+        "The dependable choice. Off uses your graphics card when it can, which saves processor time, but its full frames are about three times as large and it sends one at least every 1,024 frames and at every change of bitrate, so an Automatic bitrate moves at most once in 10 seconds.",
     );
     encoder_row.set_subtitle_lines(0);
     encoder_row.set_activatable_widget(Some(&cpu_encoder));

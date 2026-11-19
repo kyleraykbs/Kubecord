@@ -316,6 +316,16 @@ const FRAMERATE_STEPS: [u32; 8] = [5, 10, 15, 20, 24, 30, 45, 60];
 /// The least time between changes of framerate: each one restarts the
 /// encoder's stream with a keyframe.
 const FRAMERATE_CHANGE_SPACING: Duration = Duration::from_secs(10);
+/// The least time between changes of a hardware encoder's bitrate. x264
+/// takes a new bitrate in its stride; `vah264enc` starts its stream over
+/// with a keyframe, and its keyframes are large (a third of a second of
+/// bitrate), so steps are gathered up rather than taken one by one.
+const HARDWARE_BITRATE_SPACING: Duration = Duration::from_secs(10);
+
+/// Whether a change last made at `changed` may be followed by another.
+fn spaced(changed: Option<Instant>, spacing: Duration) -> bool {
+    changed.is_none_or(|changed| changed.elapsed() >= spacing)
+}
 
 /// The framerate for a `level` of the connection (1 good, 0 at its worst)
 /// within `min..=max`: the highest step not above that share of the range.
@@ -348,6 +358,9 @@ struct Adaptation {
     priority: AdaptPriority,
     /// The bitrate the encoder was last given.
     applied_kbps: u32,
+    bitrate_changed: Option<Instant>,
+    /// The least time between changes of bitrate.
+    bitrate_spacing: Duration,
 }
 
 /// Follows how the network treats the video and picks a bitrate for it:
@@ -563,12 +576,16 @@ fn hardware_available() -> bool {
     gst::init().is_ok() && gst::ElementFactory::find("vah264enc").is_some()
 }
 
+/// The most frames `vah264enc` takes between keyframes. Asked for more, it
+/// refuses the setting and falls back to a keyframe every second.
+const HARDWARE_KEYFRAME_DISTANCE: u32 = 1024;
+
 fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     if hardware {
         format!(
             "vah264enc name=enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
             bitrate = settings.bitrate_kbps,
-            keyint = keyframe_distance(settings),
+            keyint = keyframe_distance(settings).min(HARDWARE_KEYFRAME_DISTANCE),
         )
     } else {
         format!(
@@ -952,7 +969,7 @@ impl VideoSource {
                         request_keyframe(&pipeline, &thread_keyframes);
                     }
                     on_frame(EncodedFrame {
-                        data: map.as_slice().to_vec(),
+                        data: crate::h264::conform(map.as_slice()),
                         duration_ms: frame_ms,
                     });
                 }
@@ -1073,6 +1090,12 @@ impl VideoSource {
             fps_changed: None,
             priority: settings.adapt_priority,
             applied_kbps: settings.bitrate_kbps,
+            bitrate_changed: None,
+            bitrate_spacing: if self.encodes_in_hardware() {
+                HARDWARE_BITRATE_SPACING
+            } else {
+                Duration::ZERO
+            },
         });
         if let Ok(mut slot) = self.adaptation.lock() {
             *slot = adaptation;
@@ -1124,7 +1147,9 @@ impl VideoSource {
             } else {
                 floor + (bitrate_level * f64::from(target - floor)).round() as u32
             };
-            if kbps != adaptation.applied_kbps {
+            if kbps != adaptation.applied_kbps
+                && spaced(adaptation.bitrate_changed, adaptation.bitrate_spacing)
+            {
                 tracing::info!(
                     from_kbps = adaptation.applied_kbps,
                     to_kbps = kbps,
@@ -1135,6 +1160,7 @@ impl VideoSource {
                     "video bitrate adapted"
                 );
                 adaptation.applied_kbps = kbps;
+                adaptation.bitrate_changed = Some(Instant::now());
                 self.set_bitrate(kbps);
             }
         }
@@ -1147,9 +1173,7 @@ impl VideoSource {
             framerate_for(fps_level, min, target)
         };
         if wanted != adaptation.current_fps
-            && adaptation
-                .fps_changed
-                .is_none_or(|changed| changed.elapsed() >= FRAMERATE_CHANGE_SPACING)
+            && spaced(adaptation.fps_changed, FRAMERATE_CHANGE_SPACING)
             && self.set_framerate(wanted)
         {
             tracing::info!(
@@ -1226,6 +1250,14 @@ impl VideoSource {
     }
 
     /// Changes the encoder's bitrate while it runs.
+    /// True when the VA-API encoder is the one running.
+    fn encodes_in_hardware(&self) -> bool {
+        self.pipeline
+            .by_name("enc")
+            .and_then(|encoder| encoder.factory())
+            .is_some_and(|factory| factory.name() == "vah264enc")
+    }
+
     fn set_bitrate(&self, kbps: u32) {
         if let Some(encoder) = self.pipeline.by_name("enc")
             && encoder.find_property("bitrate").is_some()
@@ -1890,6 +1922,113 @@ mod tests {
             "expected about 24 fps, got {low} (hardware: {hardware})"
         );
         assert_eq!(low_ms, 41);
+    }
+
+    /// What either encoder sends is what a receiver keeps: no SPS it would
+    /// edit (which breaks end-to-end encryption), no filler, and keyframes
+    /// only when asked for.
+    #[test]
+    fn what_is_sent_needs_no_editing_by_receivers() {
+        gst::init().unwrap();
+        sends_clean_frames(false);
+        if gst::ElementFactory::find("vah264enc").is_some() {
+            sends_clean_frames(true);
+        }
+    }
+
+    fn sends_clean_frames(hardware: bool) {
+        let settings = VideoSettings {
+            fps: 30,
+            keyframe_secs: 0,
+            adaptive_bitrate: false,
+            ..VideoSettings::default()
+        };
+        let description = screen_description(&settings, hardware).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true pattern=ball name=src",
+        );
+        let frames = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let seen = frames.clone();
+        let source = VideoSource::start_pipeline_with(
+            &description,
+            33,
+            move |frame: EncodedFrame| seen.lock().unwrap().push(frame.data),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let keyframes = |frames: &[Vec<u8>]| frames.iter().filter(|f| is_keyframe(f)).count();
+        std::thread::sleep(Duration::from_secs(3));
+        let before = frames.lock().unwrap().clone();
+        source.force_keyframe();
+        std::thread::sleep(Duration::from_secs(1));
+        let asked = frames.lock().unwrap().clone();
+        source.set_bitrate(settings.bitrate_kbps / 2);
+        std::thread::sleep(Duration::from_secs(2));
+        let after = frames.lock().unwrap().clone();
+        drop(source);
+
+        assert!(
+            before.len() > 60,
+            "{} frames (hardware: {hardware})",
+            before.len()
+        );
+        for frame in &after {
+            for unit in kc_voice::rtp::split_nalus(frame) {
+                let kind = unit[0] & 0x1F;
+                assert_ne!(kind, 12, "filler was sent (hardware: {hardware})");
+                assert!(
+                    kind != 7 || !crate::h264::receivers_rewrite(unit),
+                    "receivers would edit this SPS (hardware: {hardware})"
+                );
+            }
+        }
+        // One to start with and no more until one is asked for.
+        assert_eq!(keyframes(&before), 1, "hardware: {hardware}");
+        assert_eq!(keyframes(&asked), 2, "hardware: {hardware}");
+        // A new bitrate costs the hardware encoder a keyframe and x264 none,
+        // which is why the hardware encoder's changes are spaced out.
+        assert_eq!(keyframes(&after) - 2, usize::from(hardware));
+    }
+
+    /// Loss report after loss report, x264 follows each with a lower
+    /// bitrate; the hardware encoder takes the first and holds, as every
+    /// change costs it a keyframe.
+    #[test]
+    fn a_hardware_encoder_changes_bitrate_less_often() {
+        gst::init().unwrap();
+        let steps = |hardware: bool| {
+            let settings = VideoSettings {
+                fps: 30,
+                bitrate_kbps: 4000,
+                adaptive_bitrate: true,
+                ..VideoSettings::default()
+            };
+            let description = screen_description(&settings, hardware).replace(
+                "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+                "videotestsrc is-live=true name=src",
+            );
+            let source = VideoSource::start_pipeline_with(
+                &description,
+                33,
+                |_: EncodedFrame| {},
+                |_| Ok(()),
+            )
+            .unwrap();
+            source.adapt(&settings);
+            let mut seen = vec![4000];
+            for _ in 0..3 {
+                source.network_report(1000, 100, 0);
+                let kbps = source.adapted().0.unwrap();
+                if seen.last() != Some(&kbps) {
+                    seen.push(kbps);
+                }
+            }
+            seen.len() - 1
+        };
+        assert_eq!(steps(false), 3);
+        if gst::ElementFactory::find("vah264enc").is_some() {
+            assert_eq!(steps(true), 1);
+        }
     }
 
     /// A real PipeWire capture (of a throwaway test source, never a screen
