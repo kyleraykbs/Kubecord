@@ -1891,9 +1891,14 @@ async fn start_camera(
     connection: &mut VoiceConnection,
     access: &CameraAccess,
     node_id: u32,
-    settings: VideoSettings,
+    mut settings: VideoSettings,
     mut preview: LocalPreview,
 ) -> Result<(), String> {
+    // A camera sends keyframes only when a viewer asks or packets are lost,
+    // like the official client. On a schedule, about one in six froze an
+    // official-client viewer until the next one: hitches that lasted exactly
+    // the keyframe interval and followed keyframes, not packet loss.
+    settings.keyframe_secs = 0;
     let camera = access
         .select(node_id)
         .ok_or_else(|| "selected camera is no longer available".to_owned())?;

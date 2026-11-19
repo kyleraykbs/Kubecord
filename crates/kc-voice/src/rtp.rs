@@ -245,6 +245,84 @@ impl H264Depacketizer {
 mod tests {
     use super::*;
 
+    /// A small deterministic random source for the test below.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn byte(&mut self) -> u8 {
+            // Zeros and ones far more often than chance, to reach the
+            // start-code-like cases quickly.
+            match self.next() % 8 {
+                0 | 1 => 0,
+                2 => 1,
+                _ => (self.next() & 0xFF) as u8,
+            }
+        }
+    }
+
+    /// True if `00 00 01` occurs in `data`.
+    fn has_start_code(data: &[u8]) -> bool {
+        data.windows(3).any(|window| window == [0, 0, 1])
+    }
+
+    /// An end-to-end encrypted frame is slices whose bodies are ciphertext:
+    /// any bytes at all, except that the encryptor re-rolls until no start
+    /// code appears in or around a body. Packetised and put back together
+    /// the way a WebRTC receiver does (a long start code before each NAL),
+    /// the frame must come out byte for byte, or it will not decrypt.
+    #[test]
+    fn encrypted_frames_survive_packetisation_exactly() {
+        let mut random = Lcg(7);
+        let mut failures = Vec::new();
+        for trial in 0..200_000u32 {
+            let mut frame = Vec::new();
+            let nals = 1 + random.next() % 4;
+            for nal in 0..nals {
+                frame.extend_from_slice(&[0, 0, 0, 1]);
+                // Header and the slice-header bytes left in the clear; real
+                // ones never end in a zero byte pair.
+                frame.push(0x41);
+                frame.push(0x9A);
+                loop {
+                    let start = frame.len();
+                    let length = 1 + (random.next() % 12) as usize;
+                    for _ in 0..length {
+                        frame.push(random.byte());
+                    }
+                    if nal + 1 == nals {
+                        // The last body is followed by the trailer.
+                        frame.extend_from_slice(&[0x0B, 0xFA, 0xFA]);
+                    }
+                    // What the encryptor checks: the body with two bytes of
+                    // what surrounds it.
+                    let mut window = frame[start - 2..].to_vec();
+                    if nal + 1 != nals {
+                        window.extend_from_slice(&[0, 0]);
+                    }
+                    if !has_start_code(&window) {
+                        break;
+                    }
+                    frame.truncate(start);
+                }
+            }
+            let mut rebuilt = Vec::new();
+            for (payload, _) in packetize(&frame, 1200) {
+                rebuilt.extend_from_slice(&[0, 0, 0, 1]);
+                rebuilt.extend_from_slice(&payload);
+            }
+            if rebuilt != frame && failures.len() < 5 {
+                failures.push((trial, frame, rebuilt));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:02x?}");
+    }
+
     #[test]
     fn parses_header() {
         let header = RtpHeader::write(true, PT_OPUS, 7, 96_000, 1234);

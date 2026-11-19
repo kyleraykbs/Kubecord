@@ -207,7 +207,8 @@ async fn main() -> Result<()> {
         "camera-timing" => {
             // Runs a camera through the real encode pipeline and reports how
             // evenly frames come out: `camera-timing [seconds] [name part]
-            // [cpu|auto] [kbit/s] [auto|mjpeg|raw]`. Local only.
+            // [cpu|auto] [kbit/s] [auto|mjpeg|raw] [keyframe seconds, 0 = on
+            // demand]`. Local only.
             let seconds: u64 = filtered.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
             let wanted = filtered.get(2).map(|name| name.to_lowercase());
             let Some(access) = kc_media::portal::request_cameras().await? else {
@@ -235,6 +236,9 @@ async fn main() -> Result<()> {
             if let Some(kbps) = filtered.get(4).and_then(|kbps| kbps.parse().ok()) {
                 settings.bitrate_kbps = kbps;
             }
+            if let Some(seconds) = filtered.get(6).and_then(|seconds| seconds.parse().ok()) {
+                settings.keyframe_secs = seconds;
+            }
             settings.camera_format = match filtered.get(5).map(String::as_str) {
                 Some("mjpeg") => kc_media::video::CameraFormat::Mjpeg,
                 Some("raw") => kc_media::video::CameraFormat::Raw,
@@ -249,8 +253,18 @@ async fn main() -> Result<()> {
                 settings.encoder
             );
             let (tx, rx) = std::sync::mpsc::channel();
+            let mut dump = std::env::var("KYLECORD_DUMP_FRAMES")
+                .ok()
+                .and_then(|path| std::fs::File::create(path).ok());
             let source =
                 kc_media::video::VideoSource::camera_portal(camera, settings, move |frame| {
+                    // `KYLECORD_DUMP_FRAMES=<file>` also writes every encoded
+                    // frame, each after its length as four little-endian bytes.
+                    if let Some(file) = dump.as_mut() {
+                        use std::io::Write;
+                        let _ = file.write_all(&(frame.data.len() as u32).to_le_bytes());
+                        let _ = file.write_all(&frame.data);
+                    }
                     let key = kc_media::video::is_keyframe(&frame.data);
                     let _ = tx.send((std::time::Instant::now(), frame.data.len(), key));
                 })?;

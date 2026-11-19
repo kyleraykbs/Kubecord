@@ -123,6 +123,8 @@ pub struct VideoSettings {
     pub fps: u32,
     pub bitrate_kbps: u32,
     /// Seconds between IDR keyframes.
+    /// Zero sends keyframes only when asked for (a viewer's request, or
+    /// lost packets), as WebRTC senders do.
     pub keyframe_secs: u32,
     /// Maximum extra delay before a captured frame is dropped instead of sent.
     /// `0` disables dropping.
@@ -201,6 +203,15 @@ fn encoder_element() -> &'static str {
     "x264enc"
 }
 
+/// Frames between scheduled keyframes. "Only when asked" is an hour: the
+/// encoders have no setting for never.
+fn keyframe_distance(settings: &VideoSettings) -> u32 {
+    match settings.keyframe_secs {
+        0 => settings.fps.max(1) * 3600,
+        seconds => settings.fps.max(1) * seconds,
+    }
+}
+
 fn hardware_available() -> bool {
     gst::init().is_ok() && gst::ElementFactory::find("vah264enc").is_some()
 }
@@ -210,7 +221,7 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
         format!(
             "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
             bitrate = settings.bitrate_kbps,
-            keyint = settings.fps * settings.keyframe_secs.max(1),
+            keyint = keyframe_distance(settings),
         )
     } else {
         format!(
@@ -222,7 +233,7 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
-            keyint = settings.fps * settings.keyframe_secs.max(1),
+            keyint = keyframe_distance(settings),
         )
     }
 }

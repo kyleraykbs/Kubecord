@@ -290,7 +290,7 @@ pub(crate) fn quality_controls(
         .collect();
     let keyframe = string_dropdown(&keyframe_names);
     keyframe.set_tooltip_text(Some(
-        "How often a full frame is sent unprompted. Viewers that lose the picture request one themselves, so longer intervals give a steadier stream; shorter ones recover sooner if a request is missed.",
+        "For Go Live: how often a full frame is sent unprompted. Viewers that lose the picture request one themselves, so longer intervals give a steadier stream; shorter ones recover sooner if a request is missed. Your camera sends full frames only when one is needed.",
     ));
     let retransmit_names: Vec<String> = RETRANSMIT_WINDOWS_MS
         .iter()
@@ -454,7 +454,11 @@ pub(crate) fn quality_controls(
     let leaky_row = setting_row("Drop Old Frames in the Capture Queue", &leaky);
     leaky_row.set_activatable_widget(Some(&leaky));
     let advanced = vec![
-        setting_row("Keyframe Interval", &keyframe),
+        {
+            let row = setting_row("Keyframe Interval", &keyframe);
+            row.set_subtitle("Go Live only; a camera sends keyframes when needed");
+            row
+        },
         setting_row("Dropout Recovery Window", &retransmit),
         drop_row,
         leaky_row,
