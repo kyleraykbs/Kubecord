@@ -43,7 +43,12 @@ pub enum ConnState {
     Connecting,
     Connected,
     Ready,
+    /// The connection dropped; the gateway is reconnecting by itself.
     Disconnected,
+    /// Discord no longer accepts the account's token.
+    SignedOut,
+    /// Discord closed the connection for good, for another reason.
+    Stopped,
 }
 
 impl ConnState {
@@ -51,7 +56,8 @@ impl ConnState {
         match self {
             Self::Connecting => "Connecting…".to_owned(),
             Self::Connected | Self::Ready => "Connected".to_owned(),
-            Self::Disconnected => "Offline".to_owned(),
+            Self::Disconnected | Self::Stopped => "Offline".to_owned(),
+            Self::SignedOut => "Signed out".to_owned(),
         }
     }
 }
@@ -356,10 +362,18 @@ pub enum UiEvent {
         account: AccountId,
         event: StoreEvent,
     },
+    /// Discord closed the gateway; when `fatal` it will not come back.
     GatewayClosed {
         account: AccountId,
         code: Option<u16>,
         reason: String,
+        fatal: bool,
+    },
+    /// Discord wants the account verified before it does more (`None`
+    /// once it is satisfied).
+    RequiredAction {
+        account: AccountId,
+        action: Option<String>,
     },
     VoiceJoined {
         account: AccountId,
@@ -848,6 +862,19 @@ fn spawn_account(
                                     serde_json::from_value::<User>(data["user"].clone()).ok();
                                 let _ = ui.send(UiEvent::Ready { account, user }).await;
                             }
+                            // READY names a pending requirement; the
+                            // update also reports it being lifted.
+                            let required = data["required_action"].as_str().map(str::to_owned);
+                            if name == "USER_REQUIRED_ACTION_UPDATE"
+                                || (name == "READY" && required.is_some())
+                            {
+                                let _ = ui
+                                    .send(UiEvent::RequiredAction {
+                                        account,
+                                        action: required,
+                                    })
+                                    .await;
+                            }
                         }
                         GatewayEvent::Resumed => {
                             let _ = ui.send(UiEvent::Resumed { account }).await;
@@ -862,15 +889,24 @@ fn spawn_account(
                                 })
                                 .await;
                         }
-                        GatewayEvent::Closed { code, reason } => {
+                        GatewayEvent::Closed {
+                            code,
+                            reason,
+                            fatal,
+                        } => {
                             let _ = ui
                                 .send(UiEvent::GatewayClosed {
                                     account,
                                     code,
                                     reason,
+                                    fatal,
                                 })
                                 .await;
-                            break;
+                            // Otherwise the gateway reconnects and its
+                            // events keep coming.
+                            if fatal {
+                                break;
+                            }
                         }
                     }
                 }
@@ -2535,7 +2571,10 @@ async fn teardown_voice(
 
 fn describe_http_error(error: &kc_http::Error) -> String {
     if error.is_unauthorized() {
-        "token rejected".to_owned()
+        "Discord no longer accepts this account's sign-in".to_owned()
+    } else if error.needs_verification() {
+        "Discord wants this account verified first: open Discord in a browser and follow what it asks"
+            .to_owned()
     } else {
         format!("{error}")
     }

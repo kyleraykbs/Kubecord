@@ -434,6 +434,14 @@ impl AppState {
         self.login_cancel.connect_clicked(move |_| {
             app.stack.set_visible_child_name("chat");
         });
+        // The banner's button is only offered for a signed-out account.
+        let app = self.clone();
+        self.banner.connect_button_clicked(move |_| {
+            let active = app.model.borrow().active;
+            if let Some(account) = active {
+                app.show_signed_out(account);
+            }
+        });
 
         self.connect_chat();
         self.connect_composer();
@@ -1129,11 +1137,17 @@ impl AppState {
     /// Shows a banner while the gateway is not connected.
     pub(crate) fn update_connection(&self) {
         let state = self.with_session(|session| session.connection.clone());
-        let text = match state {
-            Some(ConnState::Connecting) => "Connecting to Discord…",
-            Some(ConnState::Disconnected) => "Disconnected. Reconnecting…",
-            _ => "",
+        let (text, button) = match state {
+            Some(ConnState::Connecting) => ("Connecting to Discord…", None),
+            Some(ConnState::Disconnected) => ("Disconnected. Reconnecting…", None),
+            Some(ConnState::SignedOut) => ("Discord signed this account out.", Some("What Now?")),
+            Some(ConnState::Stopped) => (
+                "Discord closed the connection. Restart kylecord to reconnect.",
+                None,
+            ),
+            _ => ("", None),
         };
+        self.banner.set_button_label(button);
         self.banner.set_title(text);
         self.banner.set_revealed(!text.is_empty());
     }
@@ -1260,6 +1274,14 @@ impl AppState {
                     token: token.clone(),
                     label,
                 };
+                // Signing in again after Discord ended a session: the old
+                // session, under its dead token, goes.
+                {
+                    let fresh = session::account_id(&token);
+                    self.model.borrow_mut().sessions.retain(|id, session| {
+                        *id == fresh || session.account.user_id != Some(user.id)
+                    });
+                }
                 let save_error = self.persist_account(account.clone());
                 let id = self.start_account(account);
                 self.token_entry.set_text("");
@@ -1318,22 +1340,43 @@ impl AppState {
                 account,
                 code,
                 reason,
+                fatal,
             } => {
+                // 4004: Discord no longer takes the token.
+                let signed_out = fatal && code == Some(4004);
                 let active = {
                     let mut model = self.model.borrow_mut();
                     if let Some(session) = model.sessions.get_mut(&account) {
-                        session.connection = ConnState::Disconnected;
+                        session.connection = if signed_out {
+                            ConnState::SignedOut
+                        } else if fatal {
+                            ConnState::Stopped
+                        } else {
+                            ConnState::Disconnected
+                        };
                     }
                     model.active == Some(account)
                 };
                 if active {
                     self.update_connection();
-                    let message = if code == Some(4004) {
-                        "Gateway rejected the token".to_owned()
-                    } else {
-                        format!("Gateway disconnected: {reason}")
-                    };
-                    self.set_status(&message);
+                    self.render_user_bar();
+                    if signed_out {
+                        self.set_status("Discord signed this account out");
+                        self.show_signed_out(account);
+                    } else if fatal {
+                        self.set_status(&format!("Discord closed the connection: {reason}"));
+                    }
+                }
+            }
+            UiEvent::RequiredAction { account, action } => {
+                if self.model.borrow().active == Some(account) {
+                    match action {
+                        Some(action) => {
+                            tracing::warn!(action, "discord requires an action on the account");
+                            self.show_required_action(&action);
+                        }
+                        None => self.set_status("Discord has verified this account"),
+                    }
                 }
             }
             UiEvent::VoiceJoined {

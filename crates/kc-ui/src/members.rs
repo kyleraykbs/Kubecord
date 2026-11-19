@@ -125,6 +125,7 @@ impl AppState {
         let info = self.with_session(|session| {
             let connection = session.connection.label();
             let ready = matches!(session.connection, session::ConnState::Ready);
+            let fallback = self.account_name(&session.account);
             session.store.read(|state| {
                 let user = state.me.clone().or_else(|| session.user.clone());
                 let status = state.status.clone().unwrap_or_else(|| "online".to_owned());
@@ -137,10 +138,10 @@ impl AppState {
                     let text = text.trim().to_owned();
                     (!text.is_empty()).then_some(text)
                 });
-                (user, status, custom, connection, ready)
+                (user, status, custom, connection, ready, fallback)
             })
         });
-        let Some((user, status, custom, connection, ready)) = info else {
+        let Some((user, status, custom, connection, ready, fallback)) = info else {
             self.user_name_label.set_label("Not signed in");
             self.user_status_label.set_label("");
             return;
@@ -165,7 +166,8 @@ impl AppState {
                 );
                 self.user_name_label.set_label(&name);
             }
-            None => self.user_name_label.set_label("Connecting…"),
+            // Not heard from Discord yet (or never will: signed out).
+            None => self.user_name_label.set_label(&fallback),
         }
         if ready {
             let shown = if status == "invisible" {

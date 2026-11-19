@@ -587,7 +587,7 @@ async fn watch(token: Token, dms_only: bool) -> Result<()> {
                     GatewayEvent::Resumed => eprintln!("resumed"),
                     GatewayEvent::InvalidSession { resumable } => eprintln!("invalid session (resumable={resumable})"),
                     GatewayEvent::Reconnect => eprintln!("reconnect requested"),
-                    GatewayEvent::Closed { code, reason } => {
+                    GatewayEvent::Closed { code, reason, .. } => {
                         eprintln!("gateway closed: {code:?} {reason}");
                         break;
                     }
@@ -849,7 +849,7 @@ async fn voice(
                     data["user"]["username"].as_str().unwrap_or("?")
                 );
             }
-            Some(GatewayEvent::Closed { code, reason }) => {
+            Some(GatewayEvent::Closed { code, reason, .. }) => {
                 bail!("gateway closed: {code:?} {reason}");
             }
             Some(_) => {}
@@ -877,7 +877,7 @@ async fn voice(
                 }
                 _ => {}
             },
-            Some(GatewayEvent::Closed { code, reason }) => {
+            Some(GatewayEvent::Closed { code, reason, .. }) => {
                 bail!("gateway closed while joining: {code:?} {reason}");
             }
             Some(_) => {}
@@ -1070,7 +1070,7 @@ async fn voice(
                             }
                         }
                     }
-                    Some(GatewayEvent::Closed { code, reason }) => {
+                    Some(GatewayEvent::Closed { code, reason, .. }) => {
                         eprintln!("gateway closed: {code:?} {reason}");
                         break;
                     }

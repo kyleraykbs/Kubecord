@@ -61,6 +61,18 @@ impl Error {
         matches!(self, Self::Captcha { .. })
     }
 
+    /// Discord wants the account verified (by email, phone, ...) before
+    /// it allows this.
+    pub fn needs_verification(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                code: Some(40002),
+                ..
+            }
+        )
+    }
+
     pub fn is_unauthorized(&self) -> bool {
         self.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
     }

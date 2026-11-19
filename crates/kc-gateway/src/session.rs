@@ -23,8 +23,13 @@ pub enum GatewayEvent {
     Reconnect,
     /// Session is not resumable (op 9).
     InvalidSession { resumable: bool },
-    /// Fatal close (bad token, invalid intents, ...). The loop stops.
-    Closed { code: Option<u16>, reason: String },
+    /// Discord closed the socket. When `fatal` (bad token, invalid
+    /// intents, ...) the loop stops; otherwise it reconnects by itself.
+    Closed {
+        code: Option<u16>,
+        reason: String,
+        fatal: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,11 +425,13 @@ impl Gateway {
                         Message::Close(frame) => {
                             let (code, reason) = close_parts(frame);
                             error!(?code, reason, "gateway closed");
+                            let outcome = fatal_or_reconnect(code, reason.clone());
                             let _ = events.send(GatewayEvent::Closed {
                                 code,
-                                reason: reason.clone(),
+                                reason,
+                                fatal: matches!(outcome, Outcome::Fatal),
                             });
-                            return fatal_or_reconnect(code, reason);
+                            return outcome;
                         }
                         Message::Ping(payload) => {
                             let _ = write.send(Message::Pong(payload)).await;
