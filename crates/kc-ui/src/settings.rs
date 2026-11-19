@@ -103,7 +103,10 @@ pub struct CapturePreferences {
     /// Least time between keyframes sent because packets were lost.
     pub loss_keyframe_ms: u32,
     /// Send a keyframe when none has gone out for this many seconds (0:
-    /// only when asked or on loss).
+    /// only when asked or on loss). Saved under a new name since
+    /// 2026-11-19 so the old default of 5 s, whose keyframes showed as a
+    /// pulse of compression artifacts, does not carry over.
+    #[serde(rename = "full_frame_gap_secs")]
     pub keyframe_gap_secs: u32,
     /// The most one person's volume can be turned up, as a multiple of
     /// normal (the top of the User Volume slider).
@@ -158,7 +161,7 @@ impl Default for CapturePreferences {
             camera_format: 0,
             self_preview: true,
             loss_keyframe_ms: 1000,
-            keyframe_gap_secs: 5,
+            keyframe_gap_secs: 0,
             volume_boost_cap: 3,
             log_to_file: true,
             log_detailed: false,
@@ -312,7 +315,7 @@ impl CapturePreferences {
             self.loss_keyframe_ms = 1000;
         }
         if !KEYFRAME_GAPS.contains(&self.keyframe_gap_secs) {
-            self.keyframe_gap_secs = 5;
+            self.keyframe_gap_secs = 0;
         }
         if !VOLUME_BOOST_CAPS.contains(&self.volume_boost_cap) {
             self.volume_boost_cap = 3;
@@ -391,7 +394,7 @@ mod tests {
         let mut prefs = CapturePreferences::default();
         assert!(prefs.video_settings().adaptive_bitrate);
         assert_eq!(prefs.video_settings().loss_keyframe_ms, 1000);
-        assert_eq!(prefs.video_settings().keyframe_gap_secs, 5);
+        assert_eq!(prefs.video_settings().keyframe_gap_secs, 0);
         prefs.bitrate_kbps = Some(2500);
         let settings = prefs.video_settings();
         assert!(!settings.adaptive_bitrate);

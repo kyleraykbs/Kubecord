@@ -361,7 +361,7 @@ impl Default for VideoSettings {
             camera_format: CameraFormat::Auto,
             adaptive_bitrate: true,
             loss_keyframe_ms: 1000,
-            keyframe_gap_secs: 5,
+            keyframe_gap_secs: 0,
             send_twice: false,
         }
     }

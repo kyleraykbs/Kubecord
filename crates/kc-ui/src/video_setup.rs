@@ -384,7 +384,7 @@ pub(crate) fn quality_controls(
                 &prefs.loss_keyframe_ms,
                 1,
             ));
-            keyframe_gap.set_selected(position(&KEYFRAME_GAPS, &prefs.keyframe_gap_secs, 2));
+            keyframe_gap.set_selected(position(&KEYFRAME_GAPS, &prefs.keyframe_gap_secs, 0));
             send_twice.set_active(prefs.send_twice);
             leaky.set_active(prefs.leaky_queue);
         })
@@ -564,7 +564,7 @@ pub(crate) fn quality_controls(
         guided(
             "Full Frame at Least",
             &keyframe_gap,
-            "Sends a full frame whenever none has gone out for this long, so a viewer who lost packets on their own connection recovers without having to ask. Loss on your side and viewer requests already send them sooner. 5 s is a good default; choose Off if the picture hitches at this rhythm.",
+            "Sends a full frame whenever none has gone out for this long, as a safety net for a viewer who is stuck and whose request never reaches you. Each full frame shows as a brief pulse of compression artifacts, so a regular one makes the picture pulse at that rhythm. Leave Off unless a viewer keeps freezing until they turn your video off and on.",
         ),
         twice_row,
         drop_row,
