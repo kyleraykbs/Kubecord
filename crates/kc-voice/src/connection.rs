@@ -100,6 +100,14 @@ pub enum VoiceEvent {
         ssrc: u32,
     },
     ForceKeyframe,
+    /// How sent video fared over the last couple of seconds, for adapting
+    /// the bitrate: packets sent, packets the server asked for again, and
+    /// the server's bandwidth estimate (zero when it has given none).
+    VideoNetwork {
+        sent: u32,
+        lost: u32,
+        remb_kbps: u32,
+    },
     /// Round trip to the voice server (a heartbeat and its acknowledgement),
     /// measured every few seconds; `None` when none came back in time.
     Ping {
@@ -285,9 +293,12 @@ fn rtx_payload(original_sequence: u16, payload: &[u8]) -> Vec<u8> {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
-/// The least time between keyframes forced because packets were lost. Two
-/// seconds is what scheduled keyframes ran at without feeding more loss.
-const LOSS_KEYFRAME_SPACING: Duration = Duration::from_secs(2);
+/// The least time between keyframes forced because packets were lost,
+/// unless set otherwise. Sent on every request, 750 ms apart, they fed a
+/// loop on a connection near its limit.
+const LOSS_KEYFRAME_SPACING: Duration = Duration::from_secs(1);
+/// How often the encoder is told how the network is treating its video.
+const NETWORK_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 /// How often the ping is measured.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -349,6 +360,7 @@ enum Command {
     SetSpeaking(u8),
     SetVideo(bool),
     SetRetransmitWindow(Duration),
+    SetLossKeyframeSpacing(Duration),
     Disconnect,
 }
 
@@ -391,6 +403,13 @@ impl VoiceHandle {
     /// How long sent audio and video packets stay available for
     /// retransmission. A network dropout up to this long can be repaired by
     /// answering the server's NACKs; zero disables retransmission.
+    /// The least time between keyframes forced because video packets were
+    /// lost. Shorter recovers sooner; too short and the extra keyframes
+    /// themselves crowd a struggling connection.
+    pub fn set_loss_keyframe_spacing(&self, spacing: Duration) {
+        let _ = self.tx.send(Command::SetLossKeyframeSpacing(spacing));
+    }
+
     pub fn set_retransmit_window(&self, window: Duration) {
         let _ = self.tx.send(Command::SetRetransmitWindow(window));
     }
@@ -455,6 +474,13 @@ struct SessionState {
     /// Packets were lost too soon after that keyframe for another; one is
     /// owed once the spacing has passed.
     loss_keyframe_owed: bool,
+    loss_keyframe_spacing: Duration,
+    /// Video packets sent, and asked for again, since the last network
+    /// report to the encoder.
+    net_sent: u32,
+    net_lost: u32,
+    /// The server's latest bandwidth estimate for us, in kbit/s.
+    net_remb_kbps: u32,
     sent_video: SentVideo,
     /// Sequence number of the next packet on the retransmission stream.
     seq_rtx: u16,
@@ -687,6 +713,10 @@ async fn run(
         video_queue: VecDeque::new(),
         last_loss_keyframe: None,
         loss_keyframe_owed: false,
+        loss_keyframe_spacing: LOSS_KEYFRAME_SPACING,
+        net_sent: 0,
+        net_lost: 0,
+        net_remb_kbps: 0,
         sent_video: SentVideo::default(),
         seq_rtx: 0,
         test_drop: std::env::var("KYLECORD_TEST_DROP_VIDEO")
@@ -754,6 +784,8 @@ async fn run(
 
     let mut activity = tokio::time::interval(Duration::from_millis(100));
     activity.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut network = tokio::time::interval(NETWORK_REPORT_INTERVAL);
+    network.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut report = tokio::time::interval(Duration::from_secs(5));
     report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -768,6 +800,19 @@ async fn run(
                 state.send_owed_keyframe();
             }
             _ = video_repair.tick(), if !state.video_streams.is_empty() => state.poll_video(),
+            _ = network.tick() => {
+                let (sent, lost) = (
+                    std::mem::take(&mut state.net_sent),
+                    std::mem::take(&mut state.net_lost),
+                );
+                if sent > 0 {
+                    let _ = state.events.send(VoiceEvent::VideoNetwork {
+                        sent,
+                        lost,
+                        remb_kbps: state.net_remb_kbps,
+                    });
+                }
+            }
             _ = report.tick() => {
                 state.report_received();
                 state.report_sent();
@@ -962,6 +1007,9 @@ impl SessionState {
                 self.video_enabled = enabled;
                 self.send_video_state().await?;
             }
+            Command::SetLossKeyframeSpacing(spacing) => {
+                self.loss_keyframe_spacing = spacing.max(Duration::from_millis(250));
+            }
             Command::SetRetransmitWindow(window) => {
                 tracing::info!(
                     window_ms = window.as_millis() as u64,
@@ -1154,6 +1202,7 @@ impl SessionState {
             },
             self.retransmit_window,
         );
+        self.net_sent += 1;
         if self
             .test_drop
             .is_some_and(|every| u32::from(sequence) % every == 0)
@@ -1748,7 +1797,7 @@ impl SessionState {
         if self.loss_keyframe_owed
             && self
                 .last_loss_keyframe
-                .is_none_or(|last| last.elapsed() >= LOSS_KEYFRAME_SPACING)
+                .is_none_or(|last| last.elapsed() >= self.loss_keyframe_spacing)
         {
             self.loss_keyframe_owed = false;
             self.last_loss_keyframe = Some(std::time::Instant::now());
@@ -1923,6 +1972,7 @@ impl SessionState {
             let bitrate_bps = (mantissa as u64) << exp;
             tracing::debug!(bitrate_bps, "RTCP REMB bandwidth estimate");
             self.sent.remb_bps = bitrate_bps;
+            self.net_remb_kbps = (bitrate_bps / 1000).min(u64::from(u32::MAX)) as u32;
         }
         if packet_type == 205 && fmt == 1 && cleartext.len() >= 16 {
             let media =
@@ -1997,6 +2047,7 @@ impl SessionState {
                     .retain(|_, at| now.duration_since(*at) < Duration::from_secs(1));
             }
             if is_video {
+                self.net_lost += requested as u32;
                 // Logged as it happens, so a hitch someone saw can be matched
                 // to the second.
                 info!(
@@ -2015,7 +2066,7 @@ impl SessionState {
                 if found < requested
                     || self
                         .last_loss_keyframe
-                        .is_none_or(|last| now.duration_since(last) >= LOSS_KEYFRAME_SPACING)
+                        .is_none_or(|last| now.duration_since(last) >= self.loss_keyframe_spacing)
                 {
                     self.last_loss_keyframe = Some(now);
                     self.loss_keyframe_owed = false;

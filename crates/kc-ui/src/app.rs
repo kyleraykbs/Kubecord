@@ -572,24 +572,33 @@ impl AppState {
             glib::Propagation::Stop
         });
 
-        // Clicking outside a dialog closes it, as in Discord.
+        // Clicking outside a dialog closes it, as in Discord. The click is
+        // only watched, never claimed: a dialog on screen already keeps
+        // clicks from what is behind it, and claiming here once left every
+        // button in the window dead when a dialog was wrongly thought open.
         let outside = gtk::GestureClick::new();
-        outside.set_button(0);
+        outside.set_button(gtk::gdk::BUTTON_PRIMARY);
         outside.set_propagation_phase(gtk::PropagationPhase::Capture);
         let window = self.window.clone();
-        outside.connect_pressed(move |gesture, _, x, y| {
+        outside.connect_pressed(move |_, _, x, y| {
             let Some(dialog) = window.visible_dialog() else {
                 return;
             };
             let Some(card) = dialog.child() else {
                 return;
             };
+            if !dialog.is_mapped() || !card.is_mapped() {
+                return;
+            }
+            let Some(bounds) = card.compute_bounds(&window) else {
+                return;
+            };
+            if bounds.width() < 1.0 || bounds.height() < 1.0 {
+                return;
+            }
             let point = gtk::graphene::Point::new(x as f32, y as f32);
-            let inside = card
-                .compute_bounds(&window)
-                .is_some_and(|bounds| bounds.contains_point(&point));
-            if !inside {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
+            if !bounds.contains_point(&point) {
+                tracing::info!(title = %dialog.title(), "closing a dialog on a click outside it");
                 dialog.close();
             }
         });

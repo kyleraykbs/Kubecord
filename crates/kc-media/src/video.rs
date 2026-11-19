@@ -71,6 +71,8 @@ pub struct VideoSource {
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
     keyframes: Arc<Mutex<KeyframeRequests>>,
+    /// Present when the bitrate adapts to the network.
+    bitrate: Mutex<Option<BitrateController>>,
 }
 
 /// The least time between forced keyframes. Viewers repeat their requests
@@ -142,6 +144,81 @@ pub struct VideoSettings {
     pub encoder: EncoderPreference,
     /// Which of a camera's formats to capture.
     pub camera_format: CameraFormat,
+    /// Lower the bitrate while packets are being lost and bring it back
+    /// when the connection is clean; `bitrate_kbps` is then the most used.
+    pub adaptive_bitrate: bool,
+    /// Least time between keyframes sent because packets were lost.
+    pub loss_keyframe_ms: u32,
+}
+
+/// Follows how the network treats the video and picks a bitrate for it:
+/// down quickly when packets are lost in numbers, back up slowly when the
+/// connection has been clean. The occasional small burst of loss that any
+/// connection has does not count as trouble.
+#[derive(Clone, Debug)]
+pub struct BitrateController {
+    target: u32,
+    floor: u32,
+    current: u32,
+    /// Recent reports, as (sent, lost).
+    recent: std::collections::VecDeque<(u32, u32)>,
+}
+
+impl BitrateController {
+    /// Loss in one report that means the connection is over its limit.
+    const TROUBLE: f64 = 0.02;
+    /// Loss over `CLEAN_REPORTS` reports below which it has room again.
+    const CLEAN: f64 = 0.008;
+    const CLEAN_REPORTS: usize = 5;
+
+    pub fn new(target_kbps: u32) -> Self {
+        Self {
+            target: target_kbps,
+            floor: (target_kbps * 3 / 10).max(300).min(target_kbps),
+            current: target_kbps,
+            recent: Default::default(),
+        }
+    }
+
+    pub fn current(&self) -> u32 {
+        self.current
+    }
+
+    /// Takes one report; returns the new bitrate when it changes.
+    /// `ceiling_kbps` is the receiver's estimate of what fits (zero if
+    /// unknown).
+    pub fn report(&mut self, sent: u32, lost: u32, ceiling_kbps: u32) -> Option<u32> {
+        if sent < 50 {
+            // Too little sent to judge by.
+            return None;
+        }
+        let before = self.current;
+        let loss = f64::from(lost) / f64::from(sent);
+        if loss >= Self::TROUBLE {
+            self.current = (self.current * 85 / 100).max(self.floor);
+            self.recent.clear();
+        } else {
+            self.recent.push_back((sent, lost));
+            if self.recent.len() >= Self::CLEAN_REPORTS {
+                let (sent, lost) = self
+                    .recent
+                    .iter()
+                    .fold((0u64, 0u64), |(s, l), (sent, lost)| {
+                        (s + u64::from(*sent), l + u64::from(*lost))
+                    });
+                if (lost as f64) < sent as f64 * Self::CLEAN && self.current < self.target {
+                    self.current = (self.current * 110 / 100).min(self.target);
+                }
+                // One step up per run of clean reports.
+                self.recent.clear();
+            }
+        }
+        if ceiling_kbps > 0 {
+            let ceiling = (ceiling_kbps * 95 / 100).max(self.floor);
+            self.current = self.current.min(ceiling.max(self.floor));
+        }
+        (self.current != before).then_some(self.current)
+    }
 }
 
 /// The format a camera is asked for.
@@ -181,6 +258,8 @@ impl Default for VideoSettings {
             preset: "ultrafast".into(),
             encoder: EncoderPreference::Auto,
             camera_format: CameraFormat::Auto,
+            adaptive_bitrate: true,
+            loss_keyframe_ms: 1000,
         }
     }
 }
@@ -225,7 +304,7 @@ fn hardware_available() -> bool {
 fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     if hardware {
         format!(
-            "vah264enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
+            "vah264enc name=enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
             bitrate = settings.bitrate_kbps,
             keyint = keyframe_distance(settings),
         )
@@ -235,7 +314,7 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
             // bitrate (150 KB at 2.5 Mbit/s, ~130 RTP packets). Bound any one
             // frame to 150 ms of bitrate so keyframes stay small enough to
             // pace out within a few frame intervals.
-            "{encoder} tune=zerolatency speed-preset={preset} bitrate={bitrate} vbv-buf-capacity=150 key-int-max={keyint} bframes=0",
+            "{encoder} name=enc tune=zerolatency speed-preset={preset} bitrate={bitrate} vbv-buf-capacity=150 key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
@@ -593,6 +672,7 @@ impl VideoSource {
             _portal: None,
             _camera: None,
             keyframes: Arc::default(),
+            bitrate: Mutex::new(None),
         })
     }
 
@@ -638,6 +718,46 @@ impl VideoSource {
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Message("no capture pipeline variant".into())))
+    }
+
+    /// Lets the bitrate follow the network, never above `target_kbps`.
+    pub fn adapt_bitrate(&self, target_kbps: u32) {
+        if let Ok(mut bitrate) = self.bitrate.lock() {
+            *bitrate = Some(BitrateController::new(target_kbps));
+        }
+    }
+
+    /// How the network treated the video lately (see
+    /// [`BitrateController::report`]); changes the encoder's bitrate when
+    /// that calls for it. Does nothing unless the bitrate adapts.
+    pub fn network_report(&self, sent: u32, lost: u32, ceiling_kbps: u32) {
+        let Ok(mut bitrate) = self.bitrate.lock() else {
+            return;
+        };
+        let Some(controller) = bitrate.as_mut() else {
+            return;
+        };
+        let before = controller.current();
+        if let Some(kbps) = controller.report(sent, lost, ceiling_kbps) {
+            tracing::info!(
+                from_kbps = before,
+                to_kbps = kbps,
+                sent,
+                lost,
+                ceiling_kbps,
+                "video bitrate adapted"
+            );
+            self.set_bitrate(kbps);
+        }
+    }
+
+    /// Changes the encoder's bitrate while it runs.
+    fn set_bitrate(&self, kbps: u32) {
+        if let Some(encoder) = self.pipeline.by_name("enc")
+            && encoder.find_property("bitrate").is_some()
+        {
+            encoder.set_property("bitrate", kbps);
+        }
     }
 
     /// Asks the encoder for a keyframe: a viewer cannot decode (PLI/FIR), or
@@ -1095,6 +1215,74 @@ mod tests {
                 "no frame with keyframe_secs={keyframe_secs}: {description}"
             );
         }
+    }
+
+    #[test]
+    fn bitrate_backs_off_on_heavy_loss_and_climbs_back_when_clean() {
+        let mut controller = BitrateController::new(4000);
+        // The odd small burst is not trouble.
+        assert_eq!(controller.report(1000, 5, 0), None);
+        // Two percent is: down fifteen percent each time, to a floor.
+        assert_eq!(controller.report(1000, 25, 0), Some(3400));
+        assert_eq!(controller.report(1000, 40, 0), Some(2890));
+        for _ in 0..20 {
+            controller.report(1000, 100, 0);
+        }
+        assert_eq!(controller.current(), 1200);
+        // Clean for five reports: one step up; then back to the target.
+        for _ in 0..4 {
+            assert_eq!(controller.report(1000, 2, 0), None);
+        }
+        assert_eq!(controller.report(1000, 2, 0), Some(1320));
+        for _ in 0..200 {
+            controller.report(1000, 0, 0);
+        }
+        assert_eq!(controller.current(), 4000);
+        // The receiver's estimate caps it; too little sent says nothing.
+        assert_eq!(controller.report(1000, 0, 3000), Some(2850));
+        assert_eq!(controller.report(10, 10, 0), None);
+    }
+
+    /// The encoder's bitrate can be changed while it runs.
+    #[test]
+    fn the_bitrate_changes_while_encoding() {
+        gst::init().unwrap();
+        let settings = VideoSettings {
+            encoder: EncoderPreference::Cpu,
+            bitrate_kbps: 3000,
+            ..VideoSettings::default()
+        };
+        // Noise does not compress, so the output follows the bitrate.
+        let description = screen_description(&settings, false).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true pattern=snow name=src",
+        );
+        let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = bytes.clone();
+        let source = VideoSource::start_pipeline_with(
+            &description,
+            33,
+            move |frame: EncodedFrame| {
+                counted.fetch_add(frame.data.len(), Ordering::Relaxed);
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        let measure = |seconds: u64| {
+            std::thread::sleep(Duration::from_millis(700));
+            bytes.store(0, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(seconds));
+            bytes.load(Ordering::Relaxed) * 8 / 1000 / seconds as usize
+        };
+        let high = measure(2);
+        source.set_bitrate(600);
+        let low = measure(2);
+        drop(source);
+        assert!(high > 2000, "expected about 3000 kbit/s, got {high}");
+        assert!(
+            low < 1000,
+            "expected about 600 kbit/s after the change, got {low}"
+        );
     }
 
     #[test]

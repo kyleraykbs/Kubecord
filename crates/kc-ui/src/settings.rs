@@ -25,6 +25,9 @@ pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
 
+/// Least time between keyframes sent because packets were lost.
+pub const LOSS_KEYFRAME_SPACINGS_MS: [u32; 4] = [500, 1000, 2000, 3000];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapturePreferences {
@@ -79,6 +82,8 @@ pub struct CapturePreferences {
     pub camera_format: u32,
     /// Show your own camera and stream in the call.
     pub self_preview: bool,
+    /// Least time between keyframes sent because packets were lost.
+    pub loss_keyframe_ms: u32,
     /// Write the log file (see [`crate::logging`]).
     pub log_to_file: bool,
     /// Also log every media and voice event; far larger.
@@ -124,6 +129,7 @@ impl Default for CapturePreferences {
             call_height: CALL_HEIGHT,
             camera_format: 0,
             self_preview: true,
+            loss_keyframe_ms: 1000,
             log_to_file: true,
             log_detailed: false,
         }
@@ -154,6 +160,10 @@ impl CapturePreferences {
                 2 => CameraFormat::Raw,
                 _ => CameraFormat::Auto,
             },
+            // A bitrate chosen by hand is kept to; Automatic follows the
+            // network.
+            adaptive_bitrate: self.bitrate_kbps.is_none(),
+            loss_keyframe_ms: self.loss_keyframe_ms,
         }
     }
 
@@ -203,6 +213,7 @@ impl CapturePreferences {
         self.stream_delay_ms = defaults.stream_delay_ms;
         self.cpu_encoder = defaults.cpu_encoder;
         self.camera_format = defaults.camera_format;
+        self.loss_keyframe_ms = defaults.loss_keyframe_ms;
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -247,6 +258,9 @@ impl CapturePreferences {
             if !volume.is_finite() || !(0.0..=2.0).contains(volume) {
                 *volume = 1.0;
             }
+        }
+        if !LOSS_KEYFRAME_SPACINGS_MS.contains(&self.loss_keyframe_ms) {
+            self.loss_keyframe_ms = 1000;
         }
         if self.camera_format > 2 {
             self.camera_format = 0;
@@ -311,6 +325,17 @@ mod tests {
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1280, 720, 30), 1935);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 30), 4354);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 60), 6000);
+    }
+
+    #[test]
+    fn only_an_automatic_bitrate_adapts() {
+        let mut prefs = CapturePreferences::default();
+        assert!(prefs.video_settings().adaptive_bitrate);
+        assert_eq!(prefs.video_settings().loss_keyframe_ms, 1000);
+        prefs.bitrate_kbps = Some(2500);
+        let settings = prefs.video_settings();
+        assert!(!settings.adaptive_bitrate);
+        assert_eq!(settings.bitrate_kbps, 2500);
     }
 
     #[test]

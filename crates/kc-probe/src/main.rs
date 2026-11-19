@@ -964,6 +964,9 @@ async fn voice(
                     Some(VoiceEvent::DaveReady) => println!("DAVE ready"),
                     Some(VoiceEvent::ForceKeyframe) => println!("force keyframe requested"),
                     Some(VoiceEvent::Ping { millis }) => println!("ping: {millis:?} ms"),
+                    Some(VoiceEvent::VideoNetwork { sent, lost, remb_kbps }) => {
+                        println!("video network: sent {sent} lost {lost} remb {remb_kbps} kbit/s");
+                    }
                     Some(VoiceEvent::KeyframeRequest { user_id, .. }) => {
                         println!("keyframe requested by {user_id}");
                     }

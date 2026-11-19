@@ -197,7 +197,7 @@ pub enum VoiceCommand {
         /// What the screen picker offers.
         sources: ShareSources,
         /// The capture the user previewed, to carry on as the stream.
-        capture: Option<PreparedCapture>,
+        capture: Option<Box<PreparedCapture>>,
         /// Also share system audio.
         audio: bool,
     },
@@ -299,7 +299,7 @@ pub enum Command {
         settings: VideoSettings,
         delay_ms: u64,
         sources: ShareSources,
-        capture: Option<PreparedCapture>,
+        capture: Option<Box<PreparedCapture>>,
         audio: bool,
     },
     StartStreamCamera {
@@ -886,6 +886,28 @@ fn spawn_account(
                                 teardown_voice(&mut voice, account, &ui, true).await;
                             }
                         }
+                        VoiceControl::VideoNetwork {
+                            generation,
+                            stream,
+                            sent,
+                            lost,
+                            remb_kbps,
+                        } => {
+                            let source = if stream {
+                                (generation == voice.stream_generation)
+                                    .then_some(voice.stream_connection.as_ref())
+                                    .flatten()
+                                    .and_then(|connection| connection.source.as_ref())
+                            } else {
+                                (generation == voice.generation)
+                                    .then_some(voice.connection.as_ref())
+                                    .flatten()
+                                    .and_then(|connection| connection.camera.as_ref())
+                            };
+                            if let Some(source) = source {
+                                source.network_report(sent, lost, remb_kbps);
+                            }
+                        }
                         VoiceControl::ForceCameraKeyframe { generation } => {
                             if generation == voice.generation
                                 && let Some(connection) = &voice.connection
@@ -928,6 +950,9 @@ fn spawn_account(
                                     let share_audio = voice.stream_audio;
                                     if let Some(connection) = &mut voice.stream_connection {
                                         tracing::info!("stream source ready");
+                                        if voice.stream_settings.adaptive_bitrate {
+                                            source.adapt_bitrate(voice.stream_settings.bitrate_kbps);
+                                        }
                                         connection.source = Some(*source);
                                         if connection.audio.is_none() && share_audio {
                                             match ScreenAudio::start(
@@ -1005,7 +1030,7 @@ struct VoiceRuntime {
     stream_settings: VideoSettings,
     stream_delay_ms: u64,
     stream_sources: ShareSources,
-    stream_capture: Option<PreparedCapture>,
+    stream_capture: Option<Box<PreparedCapture>>,
     stream_audio: bool,
     stream_pending: bool,
     streaming: bool,
@@ -1204,6 +1229,15 @@ enum VoiceControl {
     },
     ForceCameraKeyframe {
         generation: u64,
+    },
+    /// How the camera's (or, with `stream`, the stream's) video is faring
+    /// on the network, for adapting its bitrate.
+    VideoNetwork {
+        generation: u64,
+        stream: bool,
+        sent: u32,
+        lost: u32,
+        remb_kbps: u32,
     },
     WatchClosed {
         generation: u64,
@@ -1527,6 +1561,19 @@ async fn maybe_start_stream(
                         VoiceEvent::ForceKeyframe => {
                             let _ = control.send(VoiceControl::ForceKeyframe { generation });
                         }
+                        VoiceEvent::VideoNetwork {
+                            sent,
+                            lost,
+                            remb_kbps,
+                        } => {
+                            let _ = control.send(VoiceControl::VideoNetwork {
+                                generation,
+                                stream: true,
+                                sent,
+                                lost,
+                                remb_kbps,
+                            });
+                        }
                         VoiceEvent::Error(message) => {
                             tracing::warn!(%message, "stream voice error");
                             let _ = ui_events
@@ -1557,6 +1604,9 @@ async fn maybe_start_stream(
             let video_settings = voice.stream_settings.clone();
             handle
                 .set_retransmit_window(Duration::from_millis(video_settings.retransmit_ms as u64));
+            handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(
+                video_settings.loss_keyframe_ms,
+            )));
             let stream_delay_ms = voice.stream_delay_ms;
             let drop_after_ms = video_settings.drop_frames_after_ms;
             let drop_after =
@@ -1635,6 +1685,7 @@ async fn maybe_start_stream(
                         // as the stream: same screen, no second picker. A
                         // keyframe lets viewers start at once.
                         Some(prepared) => {
+                            let prepared = *prepared;
                             tracing::info!("going live with the previewed capture");
                             prepared.tap.set(on_frame);
                             prepared.source.force_keyframe();
@@ -1862,6 +1913,19 @@ async fn maybe_connect(
                         VoiceEvent::Ping { millis } => {
                             let _ = ui.try_send(UiEvent::VoicePing { account, millis });
                         }
+                        VoiceEvent::VideoNetwork {
+                            sent,
+                            lost,
+                            remb_kbps,
+                        } => {
+                            let _ = control.send(VoiceControl::VideoNetwork {
+                                generation,
+                                stream: false,
+                                sent,
+                                lost,
+                                remb_kbps,
+                            });
+                        }
                         VoiceEvent::Error(message) => {
                             let _ = ui.send(UiEvent::VoiceError { account, message }).await;
                             let _ = control.send(VoiceControl::Closed { generation });
@@ -1905,6 +1969,8 @@ async fn start_camera(
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
     handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
+    handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(settings.loss_keyframe_ms)));
+    let adapt = settings.adaptive_bitrate.then_some(settings.bitrate_kbps);
     // Opening a camera can take a few seconds while formats are tried; keep
     // it off the account loop.
     let source = tokio::task::spawn_blocking(move || {
@@ -1916,6 +1982,9 @@ async fn start_camera(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
+    if let Some(target) = adapt {
+        source.adapt_bitrate(target);
+    }
     connection.camera = Some(source);
     connection.handle.set_video(true);
     Ok(())

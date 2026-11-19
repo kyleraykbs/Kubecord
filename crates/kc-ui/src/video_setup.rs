@@ -22,7 +22,7 @@ use crate::live::LiveVideo;
 use crate::session::{AccountId, CameraPurpose, Command};
 use crate::settings::{
     BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS,
-    RESOLUTIONS, RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
+    LOSS_KEYFRAME_SPACINGS_MS, RESOLUTIONS, RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
 };
 use crate::shell::AppState;
 
@@ -320,6 +320,14 @@ pub(crate) fn quality_controls(
         })
         .collect();
     let drop_late = string_dropdown(&drop_names);
+    let loss_names: Vec<String> = LOSS_KEYFRAME_SPACINGS_MS
+        .iter()
+        .map(|ms| match ms {
+            500 => "Every 0.5 s".to_owned(),
+            ms => format!("Every {} s", ms / 1000),
+        })
+        .collect();
+    let loss_keyframes = string_dropdown(&loss_names);
     let leaky = gtk::Switch::new();
     leaky.set_tooltip_text(Some(
         "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
@@ -335,6 +343,7 @@ pub(crate) fn quality_controls(
         let keyframe = keyframe.clone();
         let retransmit = retransmit.clone();
         let drop_late = drop_late.clone();
+        let loss_keyframes = loss_keyframes.clone();
         let leaky = leaky.clone();
         Rc::new(move |prefs: &CapturePreferences| {
             resolution.set_selected(
@@ -357,6 +366,11 @@ pub(crate) fn quality_controls(
             keyframe.set_selected(position(&KEYFRAME_INTERVALS, &prefs.keyframe_secs, 0));
             retransmit.set_selected(position(&RETRANSMIT_WINDOWS_MS, &prefs.retransmit_ms, 2));
             drop_late.set_selected(position(&DROP_AFTER_MS, &prefs.drop_frames_after_ms, 2));
+            loss_keyframes.set_selected(position(
+                &LOSS_KEYFRAME_SPACINGS_MS,
+                &prefs.loss_keyframe_ms,
+                1,
+            ));
             leaky.set_active(prefs.leaky_queue);
         })
     };
@@ -428,6 +442,15 @@ pub(crate) fn quality_controls(
             target(&move |prefs| prefs.drop_frames_after_ms = ms);
         }
     });
+    let target = apply.clone();
+    loss_keyframes.connect_selected_notify(move |dropdown| {
+        if let Some(ms) = LOSS_KEYFRAME_SPACINGS_MS
+            .get(dropdown.selected() as usize)
+            .copied()
+        {
+            target(&move |prefs| prefs.loss_keyframe_ms = ms);
+        }
+    });
     let target = apply;
     leaky.connect_active_notify(move |switch| {
         let active = switch.is_active();
@@ -455,7 +478,7 @@ pub(crate) fn quality_controls(
         guided(
             "Bitrate",
             &bitrate,
-            "Automatic picks about 2 Mbit/s for 720p30 and 4.4 for 1080p30. Lower it if viewers see freezes; raise it if the picture is blocky. Discord carries about 4 Mbit/s per stream.",
+            "Automatic aims for about 2 Mbit/s at 720p30 and 4.4 at 1080p30, backs off while packets are being lost, and climbs back when the connection is clean. A fixed value is kept to whatever happens. Discord carries about 4 Mbit/s per stream.",
         ),
     ];
     if stream {
@@ -500,6 +523,11 @@ pub(crate) fn quality_controls(
             "Dropout Recovery Window",
             &retransmit,
             "How long sent audio and video is kept so it can be sent again after a network dropout. 2 s covers most; Off never resends.",
+        ),
+        guided(
+            "Fastest Loss Recovery",
+            &loss_keyframes,
+            "When packets are lost, a full frame repairs the picture; this is the least time between them. Shorter recovers sooner, but on a connection near its limit the extra full frames cause more loss. 1 s is a good default; go longer if freezes come in clusters.",
         ),
         drop_row,
         leaky_row,
@@ -972,7 +1000,7 @@ impl AppState {
             } else {
                 // Go live with the capture being previewed, if there is one;
                 // otherwise the session opens the picker.
-                let capture = target.take_capture();
+                let capture = target.take_capture().map(Box::new);
                 target.stop();
                 let parent = app.window_identifier.borrow().clone();
                 let _ = app.cmd_tx.try_send(Command::StartStream {
