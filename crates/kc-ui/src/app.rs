@@ -152,6 +152,49 @@ pub fn run() -> glib::ExitCode {
                     "camera" => app_state.request_cameras(account, CameraPurpose::Camera),
                     "share" => app_state.show_share_popup(account),
                     "captcha" => app_state.test_captcha(),
+                    // A DM call shown from a local CALL_CREATE (nothing is
+                    // sent); `call-dm-end` then ends it with CALL_DELETE.
+                    "call-dm" | "call-dm-end" => {
+                        let found = store.read(|state| {
+                            state
+                                .relationships
+                                .values()
+                                .find(|relationship| {
+                                    relationship.kind == kc_state::Relationship::FRIEND
+                                })
+                                .and_then(|relationship| {
+                                    Some((relationship.id, state.dm_with(relationship.id)?.clone()))
+                                })
+                        });
+                        if let Some((friend, channel)) = found {
+                            let channel_id = channel.id;
+                            app_state.open_channel(channel);
+                            store.apply(
+                                "CALL_CREATE",
+                                &serde_json::json!({
+                                    "channel_id": channel_id.to_string(),
+                                    "voice_states": [{
+                                        "channel_id": channel_id.to_string(),
+                                        "user_id": friend.to_string(),
+                                    }],
+                                }),
+                            );
+                            app_state.refresh_voice_view();
+                            if popup == "call-dm-end" {
+                                let ended = app_state.clone();
+                                glib::timeout_add_local_once(
+                                    Duration::from_millis(800),
+                                    move || {
+                                        store.apply(
+                                        "CALL_DELETE",
+                                        &serde_json::json!({"channel_id": channel_id.to_string()}),
+                                    );
+                                        ended.refresh_voice_view();
+                                    },
+                                );
+                            }
+                        }
+                    }
                     "notice" => {
                         app_state.notify("You're typing unseen", None, 30);
                         app_state.notify(
@@ -494,6 +537,20 @@ impl AppState {
             }
         });
         self.window.add_controller(outside);
+
+        // The call's height above a DM's chat is kept too, while both show.
+        let app = self.clone();
+        self.call_split.connect_position_notify(move |split| {
+            if !(app.call_area.is_visible() && app.chat_box.is_visible()) {
+                return;
+            }
+            let height = split.position();
+            if height >= crate::settings::CALL_HEIGHT_MIN
+                && height != app.capture.borrow().call_height
+            {
+                app.update_prefs(|prefs| prefs.call_height = height);
+            }
+        });
 
         // The sidebar width is kept between launches.
         let app = self.clone();

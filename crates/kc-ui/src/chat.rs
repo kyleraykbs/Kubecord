@@ -160,27 +160,18 @@ impl AppState {
         };
         self.content_stack.set_visible_child_name("chat");
 
-        // Voice channels, and DMs while a call is up, show the call tiles
-        // instead of a message list.
-        let show_call = self
-            .with_session(|session| {
-                let in_call = session
-                    .voice
-                    .as_ref()
-                    .is_some_and(|voice| voice.channel_id == channel_id);
-                let voice_only = session.store.read(|state| {
-                    state
-                        .channels
-                        .get(&channel_id)
-                        .is_some_and(|channel| channel.kind.is_voice() && !channel.kind.is_text())
-                });
-                voice_only || in_call
-            })
-            .unwrap_or(false);
-        if show_call {
-            self.chat.borrow_mut().channel = None;
-            self.render_voice_view(channel_id);
-            return;
+        // Voice channels show the call alone; a DM with a call up shows it
+        // above its chat.
+        match self.call_layout(channel_id) {
+            crate::voice::CallLayout::Only => {
+                self.chat.borrow_mut().channel = None;
+                self.render_voice_view(channel_id);
+                return;
+            }
+            crate::voice::CallLayout::WithChat => self.render_voice_view(channel_id),
+            crate::voice::CallLayout::Hidden => {
+                self.set_call_layout(crate::voice::CallLayout::Hidden);
+            }
         }
 
         if self.chat.borrow().channel == Some(channel_id) {

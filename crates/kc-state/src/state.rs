@@ -456,6 +456,40 @@ impl State {
                     events.push(event);
                 }
             }
+            // A DM call's participants: CALL_CREATE lists who is in it, and
+            // CALL_DELETE ends it. Discord only sends voice state updates
+            // to those in the call, so someone who left before the others
+            // relies on CALL_DELETE to clear them.
+            "CALL_CREATE" => {
+                for value in data["voice_states"].as_array().into_iter().flatten() {
+                    if let Ok(voice_state) = serde_json::from_value::<VoiceState>(value.clone()) {
+                        events.push(StoreEvent::VoiceStateUpdated {
+                            guild_id: voice_state.guild_id,
+                            user_id: voice_state.user_id,
+                        });
+                        self.voice_states.insert(voice_state.key(), voice_state);
+                    }
+                }
+            }
+            "CALL_DELETE" => {
+                if let Some(channel_id) = snowflake(data, "channel_id") {
+                    let gone: Vec<(Option<Snowflake>, Snowflake)> = self
+                        .voice_states
+                        .iter()
+                        .filter(|(_, voice)| {
+                            voice.guild_id.is_none() && voice.channel_id == Some(channel_id)
+                        })
+                        .map(|(key, _)| *key)
+                        .collect();
+                    for key in gone {
+                        self.voice_states.remove(&key);
+                        events.push(StoreEvent::VoiceStateUpdated {
+                            guild_id: None,
+                            user_id: key.1,
+                        });
+                    }
+                }
+            }
             "VOICE_SERVER_UPDATE" => {
                 if let Some(guild_id) = snowflake(data, "guild_id") {
                     events.push(StoreEvent::VoiceServerUpdated {
@@ -1647,6 +1681,44 @@ mod tests {
             assert_eq!(users.len(), 1);
             assert_eq!(users[0].display_name(), "friend");
         });
+    }
+
+    #[test]
+    fn dm_calls_are_seeded_by_call_create_and_cleared_by_call_delete() {
+        let store = Store::new();
+        store.apply(
+            "CALL_CREATE",
+            &json!({
+                "channel_id": "40",
+                "ringing": [],
+                "voice_states": [
+                    {"channel_id": "40", "user_id": "1"},
+                    {"channel_id": "40", "user_id": "2"}
+                ]
+            }),
+        );
+        let in_call = |store: &Store| {
+            store.read(|state| {
+                state
+                    .voice_states
+                    .values()
+                    .filter(|voice| voice.channel_id == Some(Snowflake(40)))
+                    .count()
+            })
+        };
+        assert_eq!(in_call(&store), 2);
+        // A guild voice state in another channel is left alone.
+        store.apply(
+            "VOICE_STATE_UPDATE",
+            &json!({"guild_id": "5", "channel_id": "12", "user_id": "3"}),
+        );
+        store.apply("CALL_DELETE", &json!({"channel_id": "40"}));
+        assert_eq!(in_call(&store), 0);
+        assert!(store.read(|state| {
+            state
+                .voice_states
+                .contains_key(&(Some(Snowflake(5)), Snowflake(3)))
+        }));
     }
 
     #[test]

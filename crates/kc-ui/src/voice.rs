@@ -35,6 +35,17 @@ pub(crate) fn is_voice_only(channel: &Channel) -> bool {
     channel.kind.is_voice() && !channel.kind.is_text()
 }
 
+/// What the chat column shows for a channel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CallLayout {
+    /// No call: the chat alone.
+    Hidden,
+    /// A DM call above its chat.
+    WithChat,
+    /// A voice channel: the call alone.
+    Only,
+}
+
 impl AppState {
     /// A click on a voice channel in the sidebar: the first click shows the
     /// channel, a second click within the desktop's double-click time joins
@@ -123,23 +134,50 @@ impl AppState {
 
     /// Redraws the voice view when a voice channel — or a DM with a live
     /// call — is open.
+    /// Redraws the call for the open channel, or takes it away when no one
+    /// is in one any more.
     pub(crate) fn refresh_voice_view(self: &Rc<Self>) {
-        let open = self
-            .with_session(|session| {
-                let channel_id = session.selected_channel?;
-                let in_call = session
-                    .voice
-                    .as_ref()
-                    .is_some_and(|voice| voice.channel_id == channel_id);
-                session.store.read(|state| {
-                    let voice_only = state.channels.get(&channel_id).is_some_and(is_voice_only);
-                    (voice_only || in_call).then_some(channel_id)
-                })
-            })
-            .flatten();
-        if let Some(channel_id) = open {
-            self.render_voice_view(channel_id);
+        let Some(channel_id) = self
+            .with_session(|session| session.selected_channel)
+            .flatten()
+        else {
+            return;
+        };
+        match self.call_layout(channel_id) {
+            CallLayout::Hidden => self.set_call_layout(CallLayout::Hidden),
+            _ => self.render_voice_view(channel_id),
         }
+    }
+
+    /// Voice channels are the call alone; a DM shows its call above the chat
+    /// while anyone, you or not, is in it.
+    pub(crate) fn call_layout(&self, channel_id: Snowflake) -> CallLayout {
+        self.with_session(|session| {
+            let joined = session
+                .voice
+                .as_ref()
+                .is_some_and(|voice| voice.channel_id == channel_id);
+            session.store.read(|state| {
+                if state.channels.get(&channel_id).is_some_and(is_voice_only) {
+                    return CallLayout::Only;
+                }
+                let active = state
+                    .voice_states
+                    .values()
+                    .any(|voice| voice.guild_id.is_none() && voice.channel_id == Some(channel_id));
+                if joined || active {
+                    CallLayout::WithChat
+                } else {
+                    CallLayout::Hidden
+                }
+            })
+        })
+        .unwrap_or(CallLayout::Hidden)
+    }
+
+    pub(crate) fn set_call_layout(&self, layout: CallLayout) {
+        self.call_area.set_visible(layout != CallLayout::Hidden);
+        self.chat_box.set_visible(layout != CallLayout::Only);
     }
 
     /// Starts (or joins) a one-to-one voice call with a user: opens the DM,
@@ -203,7 +241,11 @@ impl AppState {
     pub(crate) fn render_voice_view(self: &Rc<Self>, channel_id: Snowflake) {
         clear_box(&self.voice_view);
         self.voice_tiles.borrow_mut().clear();
-        self.message_stack.set_visible_child_name("voice");
+        let layout = match self.call_layout(channel_id) {
+            CallLayout::Only => CallLayout::Only,
+            _ => CallLayout::WithChat,
+        };
+        self.set_call_layout(layout);
         let Some(account) = self.model.borrow().active else {
             return;
         };
@@ -317,13 +359,37 @@ impl AppState {
         self.voice_view.append(&tiles);
 
         if !joined {
-            let hint = gtk::Label::new(Some("Double-click the channel in the sidebar to join."));
-            hint.add_css_class("dim-label");
-            hint.set_wrap(true);
-            hint.set_justify(gtk::Justification::Center);
-            hint.set_max_width_chars(60);
-            hint.set_halign(gtk::Align::Center);
-            self.voice_view.append(&hint);
+            // A DM call you are not in: join it from here. A voice channel
+            // is joined from the sidebar.
+            let channel = self
+                .with_session(|session| {
+                    session
+                        .store
+                        .read(|state| state.channels.get(&channel_id).cloned())
+                })
+                .flatten()
+                .filter(|channel| channel.guild_id.is_none());
+            match channel {
+                Some(channel) => {
+                    let join = gtk::Button::with_label("Join Call");
+                    join.add_css_class("suggested-action");
+                    join.add_css_class("pill");
+                    join.set_halign(gtk::Align::Center);
+                    let app = self.clone();
+                    join.connect_clicked(move |_| app.join_call(&channel));
+                    self.voice_view.append(&join);
+                }
+                None => {
+                    let hint =
+                        gtk::Label::new(Some("Double-click the channel in the sidebar to join."));
+                    hint.add_css_class("dim-label");
+                    hint.set_wrap(true);
+                    hint.set_justify(gtk::Justification::Center);
+                    hint.set_max_width_chars(60);
+                    hint.set_halign(gtk::Align::Center);
+                    self.voice_view.append(&hint);
+                }
+            }
         }
     }
 
@@ -352,7 +418,7 @@ impl AppState {
                 .insert((account, owner, true), video);
         }
         clear_box(&self.voice_view);
-        self.message_stack.set_visible_child_name("voice");
+        self.set_call_layout(CallLayout::Only);
         self.voice_view.set_valign(gtk::Align::Fill);
         self.voice_view
             .append(&self.video_stage(account, owner, true, "Test pattern"));

@@ -84,6 +84,11 @@ pub(crate) struct AppState {
     pub split: adw::OverlaySplitView,
     pub messages_scroll: gtk::ScrolledWindow,
     pub message_stack: gtk::Stack,
+    /// The call (tiles) above the chat; the divider resizes it.
+    pub call_split: gtk::Paned,
+    pub call_area: gtk::ScrolledWindow,
+    /// Messages and the composer, under the call.
+    pub chat_box: gtk::Box,
     pub message_overlay: gtk::Overlay,
     pub toolbar: gtk::Box,
     pub hover: RefCell<crate::chat::Hover>,
@@ -504,7 +509,6 @@ impl AppState {
         let message_stack = gtk::Stack::new();
         message_stack.add_named(&message_overlay, Some("messages"));
         message_stack.add_named(&placeholder_scroll, Some("placeholder"));
-        message_stack.add_named(&voice_scroll, Some("voice"));
         message_stack.set_vexpand(true);
         // The placeholder page is taller than a short window allows; it must
         // not set the minimum height of the message list.
@@ -646,9 +650,26 @@ impl AppState {
         composer_area.append(&composer_box);
         composer_area.append(&blocked_label);
 
+        let chat_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat_box.append(&message_stack);
+        chat_box.append(&composer_area);
+        chat_box.set_size_request(-1, 160);
+
+        // A call sits above the chat, as in Discord, and the divider between
+        // them drags. Voice channels show the call alone, and without a
+        // call the chat has the whole column.
+        voice_scroll.set_size_request(-1, crate::settings::CALL_HEIGHT_MIN);
+        voice_scroll.set_visible(false);
+        let call_split = gtk::Paned::new(gtk::Orientation::Vertical);
+        call_split.set_start_child(Some(&voice_scroll));
+        call_split.set_end_child(Some(&chat_box));
+        call_split.set_resize_start_child(false);
+        call_split.set_shrink_start_child(false);
+        call_split.set_shrink_end_child(false);
+        call_split.set_vexpand(true);
+
         let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        chat_column.append(&message_stack);
-        chat_column.append(&composer_area);
+        chat_column.append(&call_split);
 
         // -- member list -------------------------------------------------
         let members_count_label = gtk::Label::new(None);
@@ -704,6 +725,7 @@ impl AppState {
         // handle changes it.
         let capture = CapturePreferences::load();
         capture.apply_devices();
+        call_split.set_position(capture.call_height);
         let sidebar_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         sidebar_paned.set_start_child(Some(&channel_sidebar));
         sidebar_paned.set_end_child(Some(&content));
@@ -776,6 +798,9 @@ impl AppState {
             split,
             messages_scroll,
             message_stack: message_stack.clone(),
+            call_split,
+            call_area: voice_scroll,
+            chat_box,
             message_overlay,
             toolbar,
             hover: RefCell::new(crate::chat::Hover::default()),

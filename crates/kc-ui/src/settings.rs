@@ -67,7 +67,13 @@ pub struct CapturePreferences {
     pub captcha_in_app: bool,
     /// Tell Discord when you are typing, so others see it.
     pub send_typing: bool,
+    /// Height of the call above a DM's chat, in pixels.
+    pub call_height: i32,
 }
+
+/// Default and least height of the call area above a DM's chat.
+pub const CALL_HEIGHT: i32 = 320;
+pub const CALL_HEIGHT_MIN: i32 = 120;
 
 /// Default and limits of the resizable channel sidebar.
 pub const SIDEBAR_WIDTH: i32 = 340;
@@ -99,6 +105,7 @@ impl Default for CapturePreferences {
             always_preview: false,
             captcha_in_app: true,
             send_typing: true,
+            call_height: CALL_HEIGHT,
         }
     }
 }
@@ -217,6 +224,7 @@ impl CapturePreferences {
             self.share_source = 0;
         }
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        self.call_height = self.call_height.max(CALL_HEIGHT_MIN);
     }
 }
 
