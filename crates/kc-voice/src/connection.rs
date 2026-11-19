@@ -1017,7 +1017,16 @@ impl SessionState {
                     Some(dave) => match dave.encrypt_video(&frame) {
                         Ok(frame) => frame,
                         Err(error) => {
-                            debug!(%error, "dropping video frame until DAVE is ready");
+                            if dave.is_ready() && !crate::dave::video_frame_fits(&frame) {
+                                // Not a matter of waiting: this encoder's
+                                // frames will never be sent.
+                                tracing::warn!(
+                                    bytes = frame_size,
+                                    "video frame is in too many slices to be encrypted; dropped"
+                                );
+                            } else {
+                                debug!(%error, "dropping video frame until DAVE is ready");
+                            }
                             self.sent.dropped += 1;
                             return Ok(true);
                         }

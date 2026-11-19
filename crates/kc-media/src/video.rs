@@ -580,10 +580,23 @@ fn hardware_available() -> bool {
 /// refuses the setting and falls back to a keyframe every second.
 const HARDWARE_KEYFRAME_DISTANCE: u32 = 1024;
 
+/// Slices in a hardware-encoded frame. It was 32 once, which no frame
+/// survived: see [`kc_voice::dave::MAX_VIDEO_SLICES`].
+const HARDWARE_SLICES: usize = 4;
+
+/// Threads for x264, which with `tune=zerolatency` cuts every frame into
+/// one slice per thread: as many as there are processors, but no more
+/// than a frame may have slices.
+fn x264_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(kc_voice::dave::MAX_VIDEO_SLICES)
+}
+
 fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
     if hardware {
         format!(
-            "vah264enc name=enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices=32",
+            "vah264enc name=enc bitrate={bitrate} key-int-max={keyint} b-frames=0 rate-control=cbr target-usage=7 num-slices={HARDWARE_SLICES}",
             bitrate = settings.bitrate_kbps,
             keyint = keyframe_distance(settings).min(HARDWARE_KEYFRAME_DISTANCE),
         )
@@ -593,8 +606,9 @@ fn encoder_chain(settings: &VideoSettings, hardware: bool) -> String {
             // bitrate (150 KB at 2.5 Mbit/s, ~130 RTP packets). Bound any one
             // frame to 150 ms of bitrate so keyframes stay small enough to
             // pace out within a few frame intervals.
-            "{encoder} name=enc tune=zerolatency speed-preset={preset} bitrate={bitrate} vbv-buf-capacity=150 key-int-max={keyint} bframes=0",
+            "{encoder} name=enc tune=zerolatency speed-preset={preset} threads={threads} bitrate={bitrate} vbv-buf-capacity=150 key-int-max={keyint} bframes=0",
             encoder = encoder_element(),
+            threads = x264_threads(),
             preset = settings.preset,
             bitrate = settings.bitrate_kbps,
             keyint = keyframe_distance(settings),
@@ -1930,22 +1944,31 @@ mod tests {
     #[test]
     fn what_is_sent_needs_no_editing_by_receivers() {
         gst::init().unwrap();
-        sends_clean_frames(false);
-        if gst::ElementFactory::find("vah264enc").is_some() {
-            sends_clean_frames(true);
+        // A small picture that hardly changes, and a large busy one.
+        for (width, height, pattern) in [
+            (1280, 720, "ball"),
+            (1920, 1080, "zone-plate kx2=20 ky2=20 kt=3"),
+        ] {
+            sends_clean_frames(false, width, height, pattern);
+            if gst::ElementFactory::find("vah264enc").is_some() {
+                sends_clean_frames(true, width, height, pattern);
+            }
         }
     }
 
-    fn sends_clean_frames(hardware: bool) {
+    fn sends_clean_frames(hardware: bool, width: u32, height: u32, pattern: &str) {
         let settings = VideoSettings {
+            width,
+            height,
             fps: 30,
+            bitrate_kbps: 8000,
             keyframe_secs: 0,
             adaptive_bitrate: false,
             ..VideoSettings::default()
         };
         let description = screen_description(&settings, hardware).replace(
             "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
-            "videotestsrc is-live=true pattern=ball name=src",
+            &format!("videotestsrc is-live=true pattern={pattern} name=src"),
         );
         let frames = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let seen = frames.clone();
@@ -1973,6 +1996,21 @@ mod tests {
             before.len()
         );
         for frame in &after {
+            // More slices than this and the frame cannot be encrypted, so
+            // it is never sent.
+            let slices = kc_voice::rtp::split_nalus(frame)
+                .iter()
+                .filter(|unit| matches!(unit[0] & 0x1F, 1 | 5))
+                .count();
+            assert!(
+                slices <= kc_voice::dave::MAX_VIDEO_SLICES,
+                "{slices} slices in a {height}p frame (hardware: {hardware})"
+            );
+            assert!(
+                kc_voice::dave::video_frame_fits(frame),
+                "a {height}p frame of {} bytes cannot be encrypted (hardware: {hardware})",
+                frame.len()
+            );
             for unit in kc_voice::rtp::split_nalus(frame) {
                 let kind = unit[0] & 0x1F;
                 assert_ne!(kind, 12, "filler was sent (hardware: {hardware})");

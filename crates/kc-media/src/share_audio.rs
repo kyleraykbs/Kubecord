@@ -190,6 +190,27 @@ impl Graph {
     }
 
     /// The output (sink) node named `name`.
+    /// The connections into the output named `name`, as pairs of ports.
+    fn links_into(&self, name: &str) -> Vec<(u32, u32)> {
+        let Some(node) = self.output_named(name) else {
+            return Vec::new();
+        };
+        let inputs: HashSet<u32> = self
+            .ports
+            .iter()
+            .filter(|port| port.node == node && !port.output)
+            .map(|port| port.id)
+            .collect();
+        let mut links: Vec<(u32, u32)> = self
+            .links
+            .iter()
+            .copied()
+            .filter(|(_, input)| inputs.contains(input))
+            .collect();
+        links.sort_unstable();
+        links
+    }
+
     fn output_named(&self, name: &str) -> Option<u32> {
         self.nodes.iter().find_map(|(id, props)| {
             (text(props, "node.name").as_deref() == Some(name)
@@ -329,6 +350,7 @@ fn links_to_make(
 /// is stopped through its own handle when this is dropped, and by the
 /// kernel if kylecord itself ends, so the output never outlives kylecord.
 pub struct VirtualOutput {
+    name: String,
     stop: Option<std::sync::mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -390,6 +412,7 @@ impl VirtualOutput {
             drop(input);
         });
         let output = Self {
+            name: name.to_owned(),
             stop: Some(stop_tx),
             thread: Some(thread),
         };
@@ -410,8 +433,34 @@ impl VirtualOutput {
     }
 }
 
+/// How long the session manager gets to notice that an output has been
+/// disconnected before the output is removed.
+const DISCONNECT_SETTLE: Duration = Duration::from_millis(250);
+
+/// Disconnects everything from the output named `name`; returns how many
+/// connections there were.
+fn disconnect(name: &str) -> usize {
+    let links = dump().map_or_else(|_| Vec::new(), |graph| graph.links_into(name));
+    for (output, input) in &links {
+        let _ = Command::new("pw-link")
+            .arg("--disconnect")
+            .arg(output.to_string())
+            .arg(input.to_string())
+            .output();
+    }
+    links.len()
+}
+
 impl Drop for VirtualOutput {
     fn drop(&mut self) {
+        // WirePlumber pauses media players (over MPRIS) when an output
+        // their sound is connected to is removed, as it would for
+        // unplugged headphones: ending a stream paused the video playing
+        // in a browser. An output nothing is connected to pauses nothing,
+        // so everything is disconnected first.
+        if disconnect(&self.name) > 0 {
+            std::thread::sleep(DISCONNECT_SETTLE);
+        }
         drop(self.stop.take());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -586,6 +635,50 @@ mod tests {
             port(73, 70, "output", "FL"),
         ]);
         Graph::parse(&objects.to_string()).unwrap()
+    }
+
+    #[test]
+    fn everything_connected_to_the_output_is_found_for_disconnecting() {
+        // Nothing connected yet.
+        assert!(desk().links_into("kylecord-go-live-1").is_empty());
+        // The browser connected to it, as well as to the speakers; the
+        // output's own monitor port feeding a recorder is not a connection
+        // into it.
+        let objects = json!([
+            node(
+                10,
+                json!({"media.class": "Audio/Sink", "node.name": "speakers"})
+            ),
+            port(11, 10, "input", "FL"),
+            node(
+                30,
+                json!({"media.class": "Stream/Output/Audio", "node.name": "Browser"})
+            ),
+            port(31, 30, "output", "FL"),
+            port(32, 30, "output", "FR"),
+            link(33, 30, 31, 10, 11),
+            node(
+                70,
+                json!({"media.class": "Audio/Sink", "node.name": "kylecord-go-live-1"})
+            ),
+            port(71, 70, "input", "FL"),
+            port(72, 70, "input", "FR"),
+            port(73, 70, "output", "FL"),
+            link(80, 30, 31, 70, 71),
+            link(81, 30, 32, 70, 72),
+            node(
+                90,
+                json!({"media.class": "Stream/Input/Audio", "node.name": "recorder"})
+            ),
+            port(91, 90, "input", "FL"),
+            link(92, 70, 73, 90, 91),
+        ]);
+        let graph = Graph::parse(&objects.to_string()).unwrap();
+        assert_eq!(
+            graph.links_into("kylecord-go-live-1"),
+            vec![(31, 71), (32, 72)]
+        );
+        assert!(graph.links_into("some-other-output").is_empty());
     }
 
     #[test]

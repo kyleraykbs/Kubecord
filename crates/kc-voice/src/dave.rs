@@ -264,6 +264,57 @@ impl From<davey::errors::DecryptError> for FrameRejected {
     }
 }
 
+/// The most slices a video frame may be cut into. An encrypted frame ends
+/// with a list of the stretches left in the clear, one for each slice (its
+/// header), and the encryptor has 64 bytes for that list and the nonce
+/// before it; a frame that needs more is not encrypted at all, and so is
+/// never sent. With up to 5 bytes of nonce, 3 for the first stretch and 4
+/// for each one after (in a frame under 2 MiB), 15 slices fit; 12 leaves
+/// room for a stretch or two that are not slices.
+pub const MAX_VIDEO_SLICES: usize = 12;
+
+/// The room the encryptor has after a frame for its nonce and the list of
+/// stretches left in the clear (davey's `TRANSFORM_PADDING_BYTES`).
+const TRAILER_ROOM: usize = 64;
+
+/// Whether an H.264 access unit can be end-to-end encrypted: whether its
+/// nonce and list of clear stretches surely fit in the room there is.
+pub fn video_frame_fits(frame: &[u8]) -> bool {
+    video_trailer_bound(frame) <= TRAILER_ROOM
+}
+
+/// The most bytes the nonce and the list of clear stretches of `frame`
+/// can take. A stretch is listed as where it starts and how long it is,
+/// both in LEB128: everything up to a slice, and that slice's first bytes.
+fn video_trailer_bound(frame: &[u8]) -> usize {
+    /// A 32-bit nonce at its longest.
+    const NONCE: usize = 5;
+    /// A start code, the unit's header, and as much of a slice's header
+    /// as its first three values can take.
+    const SLICE_HEAD: usize = 4 + 1 + 12;
+    let leb128 = |value: usize| (usize::BITS - value.max(1).leading_zeros()).div_ceil(7) as usize;
+    let mut bytes = NONCE;
+    // Where the clear stretch being gathered starts, and its length so far.
+    let (mut start, mut clear) = (0, 0);
+    let mut offset = 0;
+    for unit in crate::rtp::split_nalus(frame) {
+        // A receiver puts a four-byte start code before every unit.
+        let length = 4 + unit.len();
+        if matches!(unit[0] & 0x1F, 1 | 5) {
+            bytes += leb128(start) + leb128(clear + SLICE_HEAD.min(length));
+            start = offset + length;
+            clear = 0;
+        } else {
+            clear += length;
+        }
+        offset += length;
+    }
+    if clear > 0 {
+        bytes += leb128(start) + leb128(clear);
+    }
+    bytes
+}
+
 /// Whether a media frame carries DAVE's end-to-end encryption trailer, which
 /// ends with the magic marker `0xFAFA`.
 fn is_dave_frame(frame: &[u8]) -> bool {
@@ -285,6 +336,43 @@ mod tests {
             dave.decrypt_audio(9, &encrypted),
             Err(FrameRejected::NotReady)
         );
+    }
+
+    /// A frame of `slices` slices of `size` bytes each, after an access
+    /// unit delimiter.
+    fn sliced_frame(slices: usize, size: usize) -> Vec<u8> {
+        let mut frame = vec![0, 0, 0, 1, 0x09, 0x10];
+        for _ in 0..slices {
+            frame.extend_from_slice(&[0, 0, 0, 1, 0x41, 0x9A]);
+            frame.extend(std::iter::repeat_n(0x55, size - 2));
+        }
+        frame
+    }
+
+    #[test]
+    fn a_frame_in_too_many_slices_cannot_be_encrypted() {
+        // What the hardware encoder sent: 32 slices. Small ones already
+        // need more room than there is, large ones more still.
+        assert!(!video_frame_fits(&sliced_frame(32, 8)));
+        assert!(!video_frame_fits(&sliced_frame(32, 5_000)));
+        // The most we make, in a keyframe of over a megabyte.
+        assert!(video_frame_fits(&sliced_frame(MAX_VIDEO_SLICES, 100_000)));
+        assert!(video_frame_fits(&sliced_frame(1, 300_000)));
+    }
+
+    #[test]
+    fn the_trailer_bound_counts_each_stretch() {
+        // One slice: the nonce, then a stretch at 0 of under 128 bytes.
+        assert_eq!(video_trailer_bound(&sliced_frame(1, 50)), 5 + 2);
+        // A second starts 60 bytes in: one byte for where, one for length.
+        assert_eq!(video_trailer_bound(&sliced_frame(2, 50)), 5 + 2 + 2);
+        // Past 127 and past 16,383 a position takes two and three bytes.
+        assert_eq!(video_trailer_bound(&sliced_frame(2, 200)), 5 + 2 + 3);
+        assert_eq!(video_trailer_bound(&sliced_frame(2, 20_000)), 5 + 2 + 4);
+        // Filler after the slices is one more stretch.
+        let mut padded = sliced_frame(1, 50);
+        padded.extend_from_slice(&[0, 0, 0, 1, 0x0C, 0xFF, 0xFF, 0x80]);
+        assert_eq!(video_trailer_bound(&padded), 5 + 2 + 2);
     }
 
     #[test]
