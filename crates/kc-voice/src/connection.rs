@@ -213,9 +213,62 @@ impl SentPackets {
         self.packets.get(&sequence).cloned()
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.packets.len()
     }
+}
+
+/// A sent video packet as it was before transport encryption, so it can be
+/// sent again as a retransmission.
+#[derive(Clone)]
+struct VideoPacket {
+    payload: Vec<u8>,
+    marker: bool,
+    timestamp: u32,
+}
+
+/// Recently sent video packets by sequence number, bounded like
+/// [`SentPackets`].
+#[derive(Default)]
+struct SentVideo {
+    packets: HashMap<u16, VideoPacket>,
+    order: VecDeque<(u16, std::time::Instant)>,
+}
+
+impl SentVideo {
+    fn insert(&mut self, sequence: u16, packet: VideoPacket, window: Duration) {
+        let now = std::time::Instant::now();
+        while let Some((old, sent)) = self.order.front().copied() {
+            if now.duration_since(sent) <= window && self.order.len() < MAX_SENT_PACKETS {
+                break;
+            }
+            self.order.pop_front();
+            self.packets.remove(&old);
+        }
+        if window.is_zero() {
+            return;
+        }
+        self.packets.insert(sequence, packet);
+        self.order.push_back((sequence, now));
+    }
+
+    fn get(&self, sequence: u16) -> Option<VideoPacket> {
+        self.packets.get(&sequence).cloned()
+    }
+
+    fn len(&self) -> usize {
+        self.packets.len()
+    }
+}
+
+/// The payload of a retransmission (RFC 4588): the original packet's
+/// sequence number, then its payload.
+fn rtx_payload(original_sequence: u16, payload: &[u8]) -> Vec<u8> {
+    let mut rtx = Vec::with_capacity(payload.len() + 2);
+    rtx.extend_from_slice(&original_sequence.to_be_bytes());
+    rtx.extend_from_slice(payload);
+    rtx
 }
 
 /// Pacing rate as a multiple of the measured video bitrate.
@@ -384,7 +437,12 @@ struct SessionState {
     ts_audio: u32,
     ts_video: u32,
     video_queue: VecDeque<(Vec<u8>, bool, u32)>,
-    sent_video: SentPackets,
+    sent_video: SentVideo,
+    /// Sequence number of the next packet on the retransmission stream.
+    seq_rtx: u16,
+    /// Testing aid (`KYLECORD_TEST_DROP_VIDEO=n`): every nth video packet is
+    /// not sent, as if lost on the way, to exercise retransmission.
+    test_drop: Option<u32>,
     sent_audio: SentPackets,
     retransmit_window: Duration,
     retransmits: VecDeque<Vec<u8>>,
@@ -609,7 +667,12 @@ async fn run(
         ts_audio: now_millis() as u32,
         ts_video: now_millis() as u32,
         video_queue: VecDeque::new(),
-        sent_video: SentPackets::default(),
+        sent_video: SentVideo::default(),
+        seq_rtx: 0,
+        test_drop: std::env::var("KYLECORD_TEST_DROP_VIDEO")
+            .ok()
+            .and_then(|every| every.parse().ok())
+            .filter(|every| *every > 1),
         sent_audio: SentPackets::default(),
         retransmit_window: DEFAULT_RETRANSMIT_WINDOW,
         retransmits: VecDeque::new(),
@@ -998,14 +1061,59 @@ impl SessionState {
         Ok(())
     }
 
+    /// Builds the retransmission of a video packet. Discord repairs video
+    /// the WebRTC way (RFC 4588): on the stream's own retransmission SSRC,
+    /// with its payload type and sequence numbers, the lost packet's
+    /// sequence number leading the payload. A copy of the original packet
+    /// on the main SSRC is not used for repair: viewers stayed frozen until
+    /// the next keyframe.
+    fn retransmission(&mut self, sequence: u16, original: &VideoPacket) -> Option<Vec<u8>> {
+        let (header, payload) = match (self.rtx_ssrc, self.video_ssrc) {
+            (Some(rtx_ssrc), _) => {
+                let rtx_sequence = self.seq_rtx;
+                self.seq_rtx = self.seq_rtx.wrapping_add(1);
+                (
+                    RtpHeader::write(
+                        original.marker,
+                        rtp::PT_H264_RTX,
+                        rtx_sequence,
+                        original.timestamp,
+                        rtx_ssrc,
+                    ),
+                    rtx_payload(sequence, &original.payload),
+                )
+            }
+            // No retransmission stream was assigned: the original again.
+            (None, Some(ssrc)) => (
+                RtpHeader::write(original.marker, PT_H264, sequence, original.timestamp, ssrc),
+                original.payload.clone(),
+            ),
+            (None, None) => return None,
+        };
+        self.srtp.encrypt(&header, &payload).ok()
+    }
+
     async fn send_rtp_video(&mut self, payload: &[u8], marker: bool, timestamp: u32) -> Result<()> {
         let ssrc = self.video_ssrc.unwrap_or(self.audio_ssrc);
         let sequence = self.seq_video;
         let header = RtpHeader::write(marker, PT_H264, sequence, timestamp, ssrc);
         self.seq_video = self.seq_video.wrapping_add(1);
         let packet = self.srtp.encrypt(&header, payload)?;
-        self.sent_video
-            .insert(sequence, &packet, self.retransmit_window);
+        self.sent_video.insert(
+            sequence,
+            VideoPacket {
+                payload: payload.to_vec(),
+                marker,
+                timestamp,
+            },
+            self.retransmit_window,
+        );
+        if self
+            .test_drop
+            .is_some_and(|every| u32::from(sequence) % every == 0)
+        {
+            return Ok(());
+        }
         self.socket
             .send_to(&packet, self.remote)
             .await
@@ -1760,11 +1868,6 @@ impl SessionState {
             if !is_video && media != self.audio_ssrc {
                 return;
             }
-            let history = if is_video {
-                &self.sent_video
-            } else {
-                &self.sent_audio
-            };
             let mut offset = 12;
             let mut requested = 0usize;
             let mut found = 0usize;
@@ -1796,9 +1899,18 @@ impl SessionState {
                     if sample.len() < 8 {
                         sample.push(sequence);
                     }
-                    if let Some(packet) = history.get(sequence) {
+                    if !is_video {
+                        // Audio has no retransmission stream: the packet
+                        // goes out again as it was.
+                        if let Some(packet) = self.sent_audio.get(sequence) {
+                            found += 1;
+                            self.retransmits.push_back(packet);
+                        }
+                    } else if let Some(original) = self.sent_video.get(sequence) {
                         found += 1;
-                        self.retransmits.push_back(packet);
+                        if let Some(packet) = self.retransmission(sequence, &original) {
+                            self.retransmits.push_back(packet);
+                        }
                     }
                 }
             }
@@ -1811,6 +1923,11 @@ impl SessionState {
                 // Logged as it happens, so a hitch someone saw can be matched
                 // to the second.
                 info!(requested, found, "video packets asked for again");
+                if found < requested {
+                    // Some are too old to resend: only a keyframe repairs
+                    // the picture now, so do not wait to be asked.
+                    let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                }
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;
             } else {
@@ -1824,7 +1941,7 @@ impl SessionState {
                 requested,
                 found,
                 ?sample,
-                buffered = history.len(),
+                buffered = self.sent_video.len(),
                 "NACK retransmit"
             );
         }
@@ -2032,6 +2149,34 @@ mod tests {
         assert_eq!(video_rtp_step(41), 3750); // 24 fps
         assert_eq!(video_rtp_step(66), 6000); // 15 fps
         assert_eq!(video_rtp_step(7), 630); // unknown rate falls back
+    }
+
+    #[test]
+    fn retransmissions_lead_with_the_original_sequence_number() {
+        assert_eq!(rtx_payload(0x1234, &[9, 8, 7]), [0x12, 0x34, 9, 8, 7]);
+        let mut sent = SentVideo::default();
+        let packet = VideoPacket {
+            payload: vec![1, 2, 3],
+            marker: true,
+            timestamp: 90_000,
+        };
+        sent.insert(7, packet, Duration::from_secs(1));
+        let kept = sent.get(7).unwrap();
+        assert_eq!(
+            (kept.payload, kept.marker, kept.timestamp),
+            (vec![1, 2, 3], true, 90_000)
+        );
+        assert!(sent.get(8).is_none());
+        sent.insert(8, kept_packet(), Duration::ZERO);
+        assert_eq!(sent.len(), 0);
+    }
+
+    fn kept_packet() -> VideoPacket {
+        VideoPacket {
+            payload: vec![0],
+            marker: false,
+            timestamp: 0,
+        }
     }
 
     #[test]
