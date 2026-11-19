@@ -262,6 +262,36 @@ pub struct VideoSettings {
     /// Let the framerate follow the network too, between this and `fps`.
     /// Zero (or `fps` and above) keeps the framerate fixed.
     pub fps_floor: u32,
+    /// With both adapting, which is kept longest.
+    pub adapt_priority: AdaptPriority,
+}
+
+/// When both the bitrate and the framerate adapt, which gives way first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdaptPriority {
+    /// Both go down together.
+    #[default]
+    Balanced,
+    /// Keep the bitrate: the framerate goes down first, so each frame stays
+    /// sharp.
+    Bitrate,
+    /// Keep the framerate: the bitrate goes down first, so motion stays
+    /// smooth.
+    Framerate,
+}
+
+/// Where the bitrate and the framerate stand in their ranges (1 at the
+/// top, 0 at the bottom) for the connection's `level`. With a priority,
+/// the other one takes the first half of the way down on its own.
+pub fn split_level(level: f64, priority: AdaptPriority) -> (f64, f64) {
+    let level = level.clamp(0.0, 1.0);
+    let upper = ((level - 0.5) * 2.0).max(0.0);
+    let lower = (level * 2.0).min(1.0);
+    match priority {
+        AdaptPriority::Balanced => (level, level),
+        AdaptPriority::Bitrate => (lower, upper),
+        AdaptPriority::Framerate => (upper, lower),
+    }
 }
 
 /// Framerates an adapting capture moves between, besides the ends of its
@@ -298,6 +328,10 @@ struct Adaptation {
     fps: Option<(u32, u32)>,
     current_fps: u32,
     fps_changed: Option<Instant>,
+    /// With both adapting, which gives way first.
+    priority: AdaptPriority,
+    /// The bitrate the encoder was last given.
+    applied_kbps: u32,
 }
 
 /// Follows how the network treats the video and picks a bitrate for it:
@@ -341,6 +375,11 @@ impl BitrateController {
 
     pub fn current(&self) -> u32 {
         self.current
+    }
+
+    /// The range it moves in: `(floor, top)`.
+    pub fn range(&self) -> (u32, u32) {
+        (self.floor, self.target)
     }
 
     /// Where the bitrate stands in its range: 1 at the top, 0 at the floor.
@@ -432,6 +471,7 @@ impl Default for VideoSettings {
             bitrate_floor_kbps: 0,
             bitrate_follows_estimate: true,
             fps_floor: 0,
+            adapt_priority: AdaptPriority::Balanced,
         }
     }
 }
@@ -951,6 +991,8 @@ impl VideoSource {
             fps,
             current_fps: settings.fps,
             fps_changed: None,
+            priority: settings.adapt_priority,
+            applied_kbps: settings.bitrate_kbps,
         });
         if let Ok(mut slot) = self.adaptation.lock() {
             *slot = adaptation;
@@ -962,7 +1004,7 @@ impl VideoSource {
     pub fn adapted(&self) -> (Option<u32>, Option<u32>) {
         match self.adaptation.lock().ok().as_deref() {
             Some(Some(adaptation)) => (
-                adaptation.bitrate.then(|| adaptation.controller.current()),
+                adaptation.bitrate.then_some(adaptation.applied_kbps),
                 adaptation.fps.map(|_| adaptation.current_fps),
             ),
             _ => (None, None),
@@ -985,24 +1027,35 @@ impl VideoSource {
         } else {
             0
         };
-        let before = adaptation.controller.current();
-        if let Some(kbps) = adaptation.controller.report(sent, lost, ceiling)
-            && adaptation.bitrate
-        {
-            tracing::info!(
-                from_kbps = before,
-                to_kbps = kbps,
-                sent,
-                lost,
-                ceiling_kbps = ceiling,
-                "video bitrate adapted"
-            );
-            self.set_bitrate(kbps);
+        adaptation.controller.report(sent, lost, ceiling);
+        // A priority only means something when both adapt.
+        let priority = if adaptation.bitrate && adaptation.fps.is_some() {
+            adaptation.priority
+        } else {
+            AdaptPriority::Balanced
+        };
+        let (bitrate_level, fps_level) = split_level(adaptation.controller.level(), priority);
+        if adaptation.bitrate {
+            let (floor, top) = adaptation.controller.range();
+            let kbps = floor + (bitrate_level * f64::from(top - floor)).round() as u32;
+            if kbps != adaptation.applied_kbps {
+                tracing::info!(
+                    from_kbps = adaptation.applied_kbps,
+                    to_kbps = kbps,
+                    sent,
+                    lost,
+                    ceiling_kbps = ceiling,
+                    ?priority,
+                    "video bitrate adapted"
+                );
+                adaptation.applied_kbps = kbps;
+                self.set_bitrate(kbps);
+            }
         }
         let Some((min, max)) = adaptation.fps else {
             return;
         };
-        let wanted = framerate_for(adaptation.controller.level(), min, max);
+        let wanted = framerate_for(fps_level, min, max);
         if wanted != adaptation.current_fps
             && adaptation
                 .fps_changed
@@ -1570,6 +1623,25 @@ mod tests {
         assert_eq!(framerate_for(1.0, 12, 50), 50);
         // No range, no change.
         assert_eq!(framerate_for(0.2, 30, 30), 30);
+    }
+
+    #[test]
+    fn a_priority_decides_which_gives_way_first() {
+        use AdaptPriority::*;
+        // Clean, and at the very bottom: the same whatever the priority.
+        for priority in [Balanced, Bitrate, Framerate] {
+            assert_eq!(split_level(1.0, priority), (1.0, 1.0));
+            assert_eq!(split_level(0.0, priority), (0.0, 0.0));
+        }
+        // Three quarters of the way up: Balanced lowers both a little; a
+        // priority keeps its own at the top and lowers the other by half.
+        assert_eq!(split_level(0.75, Balanced), (0.75, 0.75));
+        assert_eq!(split_level(0.75, Bitrate), (1.0, 0.5));
+        assert_eq!(split_level(0.75, Framerate), (0.5, 1.0));
+        // A quarter of the way: the other is at its bottom, and the kept
+        // one is on its way down.
+        assert_eq!(split_level(0.25, Bitrate), (0.5, 0.0));
+        assert_eq!(split_level(0.25, Framerate), (0.0, 0.5));
     }
 
     #[test]

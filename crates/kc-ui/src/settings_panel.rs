@@ -76,7 +76,12 @@ impl AppState {
         let dialog = adw::Dialog::new();
         dialog.set_title("Settings");
         dialog.set_content_width(960);
-        dialog.set_content_height(700);
+        dialog.set_content_height(
+            std::env::var("KYLECORD_WINDOW_HEIGHT")
+                .ok()
+                .and_then(|height| height.parse::<i32>().ok())
+                .map_or(700, |height| height - 20),
+        );
         // Required with a breakpoint: the size it may shrink to.
         dialog.set_width_request(360);
         dialog.set_height_request(400);
@@ -907,6 +912,17 @@ fn page_scroll(page: &gtk::Box) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&clamp));
+    // Development aid: `KYLECORD_SETTINGS_SCROLL=<pixels>` scrolls the
+    // pages down once they are laid out, for screenshots of long ones.
+    if let Some(offset) = std::env::var("KYLECORD_SETTINGS_SCROLL")
+        .ok()
+        .and_then(|offset| offset.parse::<f64>().ok())
+    {
+        let target = scroll.clone();
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+            target.vadjustment().set_value(offset);
+        });
+    }
     scroll
 }
 

@@ -80,7 +80,14 @@ pub fn run() -> glib::ExitCode {
             .application(app)
             .title("kylecord")
             .default_width(1100)
-            .default_height(720)
+            // Development aid: `KYLECORD_WINDOW_HEIGHT` makes the window
+            // taller, so a screenshot shows more of a long page.
+            .default_height(
+                std::env::var("KYLECORD_WINDOW_HEIGHT")
+                    .ok()
+                    .and_then(|height| height.parse().ok())
+                    .unwrap_or(720),
+            )
             .build();
         let state = AppState::new(
             window,

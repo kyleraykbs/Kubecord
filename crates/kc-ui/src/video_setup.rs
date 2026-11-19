@@ -262,7 +262,7 @@ pub(crate) fn spawn_local<T: Send + 'static>(
 pub(crate) type Apply = Rc<dyn Fn(&dyn Fn(&mut CapturePreferences))>;
 
 pub(crate) struct QualityControls {
-    pub rows: Vec<adw::ActionRow>,
+    pub rows: Vec<gtk::Widget>,
     pub advanced: Vec<adw::ActionRow>,
     /// Shows other preferences in the controls (after a reset).
     pub show: Rc<dyn Fn(&CapturePreferences)>,
@@ -297,32 +297,24 @@ pub(crate) fn quality_controls(
     floor_names.extend(BITRATE_FLOORS.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate_min = string_dropdown(&floor_names);
     let bitrate_max = string_dropdown(&bitrate_names);
-    let range_row = |title: &str, widget: &gtk::DropDown, guide: &str| {
-        let row = setting_row(title, widget);
-        row.set_subtitle(guide);
-        row.set_subtitle_lines(0);
-        row
-    };
-    let fps_min_row = range_row(
-        "Lowest Framerate",
+    let fps_range = range_row(
+        "Framerate Range",
         &fps_min,
-        "How far the framerate may drop while packets are being lost. Fewer frames leave more of the bitrate for each one.",
-    );
-    let fps_max_row = range_row(
-        "Highest Framerate",
         &fps_max,
-        "The framerate used while the connection is clean.",
+        "Highest is used while the connection is clean; it drops toward Lowest while packets are being lost. Fewer frames leave more of the bitrate for each one.",
     );
-    let bitrate_min_row = range_row(
-        "Lowest Bitrate",
+    let bitrate_range = range_row(
+        "Bitrate Range",
         &bitrate_min,
-        "How far the bitrate may drop while packets are being lost. Automatic is three tenths of the highest.",
-    );
-    let bitrate_max_row = range_row(
-        "Highest Bitrate",
         &bitrate_max,
-        "The bitrate used while the connection is clean. Automatic works it out from the resolution and framerate and stays under Discord's own estimate (about 4 Mbit/s for a stream); a value set here is used even above that estimate.",
+        "Highest is used while the connection is clean; it drops toward Lowest while packets are being lost. Automatic Highest is worked out from the resolution and framerate and stays under Discord's own estimate (about 4 Mbit/s for a stream); a value set here is used even above it. Automatic Lowest is three tenths of Highest.",
     );
+    let priority = gtk::DropDown::from_strings(&ADAPT_PRIORITIES);
+    let priority_row = setting_row("When the Connection Struggles", &priority);
+    priority_row.set_subtitle(
+        "With both on Automatic: Prefer Bitrate lowers the framerate first, keeping each frame sharp. Prefer Framerate lowers the bitrate first, keeping motion smooth. Balanced lowers both together.",
+    );
+    priority_row.set_subtitle_lines(0);
     let delay = gtk::DropDown::from_strings(&["None", "0.5 s", "1 s", "2 s", "3 s"]);
     let cpu_encoder = gtk::Switch::new();
     let camera_format = gtk::DropDown::from_strings(&CAMERA_FORMATS);
@@ -391,8 +383,8 @@ pub(crate) fn quality_controls(
         let bitrate = bitrate.clone();
         let (fps_min, fps_max) = (fps_min.clone(), fps_max.clone());
         let (bitrate_min, bitrate_max) = (bitrate_min.clone(), bitrate_max.clone());
-        let (fps_min_row, fps_max_row) = (fps_min_row.clone(), fps_max_row.clone());
-        let (bitrate_min_row, bitrate_max_row) = (bitrate_min_row.clone(), bitrate_max_row.clone());
+        let (fps_range, bitrate_range) = (fps_range.clone(), bitrate_range.clone());
+        let (priority, priority_row) = (priority.clone(), priority_row.clone());
         let delay = delay.clone();
         let cpu_encoder = cpu_encoder.clone();
         let camera_format = camera_format.clone();
@@ -428,10 +420,10 @@ pub(crate) fn quality_controls(
             bitrate_min.set_selected(listed(&BITRATE_FLOORS, prefs.auto_bitrate_min));
             bitrate_max.set_selected(listed(&BITRATES, prefs.auto_bitrate_max));
             // The ranges only mean something on Automatic.
-            fps_min_row.set_visible(prefs.fps_auto);
-            fps_max_row.set_visible(prefs.fps_auto);
-            bitrate_min_row.set_visible(prefs.bitrate_kbps.is_none());
-            bitrate_max_row.set_visible(prefs.bitrate_kbps.is_none());
+            fps_range.set_visible(prefs.fps_auto);
+            bitrate_range.set_visible(prefs.bitrate_kbps.is_none());
+            priority.set_selected(prefs.adapt_priority.min(2));
+            priority_row.set_visible(prefs.fps_auto && prefs.bitrate_kbps.is_none());
             delay.set_selected(position(&STREAM_DELAYS, &prefs.stream_delay_ms, 0));
             cpu_encoder.set_active(prefs.cpu_encoder);
             camera_format.set_selected(prefs.camera_format.min(2));
@@ -462,15 +454,22 @@ pub(crate) fn quality_controls(
             });
         }
     });
+    // The priority only matters with both automatic.
+    let both_automatic = {
+        let (framerate, bitrate, priority_row) =
+            (framerate.clone(), bitrate.clone(), priority_row.clone());
+        move || priority_row.set_visible(framerate.selected() == 0 && bitrate.selected() == 0)
+    };
     let target = apply.clone();
-    let (low_row, high_row) = (fps_min_row.clone(), fps_max_row.clone());
+    let range = fps_range.clone();
+    let update = both_automatic.clone();
     framerate.connect_selected_notify(move |dropdown| {
         let fixed = match dropdown.selected() as usize {
             0 => None,
             index => FRAMERATES.get(index - 1).copied(),
         };
-        low_row.set_visible(fixed.is_none());
-        high_row.set_visible(fixed.is_none());
+        range.set_visible(fixed.is_none());
+        update();
         target(&move |prefs| {
             prefs.fps_auto = fixed.is_none();
             if let Some(fps) = fixed {
@@ -491,14 +490,15 @@ pub(crate) fn quality_controls(
         }
     });
     let target = apply.clone();
-    let (low_row, high_row) = (bitrate_min_row.clone(), bitrate_max_row.clone());
+    let range = bitrate_range.clone();
+    let update = both_automatic;
     bitrate.connect_selected_notify(move |dropdown| {
         let kbps = match dropdown.selected() as usize {
             0 => None,
             index => BITRATES.get(index - 1).copied(),
         };
-        low_row.set_visible(kbps.is_none());
-        high_row.set_visible(kbps.is_none());
+        range.set_visible(kbps.is_none());
+        update();
         target(&move |prefs| prefs.bitrate_kbps = kbps);
     });
     let target = apply.clone();
@@ -508,6 +508,11 @@ pub(crate) fn quality_controls(
             index => BITRATE_FLOORS.get(index - 1).copied(),
         };
         target(&move |prefs| prefs.auto_bitrate_min = kbps);
+    });
+    let target = apply.clone();
+    priority.connect_selected_notify(move |dropdown| {
+        let chosen = dropdown.selected().min(2);
+        target(&move |prefs| prefs.adapt_priority = chosen);
     });
     let target = apply.clone();
     bitrate_max.connect_selected_notify(move |dropdown| {
@@ -590,33 +595,38 @@ pub(crate) fn quality_controls(
         row.set_subtitle_lines(0);
         row
     };
-    let mut rows = vec![
+    let mut rows: Vec<gtk::Widget> = vec![
         guided(
             "Resolution",
             &resolution,
             "1280 × 720 is the dependable choice. 1920 × 1080 is sharper but needs about twice the upload, and lost packets show more.",
-        ),
+        )
+        .upcast(),
         guided(
             "Framerate",
             &framerate,
             "30 fps suits calls and most screens. 60 fps is for games and fast motion; it doubles the upload and the encoding work. Automatic drops the framerate while packets are being lost and brings it back when the connection is clean, within the range below.",
-        ),
-        fps_min_row,
-        fps_max_row,
+        )
+        .upcast(),
+        fps_range.upcast(),
         guided(
             "Bitrate",
             &bitrate,
             "Automatic backs off while packets are being lost and climbs back when the connection is clean, within the range below. A fixed value is kept to whatever happens.",
-        ),
-        bitrate_min_row,
-        bitrate_max_row,
+        )
+        .upcast(),
+        bitrate_range.upcast(),
+        priority_row.upcast(),
     ];
     if stream {
-        rows.push(guided(
-            "Go Live Delay",
-            &delay,
-            "Holds your stream back so frames leave at an even pace. It also holds back the full frame that repairs a freeze, so with a delay every such freeze lasts at least that long. None is best for most; add delay only if the picture stutters without it.",
-        ));
+        rows.push(
+            guided(
+                "Go Live Delay",
+                &delay,
+                "Holds your stream back so frames leave at an even pace. It also holds back the full frame that repairs a freeze, so with a delay every such freeze lasts at least that long. None is best for most; add delay only if the picture stutters without it.",
+            )
+            .upcast(),
+        );
     }
     let encoder_row = setting_row("Use Software Encoder (x264)", &cpu_encoder);
     encoder_row.set_subtitle(
@@ -624,13 +634,13 @@ pub(crate) fn quality_controls(
     );
     encoder_row.set_subtitle_lines(0);
     encoder_row.set_activatable_widget(Some(&cpu_encoder));
-    rows.push(encoder_row);
+    rows.push(encoder_row.upcast());
     let format_row = setting_row("Camera Format", &camera_format);
     format_row.set_subtitle(
         "Leave on Automatic. MJPEG keeps a webcam at full framerate at large sizes (raw 720p is often only 10 fps); Automatic tries it first, then raw.",
     );
     format_row.set_subtitle_lines(0);
-    rows.push(format_row);
+    rows.push(format_row.upcast());
 
     let drop_row = guided(
         "Drop Late Frames After",
@@ -727,6 +737,53 @@ pub(crate) fn setting_row(title: &str, widget: &impl IsA<gtk::Widget>) -> adw::A
     let row = adw::ActionRow::builder().title(title).build();
     widget.set_valign(gtk::Align::Center);
     row.add_suffix(widget);
+    row
+}
+
+/// What gives way first when both bitrate and framerate are automatic, in
+/// the order of `CapturePreferences::adapt_priority`.
+const ADAPT_PRIORITIES: [&str; 3] = ["Balanced", "Prefer Bitrate", "Prefer Framerate"];
+
+/// A setting with a low and a high end, chosen side by side under its
+/// title and explanation.
+fn range_row(
+    title: &str,
+    lowest: &gtk::DropDown,
+    highest: &gtk::DropDown,
+    guide: &str,
+) -> adw::PreferencesRow {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    column.set_margin_top(8);
+    column.set_margin_bottom(10);
+    column.set_margin_start(12);
+    column.set_margin_end(12);
+    let heading = gtk::Label::new(Some(title));
+    heading.set_xalign(0.0);
+    column.append(&heading);
+    let explanation = gtk::Label::new(Some(guide));
+    explanation.set_xalign(0.0);
+    explanation.set_wrap(true);
+    explanation.add_css_class("dim-label");
+    explanation.add_css_class("caption");
+    column.append(&explanation);
+    let ends = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    ends.set_homogeneous(true);
+    ends.set_margin_top(6);
+    for (name, dropdown) in [("Lowest", lowest), ("Highest", highest)] {
+        let end = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let label = gtk::Label::new(Some(name));
+        label.set_xalign(0.0);
+        label.add_css_class("caption");
+        end.append(&label);
+        dropdown.set_hexpand(true);
+        end.append(dropdown);
+        ends.append(&end);
+    }
+    column.append(&ends);
+    let row = adw::PreferencesRow::new();
+    row.set_title(title);
+    row.set_activatable(false);
+    row.set_child(Some(&column));
     row
 }
 

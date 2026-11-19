@@ -58,6 +58,9 @@ pub struct CapturePreferences {
     /// bottom at three tenths of the top.
     pub auto_bitrate_min: Option<u32>,
     pub auto_bitrate_max: Option<u32>,
+    /// With both automatic, which is kept longest when the connection
+    /// struggles: 0 balanced, 1 bitrate, 2 framerate.
+    pub adapt_priority: u32,
     /// Seconds between scheduled Go Live keyframes; zero sends them only
     /// when a viewer asks or packets are lost.
     /// Stored under a new name so the old two-second default, which made
@@ -158,6 +161,7 @@ impl Default for CapturePreferences {
             bitrate_kbps: None,
             auto_bitrate_min: None,
             auto_bitrate_max: None,
+            adapt_priority: 0,
             keyframe_secs: 0,
             drop_frames_after_ms: 250,
             leaky_queue: true,
@@ -217,6 +221,11 @@ impl CapturePreferences {
             },
             // A top set by hand is trusted over Discord's estimate.
             bitrate_follows_estimate: !(automatic && self.auto_bitrate_max.is_some()),
+            adapt_priority: match self.adapt_priority {
+                1 => kc_media::video::AdaptPriority::Bitrate,
+                2 => kc_media::video::AdaptPriority::Framerate,
+                _ => kc_media::video::AdaptPriority::Balanced,
+            },
             fps_floor: if self.fps_auto {
                 self.fps_auto_min.min(fps)
             } else {
@@ -305,6 +314,7 @@ impl CapturePreferences {
         self.bitrate_kbps = defaults.bitrate_kbps;
         self.auto_bitrate_min = defaults.auto_bitrate_min;
         self.auto_bitrate_max = defaults.auto_bitrate_max;
+        self.adapt_priority = defaults.adapt_priority;
         self.keyframe_secs = defaults.keyframe_secs;
         self.drop_frames_after_ms = defaults.drop_frames_after_ms;
         self.leaky_queue = defaults.leaky_queue;
@@ -355,6 +365,9 @@ impl CapturePreferences {
             .is_some_and(|top| !BITRATES.contains(&top))
         {
             self.auto_bitrate_max = None;
+        }
+        if self.adapt_priority > 2 {
+            self.adapt_priority = 0;
         }
         if let Some(bitrate) = self.bitrate_kbps
             && !(500..=50_000).contains(&bitrate)
