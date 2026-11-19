@@ -1833,12 +1833,14 @@ async fn apply_voice_command(
                 .as_ref()
                 .and_then(|connection| connection.guild_id)
                 .or_else(|| voice.pending_join.and_then(|(guild_id, _)| guild_id));
-            if voice.connection.is_some() || voice.pending_join.is_some() {
-                teardown_voice(voice, account, ui, true).await;
-            }
+            // Tell Discord first, so the notice is on its way even when the
+            // app is about to exit.
             voice
                 .handle
                 .update_voice_state(guild_id, None, voice.muted, voice.deafened, false);
+            if voice.connection.is_some() || voice.pending_join.is_some() {
+                teardown_voice(voice, account, ui, true).await;
+            }
         }
         VoiceCommand::SetMute(muted) => {
             voice.muted = muted;

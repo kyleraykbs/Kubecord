@@ -364,6 +364,53 @@ impl AppState {
             });
         });
 
+        // Closing the window leaves any call first: hidden at once, it
+        // waits for the calls to end (at most two seconds), then gives the
+        // gateway a moment to send the leave before the app exits.
+        // Otherwise Discord keeps showing you in the channel until the
+        // dropped connection times out.
+        let app = self.clone();
+        let leaving = Rc::new(std::cell::Cell::new(false));
+        self.window.connect_close_request(move |window| {
+            if leaving.get() {
+                return glib::Propagation::Proceed;
+            }
+            let in_call: Vec<AccountId> = app
+                .model
+                .borrow()
+                .sessions
+                .iter()
+                .filter(|(_, session)| session.voice.is_some())
+                .map(|(account, _)| *account)
+                .collect();
+            if in_call.is_empty() {
+                return glib::Propagation::Proceed;
+            }
+            for account in in_call {
+                let _ = app.cmd_tx.try_send(Command::LeaveVoice { account });
+            }
+            leaving.set(true);
+            window.set_visible(false);
+            let started = std::time::Instant::now();
+            let state = app.clone();
+            let window = window.clone();
+            glib::timeout_add_local(Duration::from_millis(50), move || {
+                let still = state
+                    .model
+                    .borrow()
+                    .sessions
+                    .values()
+                    .any(|session| session.voice.is_some());
+                if still && started.elapsed() < Duration::from_secs(2) {
+                    return glib::ControlFlow::Continue;
+                }
+                let window = window.clone();
+                glib::timeout_add_local_once(Duration::from_millis(300), move || window.close());
+                glib::ControlFlow::Break
+            });
+            glib::Propagation::Stop
+        });
+
         // Clicking outside a dialog closes it, as in Discord.
         let outside = gtk::GestureClick::new();
         outside.set_button(0);
