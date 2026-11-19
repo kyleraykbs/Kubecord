@@ -64,6 +64,9 @@ pub struct VideoSource {
     stop: Arc<AtomicBool>,
     /// Set once the pipeline has produced an encoded frame.
     produced: Arc<AtomicBool>,
+    /// The pipeline's latest error, as read off its bus by the capture
+    /// thread.
+    failure: Arc<Mutex<Option<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
@@ -501,9 +504,43 @@ impl VideoSource {
         let thread_stop = stop.clone();
         let produced = Arc::new(AtomicBool::new(false));
         let thread_produced = produced.clone();
+        let failure = Arc::new(Mutex::new(None));
+        let thread_failure = failure.clone();
+        let bus = pipeline.bus();
+        let started = Instant::now();
+        let mut silence_reported = false;
         let thread = std::thread::spawn(move || {
             let mut last_arrival: Option<Instant> = None;
             while !thread_stop.load(Ordering::Relaxed) {
+                // Errors are otherwise invisible: a pipeline that fails after
+                // starting just stops delivering.
+                while let Some(message) = bus.as_ref().and_then(|bus| {
+                    bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Warning])
+                }) {
+                    match message.view() {
+                        gst::MessageView::Error(error) => {
+                            let text =
+                                format!("{}: {}", error.error(), error.debug().unwrap_or_default());
+                            tracing::warn!(error = %text, "capture pipeline error");
+                            if let Ok(mut failure) = thread_failure.lock() {
+                                *failure = Some(text);
+                            }
+                        }
+                        gst::MessageView::Warning(warning) => tracing::warn!(
+                            warning = %warning.error(),
+                            detail = warning.debug().unwrap_or_default().as_str(),
+                            "capture pipeline warning"
+                        ),
+                        _ => {}
+                    }
+                }
+                if !silence_reported
+                    && !thread_produced.load(Ordering::Relaxed)
+                    && started.elapsed() > Duration::from_secs(4)
+                {
+                    silence_reported = true;
+                    tracing::warn!("capture pipeline has produced no frame in 4 s");
+                }
                 let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
                 else {
                     if last_arrival.is_some_and(|last| last.elapsed() > Duration::from_millis(100))
@@ -548,6 +585,7 @@ impl VideoSource {
             pipeline,
             stop,
             produced,
+            failure,
             thread: Some(thread),
             _portal: None,
             _camera: None,
@@ -559,32 +597,17 @@ impl VideoSource {
     /// pipeline, or `timeout` passing first, fails.
     fn wait_for_first_frame(&self, timeout: Duration) -> std::result::Result<(), StartFailure> {
         let deadline = Instant::now() + timeout;
-        let bus = self.pipeline.bus();
         loop {
             if self.produced.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let error = bus.as_ref().and_then(|bus| {
-                bus.timed_pop_filtered(
-                    gst::ClockTime::from_mseconds(25),
-                    &[gst::MessageType::Error],
-                )
-            });
-            if let Some(message) = error
-                && let gst::MessageView::Error(error) = message.view()
-            {
-                return Err(StartFailure::Refused(Error::Message(format!(
-                    "{}: {}",
-                    error.error(),
-                    error.debug().unwrap_or_default()
-                ))));
-            }
-            if bus.is_none() {
-                std::thread::sleep(Duration::from_millis(25));
+            if let Some(error) = self.failure.lock().ok().and_then(|failure| failure.clone()) {
+                return Err(StartFailure::Refused(Error::Message(error)));
             }
             if Instant::now() >= deadline {
                 return Err(StartFailure::Silent);
             }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -758,18 +781,11 @@ impl VideoSource {
                 let element = pipeline
                     .by_name("src")
                     .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
+                // Only these two. This source is temperamental: with stream
+                // properties added (node.dont-fallback, node.dont-reconnect)
+                // it started and never delivered a frame.
                 element.set_property("fd", fd);
                 element.set_property("path", node_id.to_string());
-                // If the picked node goes away, stop instead of letting the
-                // session manager link the default video source (a camera)
-                // in its place.
-                if element.find_property("stream-properties").is_some() {
-                    let properties = gst::Structure::builder("props")
-                        .field("node.dont-fallback", "true")
-                        .field("node.dont-reconnect", "true")
-                        .build();
-                    element.set_property("stream-properties", properties);
-                }
                 Ok(())
             },
         )?;
@@ -1041,6 +1057,41 @@ mod tests {
         let luma = sample.buffer().unwrap().map_readable().unwrap().as_slice()[0];
         pipeline.set_state(gst::State::Null).unwrap();
         assert_eq!(luma, 16);
+    }
+
+    /// The screen pipeline with a test picture in place of the screen
+    /// produces frames, with keyframes scheduled and on demand.
+    #[test]
+    fn the_screen_pipeline_produces_frames() {
+        gst::init().unwrap();
+        for keyframe_secs in [2, 0] {
+            let settings = VideoSettings {
+                keyframe_secs,
+                encoder: EncoderPreference::Cpu,
+                ..VideoSettings::default()
+            };
+            let description = screen_description(&settings, false).replace(
+                "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+                "videotestsrc is-live=true name=src",
+            );
+            assert!(description.contains("videotestsrc"), "{description}");
+            let (tx, rx) = std::sync::mpsc::channel();
+            let source = VideoSource::start_pipeline_with(
+                &description,
+                33,
+                move |frame: EncodedFrame| {
+                    let _ = tx.send(frame.data.len());
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+            let first = rx.recv_timeout(Duration::from_secs(5));
+            drop(source);
+            assert!(
+                first.is_ok(),
+                "no frame with keyframe_secs={keyframe_secs}: {description}"
+            );
+        }
     }
 
     #[test]
