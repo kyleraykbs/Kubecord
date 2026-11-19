@@ -480,7 +480,11 @@ impl AppState {
         let app = self.clone();
         minimise.connect_clicked(move |_| app.set_focused_video(None));
         header.append(&minimise);
-        if is_stream {
+        let own = self
+            .with_session(|session| session.user.as_ref().map(|me| me.id))
+            .flatten()
+            == Some(user);
+        if is_stream && !own {
             let stop = gtk::Button::with_label("Stop Watching");
             let app = self.clone();
             stop.connect_clicked(move |_| {
@@ -553,7 +557,8 @@ impl AppState {
         // avatar stands in when neither is arriving.
         let video = {
             let videos = self.videos.borrow();
-            let stream = (watching == Some(person.id))
+            // Your own stream needs no watching: it is previewed locally.
+            let stream = (watching == Some(person.id) || person.is_self)
                 .then(|| videos.get(&(account, person.id, true)))
                 .flatten();
             let camera = videos.get(&(account, person.id, false));

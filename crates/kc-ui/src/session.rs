@@ -1024,6 +1024,87 @@ struct Watch {
     generation: u64,
 }
 
+/// Whether your own camera and stream are shown to you in the call.
+static SELF_PREVIEW: AtomicBool = AtomicBool::new(true);
+
+/// Turns the preview of your own camera and stream on or off. It applies
+/// to video already running: off at the next frame, on at the next keyframe.
+pub(crate) fn set_self_preview(enabled: bool) {
+    SELF_PREVIEW.store(enabled, Ordering::Relaxed);
+}
+
+/// Your own camera or stream, shown back to you: the frames being sent are
+/// also decoded locally, like anyone else's video. It lives in the capture's
+/// frame callback and ends with the capture.
+struct LocalPreview {
+    account: AccountId,
+    user_id: Option<Snowflake>,
+    stream: bool,
+    ui: async_channel::Sender<UiEvent>,
+    feed: Option<Arc<VideoFeed>>,
+}
+
+impl LocalPreview {
+    fn new(
+        account: AccountId,
+        user_id: Option<Snowflake>,
+        stream: bool,
+        ui: async_channel::Sender<UiEvent>,
+    ) -> Self {
+        Self {
+            account,
+            user_id,
+            stream,
+            ui,
+            feed: None,
+        }
+    }
+
+    fn push(&mut self, frame: &[u8]) {
+        let Some(user_id) = self.user_id else {
+            return;
+        };
+        if !SELF_PREVIEW.load(Ordering::Relaxed) {
+            self.end();
+            return;
+        }
+        let keyframe = is_keyframe(frame);
+        let feed = match &self.feed {
+            Some(feed) => feed,
+            // Decoding can only start from a keyframe.
+            None if !keyframe => return,
+            None => {
+                let feed = Arc::new(VideoFeed::default());
+                let _ = self.ui.try_send(UiEvent::VideoStarted {
+                    account: self.account,
+                    user_id,
+                    stream: self.stream,
+                    feed: feed.clone(),
+                });
+                self.feed.insert(feed)
+            }
+        };
+        feed.push(frame.to_vec(), keyframe);
+    }
+
+    fn end(&mut self) {
+        if let (Some(feed), Some(user_id)) = (self.feed.take(), self.user_id) {
+            let _ = self.ui.try_send(UiEvent::VideoStopped {
+                account: self.account,
+                user_id,
+                stream: self.stream,
+                feed,
+            });
+        }
+    }
+}
+
+impl Drop for LocalPreview {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
 /// The feeds for video arriving on one connection. Tells the interface when
 /// a person's video starts and stops.
 struct VideoFeeds {
@@ -1483,6 +1564,8 @@ async fn maybe_start_stream(
                 move |data: Vec<u8>, frame_ms| video_send.send_video(data, frame_ms),
             );
             let last_frame = Arc::new(Mutex::new(Instant::now()));
+            let stream_preview =
+                LocalPreview::new(account, voice.self_user_id, true, source_ui.clone());
             tokio::spawn(async move {
                 let result = if let Some((access, node_id)) = camera_source {
                     access
@@ -1491,6 +1574,7 @@ async fn maybe_start_stream(
                         .and_then(|camera| {
                             let video_delay = video_delay.clone();
                             let last_frame = last_frame.clone();
+                            let mut preview = stream_preview;
                             VideoSource::camera_portal(
                                 camera,
                                 video_settings.clone(),
@@ -1505,6 +1589,7 @@ async fn maybe_start_stream(
                                         }
                                         *last = Instant::now();
                                     }
+                                    preview.push(&frame.data);
                                     video_delay.send(frame.data, frame.duration_ms);
                                 },
                             )
@@ -1517,6 +1602,7 @@ async fn maybe_start_stream(
                     let on_frame = {
                         let video_delay = video_delay.clone();
                         let last_frame = last_frame.clone();
+                        let mut preview = stream_preview;
                         move |frame: EncodedFrame| {
                             if let Ok(mut last) = last_frame.lock() {
                                 let gap = last.elapsed();
@@ -1535,6 +1621,7 @@ async fn maybe_start_stream(
                                     "stream first encoded video frame"
                                 );
                             }
+                            preview.push(&frame.data);
                             video_delay.send(frame.data, frame.duration_ms);
                         }
                     };
@@ -1797,6 +1884,7 @@ async fn start_camera(
     access: &CameraAccess,
     node_id: u32,
     settings: VideoSettings,
+    mut preview: LocalPreview,
 ) -> Result<(), String> {
     let camera = access
         .select(node_id)
@@ -1808,6 +1896,7 @@ async fn start_camera(
     // it off the account loop.
     let source = tokio::task::spawn_blocking(move || {
         VideoSource::camera_portal(camera, settings, move |frame| {
+            preview.push(&frame.data);
             handle.send_video(frame.data, frame.duration_ms);
         })
     })
@@ -1908,9 +1997,10 @@ async fn apply_voice_command(
                 Some(connection) => (connection.guild_id, connection.channel_id),
                 None => (None, Snowflake::default()),
             };
+            let preview = LocalPreview::new(account, voice.self_user_id, false, ui.clone());
             match &mut voice.connection {
                 Some(connection) => {
-                    match start_camera(connection, &access, node_id, settings).await {
+                    match start_camera(connection, &access, node_id, settings, preview).await {
                         Ok(()) => {
                             gateway.update_voice_state(
                                 guild_id,
@@ -2386,6 +2476,38 @@ async fn send_http_error(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_preview_starts_on_a_keyframe_and_ends_with_the_capture() {
+        // An IDR slice and a P slice, as Annex-B.
+        let key = [0u8, 0, 0, 1, 0x65, 1, 2, 3];
+        let delta = [0u8, 0, 0, 1, 0x41, 1, 2, 3];
+        let (tx, rx) = async_channel::unbounded();
+        let started = |rx: &async_channel::Receiver<UiEvent>| match rx.try_recv() {
+            Ok(UiEvent::VideoStarted { stream, .. }) => Some(("started", stream)),
+            Ok(UiEvent::VideoStopped { stream, .. }) => Some(("stopped", stream)),
+            _ => None,
+        };
+        set_self_preview(true);
+        let mut preview = LocalPreview::new(7, Some(Snowflake(1)), true, tx);
+        preview.push(&delta);
+        assert!(started(&rx).is_none(), "nothing to show before a keyframe");
+        preview.push(&key);
+        assert_eq!(started(&rx), Some(("started", true)));
+        preview.push(&delta);
+        assert!(started(&rx).is_none());
+        // Switched off mid-capture, then on again.
+        set_self_preview(false);
+        preview.push(&delta);
+        assert_eq!(started(&rx), Some(("stopped", true)));
+        set_self_preview(true);
+        preview.push(&delta);
+        assert!(started(&rx).is_none());
+        preview.push(&key);
+        assert_eq!(started(&rx), Some(("started", true)));
+        drop(preview);
+        assert_eq!(started(&rx), Some(("stopped", true)));
+    }
 
     fn runtime(handle: GatewayHandle) -> VoiceRuntime {
         VoiceRuntime {

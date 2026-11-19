@@ -165,6 +165,7 @@ impl CapturePreferences {
         kc_media::devices::set_output_device(
             (!self.output_device.is_empty()).then(|| self.output_device.clone()),
         );
+        crate::session::set_self_preview(self.self_preview);
         kc_media::devices::set_input_gain(self.input_volume);
         kc_media::devices::set_output_gain(self.output_volume);
         kc_media::portal::set_share_sources(match self.share_source {

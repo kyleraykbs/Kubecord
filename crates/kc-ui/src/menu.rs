@@ -218,6 +218,19 @@ impl AppState {
             }
         }
 
+        // -- voice: your own video preview ---------------------------------
+        if ctx.in_voice && ctx.is_me {
+            separator();
+            let preview = gtk::CheckButton::with_label("Preview My Camera and Stream");
+            preview.set_tooltip_text(Some(
+                "Show your own video in the call. Turning it off saves work on a slow machine.",
+            ));
+            preview.set_active(self.capture.borrow().self_preview);
+            let app = self.clone();
+            preview.connect_toggled(move |check| app.set_self_preview(check.is_active()));
+            menu.append(&preview);
+        }
+
         // -- voice: local volume and mute --------------------------------
         if ctx.in_voice && !ctx.is_me {
             separator();
@@ -418,6 +431,12 @@ impl AppState {
                 }
             },
         );
+    }
+
+    /// Shows or hides your own camera and stream in the call, from the tile
+    /// menu or from Settings.
+    pub(crate) fn set_self_preview(self: &Rc<Self>, show: bool) {
+        self.update_prefs(|prefs| prefs.self_preview = show);
     }
 
     /// Says Discord wants a captcha, which kylecord cannot show, and offers

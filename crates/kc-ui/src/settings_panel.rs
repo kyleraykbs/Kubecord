@@ -590,6 +590,18 @@ impl AppState {
             panel.refilling.set(false);
         }
 
+        let preview_group = adw::PreferencesGroup::new();
+        let self_preview = adw::SwitchRow::new();
+        self_preview.set_title("Preview My Camera and Stream");
+        self_preview.set_subtitle(
+            "Show your own video in calls. Turning it off saves work on a slow machine. You can also right-click your own tile in a call.",
+        );
+        self_preview.set_active(current.self_preview);
+        let app = self.clone();
+        self_preview.connect_active_notify(move |row| app.set_self_preview(row.is_active()));
+        preview_group.add(&self_preview);
+        page.append(&preview_group);
+
         page.append(&self.stream_quality_section());
         page
     }
