@@ -21,8 +21,9 @@ use kc_media::video::{
 use crate::live::LiveVideo;
 use crate::session::{AccountId, CameraPurpose, Command};
 use crate::settings::{
-    BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS,
-    LOSS_KEYFRAME_SPACINGS_MS, RESOLUTIONS, RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
+    BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_GAPS,
+    KEYFRAME_INTERVALS, LOSS_KEYFRAME_SPACINGS_MS, RESOLUTIONS, RETRANSMIT_WINDOWS_MS,
+    SHARE_SOURCES, STREAM_DELAYS,
 };
 use crate::shell::AppState;
 
@@ -328,6 +329,14 @@ pub(crate) fn quality_controls(
         })
         .collect();
     let loss_keyframes = string_dropdown(&loss_names);
+    let gap_names: Vec<String> = KEYFRAME_GAPS
+        .iter()
+        .map(|seconds| match seconds {
+            0 => "Off".to_owned(),
+            seconds => format!("Every {seconds} s"),
+        })
+        .collect();
+    let keyframe_gap = string_dropdown(&gap_names);
     let leaky = gtk::Switch::new();
     leaky.set_tooltip_text(Some(
         "Leaky queue: when the encoder is slow, discard old frames instead of letting latency build.",
@@ -344,6 +353,7 @@ pub(crate) fn quality_controls(
         let retransmit = retransmit.clone();
         let drop_late = drop_late.clone();
         let loss_keyframes = loss_keyframes.clone();
+        let keyframe_gap = keyframe_gap.clone();
         let leaky = leaky.clone();
         Rc::new(move |prefs: &CapturePreferences| {
             resolution.set_selected(
@@ -371,6 +381,7 @@ pub(crate) fn quality_controls(
                 &prefs.loss_keyframe_ms,
                 1,
             ));
+            keyframe_gap.set_selected(position(&KEYFRAME_GAPS, &prefs.keyframe_gap_secs, 2));
             leaky.set_active(prefs.leaky_queue);
         })
     };
@@ -451,6 +462,12 @@ pub(crate) fn quality_controls(
             target(&move |prefs| prefs.loss_keyframe_ms = ms);
         }
     });
+    let target = apply.clone();
+    keyframe_gap.connect_selected_notify(move |dropdown| {
+        if let Some(seconds) = KEYFRAME_GAPS.get(dropdown.selected() as usize).copied() {
+            target(&move |prefs| prefs.keyframe_gap_secs = seconds);
+        }
+    });
     let target = apply;
     leaky.connect_active_notify(move |switch| {
         let active = switch.is_active();
@@ -528,6 +545,11 @@ pub(crate) fn quality_controls(
             "Fastest Loss Recovery",
             &loss_keyframes,
             "When packets are lost, a full frame repairs the picture; this is the least time between them. Shorter recovers sooner, but on a connection near its limit the extra full frames cause more loss. 1 s is a good default; go longer if freezes come in clusters.",
+        ),
+        guided(
+            "Full Frame at Least",
+            &keyframe_gap,
+            "Sends a full frame whenever none has gone out for this long, so a viewer who lost packets on their own connection recovers without having to ask. Loss on your side and viewer requests already send them sooner. 5 s is a good default; choose Off if the picture hitches at this rhythm.",
         ),
         drop_row,
         leaky_row,

@@ -1,6 +1,6 @@
 //! Camera and screen capture to H.264 Annex-B access units.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,9 @@ pub struct VideoSource {
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
     keyframes: Arc<Mutex<KeyframeRequests>>,
+    /// The longest the stream goes without a keyframe, in milliseconds
+    /// (zero: no limit). The capture thread asks for one when it passes.
+    keyframe_gap_ms: Arc<AtomicU32>,
     /// Present when the bitrate adapts to the network.
     bitrate: Mutex<Option<BitrateController>>,
 }
@@ -84,6 +87,46 @@ struct KeyframeRequests {
     last: Option<Instant>,
     /// A request is waiting for the spacing to pass.
     deferred: bool,
+}
+
+/// Asks the encoder for a keyframe, at most one per `KEYFRAME_SPACING`; a
+/// request inside that time is not dropped but served when it ends.
+fn request_keyframe(pipeline: &gst::Pipeline, keyframes: &Arc<Mutex<KeyframeRequests>>) {
+    let wait = {
+        let Ok(mut state) = keyframes.lock() else {
+            return;
+        };
+        match state.last {
+            Some(last) if last.elapsed() < KEYFRAME_SPACING => {
+                if state.deferred {
+                    return;
+                }
+                state.deferred = true;
+                Some(KEYFRAME_SPACING - last.elapsed())
+            }
+            _ => {
+                state.last = Some(Instant::now());
+                None
+            }
+        }
+    };
+    match wait {
+        None => send_keyframe_request(pipeline),
+        Some(wait) => {
+            let pipeline = pipeline.downgrade();
+            let keyframes = keyframes.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(wait);
+                if let Ok(mut state) = keyframes.lock() {
+                    state.deferred = false;
+                    state.last = Some(Instant::now());
+                }
+                if let Some(pipeline) = pipeline.upgrade() {
+                    send_keyframe_request(&pipeline);
+                }
+            });
+        }
+    }
 }
 
 /// Sends the force-key-unit event up the pipeline to the encoder.
@@ -149,6 +192,10 @@ pub struct VideoSettings {
     pub adaptive_bitrate: bool,
     /// Least time between keyframes sent because packets were lost.
     pub loss_keyframe_ms: u32,
+    /// Send a keyframe when none has gone out for this many seconds, so a
+    /// viewer who lost packets on their own connection recovers without
+    /// having to ask. Zero: only when asked or on loss.
+    pub keyframe_gap_secs: u32,
 }
 
 /// Follows how the network treats the video and picks a bitrate for it:
@@ -260,6 +307,7 @@ impl Default for VideoSettings {
             camera_format: CameraFormat::Auto,
             adaptive_bitrate: true,
             loss_keyframe_ms: 1000,
+            keyframe_gap_secs: 5,
         }
     }
 }
@@ -591,8 +639,15 @@ impl VideoSource {
         let bus = pipeline.bus();
         let started = Instant::now();
         let mut silence_reported = false;
+        let keyframes: Arc<Mutex<KeyframeRequests>> = Arc::default();
+        let keyframe_gap_ms = Arc::new(AtomicU32::new(0));
+        let (thread_keyframes, thread_gap) = (keyframes.clone(), keyframe_gap_ms.clone());
+        let thread_pipeline = pipeline.downgrade();
         let thread = std::thread::spawn(move || {
             let mut last_arrival: Option<Instant> = None;
+            // When a keyframe last came out of the encoder, or was last
+            // asked for because none had.
+            let mut last_keyframe = Instant::now();
             while !thread_stop.load(Ordering::Relaxed) {
                 // Errors are otherwise invisible: a pipeline that fails after
                 // starting just stops delivering.
@@ -655,6 +710,20 @@ impl VideoSource {
                     }
                     last_arrival = Some(now);
                     thread_produced.store(true, Ordering::Relaxed);
+                    let gap = u64::from(thread_gap.load(Ordering::Relaxed));
+                    if is_keyframe(map.as_slice()) {
+                        last_keyframe = now;
+                    } else if gap > 0
+                        && now.duration_since(last_keyframe) >= Duration::from_millis(gap)
+                        && let Some(pipeline) = thread_pipeline.upgrade()
+                    {
+                        tracing::info!(
+                            quiet_ms = now.duration_since(last_keyframe).as_millis(),
+                            "no keyframe for a while; sending one"
+                        );
+                        last_keyframe = now;
+                        request_keyframe(&pipeline, &thread_keyframes);
+                    }
                     on_frame(EncodedFrame {
                         data: map.as_slice().to_vec(),
                         duration_ms: frame_ms,
@@ -671,7 +740,8 @@ impl VideoSource {
             thread: Some(thread),
             _portal: None,
             _camera: None,
-            keyframes: Arc::default(),
+            keyframes,
+            keyframe_gap_ms,
             bitrate: Mutex::new(None),
         })
     }
@@ -720,6 +790,15 @@ impl VideoSource {
         Err(last_error.unwrap_or_else(|| Error::Message("no capture pipeline variant".into())))
     }
 
+    /// Has a keyframe sent whenever none has gone out for `gap` (zero: only
+    /// when asked for). Any keyframe counts, whatever caused it.
+    pub fn set_keyframe_gap(&self, gap: Duration) {
+        self.keyframe_gap_ms.store(
+            gap.as_millis().min(u128::from(u32::MAX)) as u32,
+            Ordering::Relaxed,
+        );
+    }
+
     /// Lets the bitrate follow the network, never above `target_kbps`.
     pub fn adapt_bitrate(&self, target_kbps: u32) {
         if let Ok(mut bitrate) = self.bitrate.lock() {
@@ -766,41 +845,7 @@ impl VideoSource {
     /// served when it ends, so a loss just after a keyframe is still
     /// repaired without waiting for the next scheduled one.
     pub fn force_keyframe(&self) {
-        let wait = {
-            let Ok(mut state) = self.keyframes.lock() else {
-                return;
-            };
-            match state.last {
-                Some(last) if last.elapsed() < KEYFRAME_SPACING => {
-                    if state.deferred {
-                        return;
-                    }
-                    state.deferred = true;
-                    Some(KEYFRAME_SPACING - last.elapsed())
-                }
-                _ => {
-                    state.last = Some(Instant::now());
-                    None
-                }
-            }
-        };
-        match wait {
-            None => send_keyframe_request(&self.pipeline),
-            Some(wait) => {
-                let pipeline = self.pipeline.downgrade();
-                let keyframes = self.keyframes.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(wait);
-                    if let Ok(mut state) = keyframes.lock() {
-                        state.deferred = false;
-                        state.last = Some(Instant::now());
-                    }
-                    if let Some(pipeline) = pipeline.upgrade() {
-                        send_keyframe_request(&pipeline);
-                    }
-                });
-            }
-        }
+        request_keyframe(&self.pipeline, &self.keyframes);
     }
 
     /// Opens a V4L2 camera, or the first available one when `device` is None.
@@ -1241,6 +1286,46 @@ mod tests {
         // The receiver's estimate caps it; too little sent says nothing.
         assert_eq!(controller.report(1000, 0, 3000), Some(2850));
         assert_eq!(controller.report(10, 10, 0), None);
+    }
+
+    /// With nobody asking, a keyframe still goes out when none has for the
+    /// set time; with no such time set, only the first frame is one.
+    #[test]
+    fn a_keyframe_is_sent_when_none_has_been_for_a_while() {
+        gst::init().unwrap();
+        let settings = VideoSettings {
+            encoder: EncoderPreference::Cpu,
+            ..VideoSettings::default()
+        };
+        let description = screen_description(&settings, false).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true name=src",
+        );
+        let count = |gap: Duration| {
+            let keyframes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = keyframes.clone();
+            let source = VideoSource::start_pipeline_with(
+                &description,
+                33,
+                move |frame: EncodedFrame| {
+                    if is_keyframe(&frame.data) {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+            source.set_keyframe_gap(gap);
+            std::thread::sleep(Duration::from_millis(3600));
+            drop(source);
+            keyframes.load(Ordering::Relaxed)
+        };
+        assert_eq!(count(Duration::ZERO), 1);
+        let with_gap = count(Duration::from_secs(1));
+        assert!(
+            (3..=5).contains(&with_gap),
+            "expected about four, got {with_gap}"
+        );
     }
 
     /// The encoder's bitrate can be changed while it runs.

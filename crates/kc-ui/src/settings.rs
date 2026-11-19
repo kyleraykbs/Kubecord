@@ -17,6 +17,9 @@ pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 /// needed.
 pub const KEYFRAME_INTERVALS: [u32; 5] = [0, 2, 4, 6, 10];
 
+/// The longest a stream goes without a keyframe, in seconds (0: no limit).
+pub const KEYFRAME_GAPS: [u32; 5] = [0, 3, 5, 10, 15];
+
 pub const DROP_AFTER_MS: [u32; 6] = [0, 100, 250, 500, 1000, 2000];
 
 pub const RETRANSMIT_WINDOWS_MS: [u32; 5] = [0, 1000, 2000, 5000, 10000];
@@ -84,6 +87,9 @@ pub struct CapturePreferences {
     pub self_preview: bool,
     /// Least time between keyframes sent because packets were lost.
     pub loss_keyframe_ms: u32,
+    /// Send a keyframe when none has gone out for this many seconds (0:
+    /// only when asked or on loss).
+    pub keyframe_gap_secs: u32,
     /// Write the log file (see [`crate::logging`]).
     pub log_to_file: bool,
     /// Also log every media and voice event; far larger.
@@ -130,6 +136,7 @@ impl Default for CapturePreferences {
             camera_format: 0,
             self_preview: true,
             loss_keyframe_ms: 1000,
+            keyframe_gap_secs: 5,
             log_to_file: true,
             log_detailed: false,
         }
@@ -164,6 +171,7 @@ impl CapturePreferences {
             // network.
             adaptive_bitrate: self.bitrate_kbps.is_none(),
             loss_keyframe_ms: self.loss_keyframe_ms,
+            keyframe_gap_secs: self.keyframe_gap_secs,
         }
     }
 
@@ -214,6 +222,7 @@ impl CapturePreferences {
         self.cpu_encoder = defaults.cpu_encoder;
         self.camera_format = defaults.camera_format;
         self.loss_keyframe_ms = defaults.loss_keyframe_ms;
+        self.keyframe_gap_secs = defaults.keyframe_gap_secs;
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -261,6 +270,9 @@ impl CapturePreferences {
         }
         if !LOSS_KEYFRAME_SPACINGS_MS.contains(&self.loss_keyframe_ms) {
             self.loss_keyframe_ms = 1000;
+        }
+        if !KEYFRAME_GAPS.contains(&self.keyframe_gap_secs) {
+            self.keyframe_gap_secs = 5;
         }
         if self.camera_format > 2 {
             self.camera_format = 0;
@@ -332,6 +344,7 @@ mod tests {
         let mut prefs = CapturePreferences::default();
         assert!(prefs.video_settings().adaptive_bitrate);
         assert_eq!(prefs.video_settings().loss_keyframe_ms, 1000);
+        assert_eq!(prefs.video_settings().keyframe_gap_secs, 5);
         prefs.bitrate_kbps = Some(2500);
         let settings = prefs.video_settings();
         assert!(!settings.adaptive_bitrate);

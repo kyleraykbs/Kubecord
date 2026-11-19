@@ -989,6 +989,9 @@ fn spawn_account(
                                         if voice.stream_settings.adaptive_bitrate {
                                             source.adapt_bitrate(voice.stream_settings.bitrate_kbps);
                                         }
+                                        source.set_keyframe_gap(Duration::from_secs(u64::from(
+                                            voice.stream_settings.keyframe_gap_secs,
+                                        )));
                                         connection.source = Some(*source);
                                         if connection.audio.is_none() && share_audio {
                                             match ScreenAudio::start(
@@ -2007,6 +2010,7 @@ async fn start_camera(
     handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
     handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(settings.loss_keyframe_ms)));
     let adapt = settings.adaptive_bitrate.then_some(settings.bitrate_kbps);
+    let keyframe_gap = Duration::from_secs(u64::from(settings.keyframe_gap_secs));
     // Opening a camera can take a few seconds while formats are tried; keep
     // it off the account loop.
     let source = tokio::task::spawn_blocking(move || {
@@ -2021,6 +2025,7 @@ async fn start_camera(
     if let Some(target) = adapt {
         source.adapt_bitrate(target);
     }
+    source.set_keyframe_gap(keyframe_gap);
     connection.camera = Some(source);
     connection.handle.set_video(true);
     Ok(())
