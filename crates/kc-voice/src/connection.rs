@@ -242,6 +242,42 @@ struct VideoPacket {
     idle_before: Duration,
 }
 
+/// What a report of lost video calls for.
+#[derive(Debug, PartialEq, Eq)]
+enum LossKeyframe {
+    /// The resends repair it.
+    None,
+    /// A keyframe, now.
+    Now,
+    /// A keyframe, once the spacing since the last one has passed.
+    Owed,
+}
+
+/// Decides whether lost video needs a keyframe. Lost packets are sent
+/// again, which repairs the picture in about one round trip, so a
+/// keyframe is for when that cannot work: a packet is `missing` (too old
+/// to still be held), or is being asked for a second time (`repeated`:
+/// the resend was lost too). A keyframe for every loss fed a loop on a
+/// lossy connection: several times the size of a frame, about one a
+/// second, each adding load where packets were already being dropped.
+fn loss_keyframe(
+    missing: bool,
+    repeated: bool,
+    since_last: Option<Duration>,
+    spacing: Duration,
+) -> LossKeyframe {
+    if missing {
+        LossKeyframe::Now
+    } else if !repeated {
+        LossKeyframe::None
+    } else if since_last.is_none_or(|since| since >= spacing) {
+        LossKeyframe::Now
+    } else {
+        // Not forgotten: nothing else would end that freeze.
+        LossKeyframe::Owed
+    }
+}
+
 /// Every video packet sent a second time a little later, on the
 /// retransmission stream, so one that is lost is usually replaced before
 /// the server has to ask. Doubles the video upload.
@@ -2067,6 +2103,8 @@ impl SessionState {
             }
             let mut offset = 12;
             let mut requested = 0usize;
+            // A video packet asked for a second time: its resend was lost too.
+            let mut repeated = false;
             let mut found = 0usize;
             let mut sample = Vec::new();
             // For the log: each packet as sequence:index/count in its frame
@@ -2093,6 +2131,7 @@ impl SessionState {
                             })
                         {
                             self.sent.nack_repeated += 1;
+                            repeated = true;
                         }
                     }
                     requested += 1;
@@ -2148,23 +2187,25 @@ impl SessionState {
                     packets = detail.join(" "),
                     "video packets asked for again"
                 );
-                // A viewer that got a damaged frame stays frozen until a
-                // keyframe, and has not been seen to ask us for one, so one
-                // is sent on loss. They are spaced out: sent on every request
-                // they fed a loop, each keyframe followed by more requests.
-                // A loss inside the spacing is not forgotten, though: with no
-                // scheduled keyframes, nothing else would end that freeze.
                 let now = std::time::Instant::now();
-                if found < requested
-                    || self
-                        .last_loss_keyframe
-                        .is_none_or(|last| now.duration_since(last) >= self.loss_keyframe_spacing)
-                {
-                    self.last_loss_keyframe = Some(now);
-                    self.loss_keyframe_owed = false;
-                    let _ = self.events.send(VoiceEvent::ForceKeyframe);
-                } else {
-                    self.loss_keyframe_owed = true;
+                let since_last = self.last_loss_keyframe.map(|last| now.duration_since(last));
+                match loss_keyframe(
+                    found < requested,
+                    repeated,
+                    since_last,
+                    self.loss_keyframe_spacing,
+                ) {
+                    LossKeyframe::Now => {
+                        info!(
+                            missing = requested - found,
+                            repeated, "a resend cannot repair this loss; sending a keyframe"
+                        );
+                        self.last_loss_keyframe = Some(now);
+                        self.loss_keyframe_owed = false;
+                        let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                    }
+                    LossKeyframe::Owed => self.loss_keyframe_owed = true,
+                    LossKeyframe::None => {}
                 }
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;
@@ -2410,6 +2451,36 @@ mod tests {
         assert!(sent.get(8).is_none());
         sent.insert(8, kept_packet(), Duration::ZERO);
         assert_eq!(sent.len(), 0);
+    }
+
+    #[test]
+    fn a_keyframe_is_only_for_loss_a_resend_cannot_repair() {
+        let second = Duration::from_secs(1);
+        let recent = Some(Duration::from_millis(300));
+        // Resent packets repair an ordinary loss: no keyframe.
+        assert_eq!(
+            loss_keyframe(false, false, None, second),
+            LossKeyframe::None
+        );
+        assert_eq!(
+            loss_keyframe(false, false, recent, second),
+            LossKeyframe::None
+        );
+        // A packet no longer held cannot be resent: a keyframe at once.
+        assert_eq!(
+            loss_keyframe(true, false, recent, second),
+            LossKeyframe::Now
+        );
+        // Asked for again, the resend was lost too: a keyframe, spaced out.
+        assert_eq!(loss_keyframe(false, true, None, second), LossKeyframe::Now);
+        assert_eq!(
+            loss_keyframe(false, true, Some(second), second),
+            LossKeyframe::Now
+        );
+        assert_eq!(
+            loss_keyframe(false, true, recent, second),
+            LossKeyframe::Owed
+        );
     }
 
     #[test]

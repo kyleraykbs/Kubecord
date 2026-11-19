@@ -549,7 +549,7 @@ pub(crate) fn quality_controls(
         guided(
             "Scheduled Keyframes",
             &keyframe,
-            "Leave on Only when needed: a full frame is sent when a viewer asks or packets are lost. Scheduled ones made viewers hitch.",
+            "Leave on Only when needed: a full frame is sent when a viewer asks or a lost packet could not be replaced. Scheduled ones made viewers hitch.",
         ),
         guided(
             "Dropout Recovery Window",
@@ -559,7 +559,7 @@ pub(crate) fn quality_controls(
         guided(
             "Fastest Loss Recovery",
             &loss_keyframes,
-            "When packets are lost, a full frame repairs the picture; this is the least time between them. Shorter recovers sooner, but on a connection near its limit the extra full frames cause more loss. 1 s is a good default; go longer if freezes come in clusters.",
+            "Lost packets are sent again, which repairs the picture by itself. When a resend is lost too, a full frame repairs it; this is the least time between those. Shorter recovers sooner, but on a connection near its limit full frames cause more loss. 1 s is a good default; go longer if freezes come in clusters.",
         ),
         guided(
             "Full Frame at Least",
