@@ -217,6 +217,29 @@ impl SentPackets {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
+/// Counters for sent video over one reporting period, logged so a viewer's
+/// freeze can be matched to what the network asked of us.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct SentStats {
+    frames: u64,
+    packets: u64,
+    bytes: u64,
+    /// Frames not sent: the pacing queue was full, or DAVE was not ready.
+    dropped: u64,
+    /// Video packets the server asked for again, and how many we still had.
+    nack_requested: u64,
+    nack_found: u64,
+    audio_nack_requested: u64,
+    /// Keyframes viewers asked for (PLI/FIR).
+    keyframe_requests: u64,
+    /// The longest the pacing queue got, in milliseconds of sending.
+    backlog_max_ms: u64,
+    /// Highest loss a receiver report gave, in 1/256ths.
+    loss_max: u32,
+    /// The server's latest bandwidth estimate for us.
+    remb_bps: u64,
+}
+
 /// Upper bound on packets per 1 ms pacer tick, so many tiny slice NALs cannot
 /// leave back-to-back.
 const PACING_MAX_PACKETS_PER_TICK: usize = 4;
@@ -356,6 +379,8 @@ struct SessionState {
     retransmits: VecDeque<Vec<u8>>,
     /// Payload bytes waiting in `video_queue`.
     video_queue_bytes: usize,
+    /// What happened to the video being sent since the last report.
+    sent: SentStats,
     /// Pacer send credit in bytes; refilled from elapsed time at the pacing rate.
     pace_credit: f64,
     pace_last: std::time::Instant,
@@ -573,6 +598,7 @@ async fn run(
         retransmit_window: DEFAULT_RETRANSMIT_WINDOW,
         retransmits: VecDeque::new(),
         video_queue_bytes: 0,
+        sent: SentStats::default(),
         pace_credit: 0.0,
         pace_last: std::time::Instant::now(),
         video_rate_bps: 0.0,
@@ -635,7 +661,10 @@ async fn run(
         tokio::select! {
             _ = activity.tick() => state.expire_speakers(),
             _ = video_repair.tick(), if !state.video_streams.is_empty() => state.poll_video(),
-            _ = report.tick() => state.report_received(),
+            _ = report.tick() => {
+                state.report_received();
+                state.report_sent();
+            }
             _ = heartbeat.tick() => {
                 let payload = json!({"op": 3, "d": {"t": now_millis(), "seq_ack": state.last_binary_seq}});
                 if send_json(&mut state.write, payload).await.is_err() {
@@ -736,6 +765,7 @@ impl SessionState {
                         Ok(frame) => frame,
                         Err(error) => {
                             debug!(%error, "dropping video frame until DAVE is ready");
+                            self.sent.dropped += 1;
                             return Ok(true);
                         }
                     },
@@ -768,9 +798,14 @@ impl SessionState {
                         packets = packets.len(),
                         "dropping video frame: RTP pacing queue is full"
                     );
+                    self.sent.dropped += 1;
                 } else {
                     let backlog_ms =
                         self.video_queue_bytes as f64 / self.pacing_bytes_per_sec() * 1000.0;
+                    self.sent.frames += 1;
+                    self.sent.packets += packets.len() as u64;
+                    self.sent.bytes += frame_size as u64;
+                    self.sent.backlog_max_ms = self.sent.backlog_max_ms.max(backlog_ms as u64);
                     if backlog_ms > 250.0
                         && self
                             .last_backlog_warn
@@ -1514,6 +1549,30 @@ impl SessionState {
         });
     }
 
+    /// Logs what happened to sent video over the last period, when any was
+    /// sent. A viewer's freeze shows here as keyframe requests, packets
+    /// asked for again that we no longer had, a backlog, or drops.
+    fn report_sent(&mut self) {
+        let sent = std::mem::take(&mut self.sent);
+        if sent.frames == 0 && sent.dropped == 0 {
+            return;
+        }
+        info!(
+            frames = sent.frames,
+            packets = sent.packets,
+            kbit = sent.bytes * 8 / 1000,
+            dropped = sent.dropped,
+            nack_requested = sent.nack_requested,
+            nack_found = sent.nack_found,
+            audio_nack_requested = sent.audio_nack_requested,
+            keyframe_requests = sent.keyframe_requests,
+            backlog_max_ms = sent.backlog_max_ms,
+            loss_max_percent = sent.loss_max * 100 / 256,
+            remb_kbit = sent.remb_bps / 1000,
+            "sent video"
+        );
+    }
+
     /// Logs the receive counters when they moved since the last report.
     fn report_received(&mut self) {
         if self.received == self.reported {
@@ -1613,6 +1672,9 @@ impl SessionState {
                     jitter,
                     "RTCP receiver report"
                 );
+                if self.video_ssrc == Some(media) {
+                    self.sent.loss_max = self.sent.loss_max.max(u32::from(fraction_lost));
+                }
                 offset += 24;
             }
         }
@@ -1647,6 +1709,7 @@ impl SessionState {
                 | (cleartext[19] as u32);
             let bitrate_bps = (mantissa as u64) << exp;
             tracing::debug!(bitrate_bps, "RTCP REMB bandwidth estimate");
+            self.sent.remb_bps = bitrate_bps;
         }
         if packet_type == 205 && fmt == 1 && cleartext.len() >= 16 {
             let media =
@@ -1687,6 +1750,12 @@ impl SessionState {
                     }
                 }
             }
+            if is_video {
+                self.sent.nack_requested += requested as u64;
+                self.sent.nack_found += found as u64;
+            } else {
+                self.sent.audio_nack_requested += requested as u64;
+            }
             // `sample` advancing across NACKs = genuine ongoing loss; the same
             // seqs repeating = our retransmits aren't landing. `found < requested`
             // = the viewer wants packets we already evicted from `sent_video`.
@@ -1711,6 +1780,7 @@ impl SessionState {
                 .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
             if media == self.video_ssrc || media == Some(0) {
                 tracing::debug!(fmt, ?media, "viewer requested keyframe (PLI/FIR)");
+                self.sent.keyframe_requests += 1;
                 let _ = self.events.send(VoiceEvent::ForceKeyframe);
             }
         }

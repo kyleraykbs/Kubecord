@@ -206,7 +206,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         // the chroma conversion before the encoder.
         "capsfilter caps=video/x-raw ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0{leaky} \
          ! videoconvert ! videoscale ! videorate skip-to-first=true \
-         ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
+         ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1,colorimetry={colorimetry} \
          ! {encoder} \
          ! h264parse config-interval=-1 \
          ! capsfilter caps=video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au \
@@ -215,9 +215,90 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         height = settings.height,
         fps = settings.fps,
         format = if hardware { "NV12" } else { "I420" },
+        colorimetry = limited_range(settings.height),
         encoder = encoder_chain(settings, hardware),
         leaky = queue_properties(settings),
     )
+}
+
+/// The colorimetry video is encoded in: limited ("TV") range. Cameras that
+/// send MJPEG deliver full range (0-255); encoded as is, decoders that
+/// assume limited range, Discord's among them, stretch it and crush the
+/// shadows, so the picture looks darker to viewers.
+fn limited_range(height: u32) -> &'static str {
+    if height >= 720 { "bt709" } else { "bt601" }
+}
+
+/// Counts of what the MJPEG check did to a camera's frames.
+#[derive(Default)]
+struct MjpegStats {
+    checked: u64,
+    damaged: u64,
+    /// Damaged frames among the latest `MJPEG_WINDOW`.
+    recent: std::collections::VecDeque<bool>,
+    /// The check rejected so much that it is more likely wrong about this
+    /// camera than the camera is broken; it has been switched off.
+    distrusted: bool,
+}
+
+const MJPEG_WINDOW: usize = 60;
+
+/// Drops damaged MJPEG frames before they reach the decoder (see
+/// [`crate::mjpeg`]); the previous picture then stays up for a frame.
+fn guard_mjpeg(pipeline: &gst::Pipeline) {
+    let Some(pad) = pipeline
+        .by_name("mjpeg")
+        .and_then(|decoder| decoder.static_pad("sink"))
+    else {
+        return;
+    };
+    let stats = Mutex::new(MjpegStats::default());
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        let Some(buffer) = info.buffer() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Ok(mut stats) = stats.lock() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if stats.distrusted {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Ok(map) = buffer.map_readable() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let verdict = crate::mjpeg::check(map.as_slice());
+        let damaged = matches!(verdict, crate::mjpeg::Verdict::Damaged(_));
+        if stats.checked == 0 {
+            // Says whether this camera's frames can be checked at all.
+            tracing::info!(?verdict, bytes = map.len(), "first camera MJPEG frame");
+        }
+        stats.checked += 1;
+        stats.recent.push_back(damaged);
+        if stats.recent.len() > MJPEG_WINDOW {
+            stats.recent.pop_front();
+        }
+        if !damaged {
+            return gst::PadProbeReturn::Ok;
+        }
+        stats.damaged += 1;
+        let recent = stats.recent.iter().filter(|damaged| **damaged).count();
+        if stats.recent.len() == MJPEG_WINDOW && recent > MJPEG_WINDOW / 2 {
+            stats.distrusted = true;
+            tracing::warn!(
+                ?verdict,
+                "most camera frames fail the MJPEG check; passing them unchecked"
+            );
+            return gst::PadProbeReturn::Ok;
+        }
+        tracing::info!(
+            ?verdict,
+            bytes = map.len(),
+            damaged = stats.damaged,
+            checked = stats.checked,
+            "dropped a damaged camera frame"
+        );
+        gst::PadProbeReturn::Drop
+    });
 }
 
 /// A camera pipeline; `source` ends in raw video.
@@ -260,12 +341,14 @@ fn camera_inputs(settings: &VideoSettings) -> Vec<String> {
     let (width, height, fps) = (settings.width, settings.height, settings.fps);
     let mjpeg = [
         format!(
-            "capsfilter caps=\"image/jpeg,width={width},height={height},framerate={fps}/1\" ! jpegdec"
+            "capsfilter caps=\"image/jpeg,width={width},height={height},framerate={fps}/1\" ! jpegdec name=mjpeg"
         ),
         format!(
-            "capsfilter caps=\"image/jpeg,width=[{width},4096],height=[{height},4096],framerate={fps}/1\" ! jpegdec"
+            "capsfilter caps=\"image/jpeg,width=[{width},4096],height=[{height},4096],framerate={fps}/1\" ! jpegdec name=mjpeg"
         ),
-        format!("capsfilter caps=\"image/jpeg,width={width},height={height}\" ! jpegdec"),
+        format!(
+            "capsfilter caps=\"image/jpeg,width={width},height={height}\" ! jpegdec name=mjpeg"
+        ),
     ];
     let raw = [
         format!("capsfilter caps=\"video/x-raw,width={width},height={height},framerate={fps}/1\""),
@@ -279,7 +362,7 @@ fn camera_inputs(settings: &VideoSettings) -> Vec<String> {
         // Any MJPEG the camera has before giving up on the choice.
         CameraFormat::Mjpeg => mjpeg
             .into_iter()
-            .chain(["capsfilter caps=image/jpeg ! jpegdec".to_owned()])
+            .chain(["capsfilter caps=image/jpeg ! jpegdec name=mjpeg".to_owned()])
             .collect(),
         CameraFormat::Raw => raw.into(),
     }
@@ -691,6 +774,7 @@ impl VideoSource {
                             }
                         }
                     }
+                    guard_mjpeg(pipeline);
                     Ok(())
                 };
                 let descriptions = encoder_descriptions(settings, |hardware| {
@@ -879,6 +963,33 @@ impl Drop for VideoDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_range_video_is_converted_to_limited_range() {
+        // Black is 0 in full range (what MJPEG decodes to) and 16 in the
+        // limited range decoders expect.
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(&format!(
+            "videotestsrc num-buffers=1 pattern=black \
+             ! video/x-raw,format=I420,width=64,height=48,colorimetry=1:4:0:0 \
+             ! videoconvert ! video/x-raw,format=I420,colorimetry={} \
+             ! appsink name=sink sync=false",
+            limited_range(48)
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = sink.pull_sample().unwrap();
+        let luma = sample.buffer().unwrap().map_readable().unwrap().as_slice()[0];
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(luma, 16);
+    }
 
     #[test]
     fn camera_formats_are_tried_best_first() {
