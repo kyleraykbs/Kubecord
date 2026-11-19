@@ -288,7 +288,7 @@ impl AppState {
         let voice_connected = gtk::Label::new(Some("Voice Connected"));
         voice_connected.set_xalign(0.0);
         voice_connected.add_css_class("caption-heading");
-        voice_connected.add_css_class("success");
+        voice_connected.add_css_class("kc-voice-connected");
 
         let voice_channel_label = gtk::Label::new(None);
         voice_channel_label.set_xalign(0.0);

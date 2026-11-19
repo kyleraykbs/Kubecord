@@ -526,3 +526,8 @@ dispatch; contains account data).
 - `VideoSettings.fps` is the highest the capture is built for; `fps_target` is applied at `adapt()` via `set_framerate` (through the RECONFIGURE-dropping probe). Checked on a real PipeWire source: 47 frames per 2 s at 24 out of a 30 build, then 40 at the next step down. `bitrate_top_kbps` is the bitrate's highest.
 - `BITRATES` now go to 20000 (12000, 15000, 20000 added).
 - `KYLECORD_SETTINGS_SCROLL` also scrolls the share and camera popups (`settings_panel::dev_scroll`).
+
+## Signal bars in the status colours (2026-11-19)
+
+- The voice panel's ping bars are 13×11 in a `kc-ping-button` (rounded rectangle, 6 px radius, no `circular`). Lit bars take the icon's CSS colour, set per state by `kc-ping-good` / `kc-ping-fair` / `kc-ping-poor` = `@success_bg_color` / `@warning_bg_color` / `@error_bg_color`, the same as the online / idle / dnd status dots. Unlit bars are faint in the button's colour. "Voice Connected" uses `kc-voice-connected` (`@success_bg_color`) instead of libadwaita's `success`, so a good connection matches it.
+- `KYLECORD_VIDEO_DEMO` also shows the voice panel, with a made-up ping from `KYLECORD_DEMO_PING` (ms, default 40).

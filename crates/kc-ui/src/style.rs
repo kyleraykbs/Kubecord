@@ -87,6 +87,20 @@ const CSS: &str = r#"
 .kc-status-dnd { background-color: @error_bg_color; }
 .kc-status-offline { background-color: alpha(@window_fg_color, 0.35); }
 
+/* The call's signal bars, in the status colours, and the Voice Connected
+   heading in the online one. */
+.kc-voice-connected,
+.kc-ping-good { color: @success_bg_color; }
+.kc-ping-fair { color: @warning_bg_color; }
+.kc-ping-poor { color: @error_bg_color; }
+
+.kc-ping-button {
+    min-width: 0;
+    min-height: 0;
+    padding: 5px 6px;
+    border-radius: 6px;
+}
+
 .kc-messages row {
     padding: 0;
     background: none;

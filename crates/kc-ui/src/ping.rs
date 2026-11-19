@@ -25,14 +25,17 @@ fn bars(millis: Option<u32>) -> u32 {
     }
 }
 
-/// Green, yellow or red for a number of bars.
-fn bar_color(lit: u32) -> (f64, f64, f64) {
+/// The style class for a number of bars. Their colours are the status
+/// dots': online when good, away when fair, do not disturb when poor.
+fn bar_class(lit: u32) -> &'static str {
     match lit {
-        3.. => (0.26, 0.71, 0.42),
-        2 => (0.94, 0.70, 0.20),
-        _ => (0.93, 0.26, 0.27),
+        3.. => "kc-ping-good",
+        2 => "kc-ping-fair",
+        _ => "kc-ping-poor",
     }
 }
+
+const BAR_CLASSES: [&str; 3] = ["kc-ping-good", "kc-ping-fair", "kc-ping-poor"];
 
 /// The signal bars and the popover's widgets.
 pub(crate) struct PingWidgets {
@@ -47,11 +50,12 @@ pub(crate) struct PingWidgets {
 impl PingWidgets {
     pub(crate) fn new() -> Self {
         let icon = gtk::DrawingArea::new();
-        icon.set_content_width(18);
-        icon.set_content_height(16);
+        icon.set_content_width(13);
+        icon.set_content_height(11);
+        icon.add_css_class("kc-ping-good");
         let button = gtk::MenuButton::new();
         button.add_css_class("flat");
-        button.add_css_class("circular");
+        button.add_css_class("kc-ping-button");
         button.set_valign(gtk::Align::Center);
         button.set_child(Some(&icon));
         button.set_tooltip_text(Some("Connection"));
@@ -109,14 +113,22 @@ impl AppState {
                 };
                 let latest = app.ping_history.borrow().back().map(|(_, millis)| *millis);
                 let lit = latest.map(bars);
-                let ink = area.color();
-                let (red, green, blue) = bar_color(lit.unwrap_or(0));
-                let bar_width = f64::from(width) / 4.0 - 1.5;
+                // Lit bars in the state's colour (the icon's CSS colour),
+                // the rest faint in the button's.
+                let state = area.color();
+                let ink = area.parent().map_or(state, |parent| parent.color());
+                let gap = 1.0;
+                let bar_width = (f64::from(width) - 3.0 * gap) / 4.0;
                 for bar in 0..4u32 {
                     let bar_height = f64::from(height) * f64::from(bar + 1) / 4.0;
-                    let x = f64::from(bar) * (bar_width + 1.5);
+                    let x = f64::from(bar) * (bar_width + gap);
                     if lit.is_some_and(|lit| bar < lit.max(1)) {
-                        cairo.set_source_rgb(red, green, blue);
+                        cairo.set_source_rgba(
+                            f64::from(state.red()),
+                            f64::from(state.green()),
+                            f64::from(state.blue()),
+                            1.0,
+                        );
                     } else {
                         cairo.set_source_rgba(
                             f64::from(ink.red()),
@@ -192,6 +204,19 @@ impl AppState {
                 Some((_, None)) => "Ping: no reply".to_owned(),
                 None => "Connection".to_owned(),
             }));
+        let wanted = bar_class(
+            history
+                .back()
+                .and_then(|(_, millis)| *millis)
+                .map_or(0, |millis| bars(Some(millis))),
+        );
+        for class in BAR_CLASSES {
+            if class == wanted {
+                self.ping.icon.add_css_class(class);
+            } else {
+                self.ping.icon.remove_css_class(class);
+            }
+        }
         self.ping.icon.queue_draw();
         self.ping.graph.queue_draw();
     }

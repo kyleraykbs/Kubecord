@@ -1004,6 +1004,14 @@ impl AppState {
         });
         self.stack.set_visible_child_name("chat");
         self.set_call_layout(CallLayout::Only);
+        // The voice panel too, with a made-up ping (`KYLECORD_DEMO_PING`,
+        // milliseconds) to show the signal bars.
+        self.voice_panel.set_visible(true);
+        let ping = std::env::var("KYLECORD_DEMO_PING")
+            .ok()
+            .and_then(|millis| millis.parse().ok())
+            .unwrap_or(40);
+        self.note_ping(Some(ping));
         let stream = (Snowflake::new(1), true);
         let camera = (Snowflake::new(3), false);
         match mode {
