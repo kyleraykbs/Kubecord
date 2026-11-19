@@ -227,6 +227,11 @@ const CSS: &str = r#"
     margin-bottom: 0;
 }
 
+/* Small enough to fit the 16 px gap under the message box. */
+.kc-typing {
+    font-size: 0.72em;
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;
