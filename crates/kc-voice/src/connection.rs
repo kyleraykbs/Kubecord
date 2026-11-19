@@ -285,8 +285,9 @@ fn rtx_payload(original_sequence: u16, payload: &[u8]) -> Vec<u8> {
 const PACING_FACTOR: f64 = 2.5;
 /// Minimum pacing rate, used until the bitrate is known and on quiet screens.
 const PACING_FLOOR_BPS: f64 = 5_000_000.0;
-/// The least time between keyframes forced because packets were lost.
-const LOSS_KEYFRAME_SPACING: Duration = Duration::from_secs(3);
+/// The least time between keyframes forced because packets were lost. Two
+/// seconds is what scheduled keyframes ran at without feeding more loss.
+const LOSS_KEYFRAME_SPACING: Duration = Duration::from_secs(2);
 /// How often the ping is measured.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -451,6 +452,9 @@ struct SessionState {
     video_queue: VecDeque<(Vec<u8>, bool, u32, PacketPlace)>,
     /// When a keyframe was last forced because packets were lost.
     last_loss_keyframe: Option<std::time::Instant>,
+    /// Packets were lost too soon after that keyframe for another; one is
+    /// owed once the spacing has passed.
+    loss_keyframe_owed: bool,
     sent_video: SentVideo,
     /// Sequence number of the next packet on the retransmission stream.
     seq_rtx: u16,
@@ -682,6 +686,7 @@ async fn run(
         ts_video: now_millis() as u32,
         video_queue: VecDeque::new(),
         last_loss_keyframe: None,
+        loss_keyframe_owed: false,
         sent_video: SentVideo::default(),
         seq_rtx: 0,
         test_drop: std::env::var("KYLECORD_TEST_DROP_VIDEO")
@@ -758,7 +763,10 @@ async fn run(
     let mut buffer = vec![0u8; 2048];
     loop {
         tokio::select! {
-            _ = activity.tick() => state.expire_speakers(),
+            _ = activity.tick() => {
+                state.expire_speakers();
+                state.send_owed_keyframe();
+            }
             _ = video_repair.tick(), if !state.video_streams.is_empty() => state.poll_video(),
             _ = report.tick() => {
                 state.report_received();
@@ -1734,6 +1742,21 @@ impl SessionState {
         });
     }
 
+    /// Sends the keyframe owed for a loss that came too soon after the
+    /// last one, now that the spacing has passed.
+    fn send_owed_keyframe(&mut self) {
+        if self.loss_keyframe_owed
+            && self
+                .last_loss_keyframe
+                .is_none_or(|last| last.elapsed() >= LOSS_KEYFRAME_SPACING)
+        {
+            self.loss_keyframe_owed = false;
+            self.last_loss_keyframe = Some(std::time::Instant::now());
+            info!("sending the keyframe owed for an earlier loss");
+            let _ = self.events.send(VoiceEvent::ForceKeyframe);
+        }
+    }
+
     /// Logs what happened to sent video over the last period, when any was
     /// sent. A viewer's freeze shows here as keyframe requests, packets
     /// asked for again that we no longer had, a backlog, or drops.
@@ -1984,8 +2007,10 @@ impl SessionState {
                 );
                 // A viewer that got a damaged frame stays frozen until a
                 // keyframe, and has not been seen to ask us for one, so one
-                // is sent on loss. Only now and then: sent on every request
+                // is sent on loss. They are spaced out: sent on every request
                 // they fed a loop, each keyframe followed by more requests.
+                // A loss inside the spacing is not forgotten, though: with no
+                // scheduled keyframes, nothing else would end that freeze.
                 let now = std::time::Instant::now();
                 if found < requested
                     || self
@@ -1993,7 +2018,10 @@ impl SessionState {
                         .is_none_or(|last| now.duration_since(last) >= LOSS_KEYFRAME_SPACING)
                 {
                     self.last_loss_keyframe = Some(now);
+                    self.loss_keyframe_owed = false;
                     let _ = self.events.send(VoiceEvent::ForceKeyframe);
+                } else {
+                    self.loss_keyframe_owed = true;
                 }
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;

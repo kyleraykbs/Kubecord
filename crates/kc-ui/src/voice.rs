@@ -562,17 +562,51 @@ impl AppState {
                 .then(|| videos.get(&(account, person.id, true)))
                 .flatten();
             let camera = videos.get(&(account, person.id, false));
+            // With both, the camera rides in a corner of the stream.
+            let inset = stream.and(camera).map(|camera| camera.paintable.clone());
             stream
                 .map(|video| (video.paintable.clone(), true))
                 .or_else(|| camera.map(|video| (video.paintable.clone(), false)))
+                .map(|(paintable, is_stream)| (paintable, is_stream, inset))
         };
         let face: gtk::Widget = match &video {
-            Some((paintable, _)) => {
+            Some((paintable, _, inset)) => {
                 let picture = gtk::Picture::for_paintable(paintable);
                 picture.add_css_class("kc-video");
                 picture.set_content_fit(gtk::ContentFit::Cover);
                 picture.set_size_request(TILE_VIDEO.0, TILE_VIDEO.1);
-                picture.upcast()
+                match inset {
+                    Some(camera) => {
+                        let small = gtk::Picture::for_paintable(camera);
+                        small.add_css_class("kc-video-inset");
+                        small.set_content_fit(gtk::ContentFit::Cover);
+                        small.set_size_request(TILE_VIDEO.0 / 3, TILE_VIDEO.1 / 3);
+                        small.set_halign(gtk::Align::End);
+                        small.set_valign(gtk::Align::End);
+                        small.set_margin_end(6);
+                        small.set_margin_bottom(6);
+                        small.set_overflow(gtk::Overflow::Hidden);
+                        small.set_tooltip_text(Some("Camera: click to enlarge"));
+                        small.set_cursor_from_name(Some("pointer"));
+                        // A click on the corner picture enlarges the camera,
+                        // not the stream under it.
+                        let enlarge = gtk::GestureClick::new();
+                        let app = self.clone();
+                        let user_id = person.id;
+                        enlarge.connect_released(move |gesture, _, _, _| {
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
+                            let next =
+                                (focused != Some((user_id, false))).then_some((user_id, false));
+                            app.set_focused_video(next);
+                        });
+                        small.add_controller(enlarge);
+                        let both = gtk::Overlay::new();
+                        both.set_child(Some(&picture));
+                        both.add_overlay(&small);
+                        both.upcast()
+                    }
+                    None => picture.upcast(),
+                }
             }
             None => {
                 let avatar = self
@@ -589,7 +623,7 @@ impl AppState {
         let click = gtk::GestureClick::new();
         let app = self.clone();
         let user_id = person.id;
-        let video_target = video.as_ref().map(|(_, is_stream)| *is_stream);
+        let video_target = video.as_ref().map(|(_, is_stream, _)| *is_stream);
         click.connect_released(move |gesture, _, _, _| match video_target {
             Some(is_stream) => {
                 let next = (focused != Some((user_id, is_stream))).then_some((user_id, is_stream));

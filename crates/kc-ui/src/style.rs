@@ -359,6 +359,13 @@ const CSS: &str = r#"
     outline: 3px solid transparent;
 }
 
+/* The camera in a corner of the same person's stream. */
+.kc-video-inset {
+    border-radius: 6px;
+    background-color: black;
+    box-shadow: 0 0 0 2px alpha(black, 0.6), 0 2px 6px alpha(black, 0.5);
+}
+
 .kc-voice-tile.kc-speaking .kc-video {
     outline-color: @success_bg_color;
 }
