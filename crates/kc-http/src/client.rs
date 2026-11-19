@@ -344,11 +344,22 @@ impl HttpClient {
         Ok(())
     }
 
-    /// Stops ringing a DM call (hanging up before anyone answers).
-    pub async fn stop_ringing(&self, channel_id: Snowflake) -> Result<()> {
+    /// Stops a DM call ringing: for `recipients` (declining is stopping it
+    /// for yourself), or for everyone when `None`.
+    pub async fn stop_ringing(
+        &self,
+        channel_id: Snowflake,
+        recipients: Option<&[Snowflake]>,
+    ) -> Result<()> {
+        let recipients = recipients.map(|recipients| {
+            recipients
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        });
         self.post(
             &format!("/channels/{channel_id}/call/stop-ringing"),
-            json!({ "recipients": null }),
+            json!({ "recipients": recipients }),
         )
         .await?;
         Ok(())

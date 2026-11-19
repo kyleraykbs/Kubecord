@@ -195,6 +195,23 @@ pub fn run() -> glib::ExitCode {
                             }
                         }
                     }
+                    // The incoming call card for the first friend's DM;
+                    // local only.
+                    "ringing" => {
+                        let channel = store.read(|state| {
+                            state
+                                .relationships
+                                .values()
+                                .find(|relationship| {
+                                    relationship.kind == kc_state::Relationship::FRIEND
+                                })
+                                .and_then(|relationship| state.dm_with(relationship.id))
+                                .map(|channel| channel.id)
+                        });
+                        if let Some(channel) = channel {
+                            app_state.show_incoming_call(channel);
+                        }
+                    }
                     "notice" => {
                         app_state.notify("You're typing unseen", None, 30);
                         app_state.notify(
@@ -1342,38 +1359,19 @@ impl AppState {
                     self.set_status(&message);
                 }
             }
-            UiEvent::IncomingCall {
+            UiEvent::CallRinging {
                 account,
                 channel_id,
+                ringing,
             } => {
-                if self.model.borrow().active == Some(account) {
-                    let name = self
-                        .with_session(|session| {
-                            session.store.read(|state| {
-                                state.channels.get(&channel_id).map(Channel::display_name)
-                            })
-                        })
-                        .flatten()
-                        .unwrap_or_else(|| "Someone".to_owned());
-                    let app = self.clone();
-                    let join = Box::new(move || {
-                        let channel = app
-                            .with_session(|session| {
-                                session
-                                    .store
-                                    .read(|state| state.channels.get(&channel_id).cloned())
-                            })
-                            .flatten();
-                        if let Some(channel) = channel {
-                            app.open_channel(channel.clone());
-                            app.join_call(&channel);
-                        }
-                    });
-                    self.notify(
-                        &format!("Incoming call from {name}"),
-                        Some(("Join", join)),
-                        20,
-                    );
+                if ringing {
+                    if self.model.borrow().active == Some(account) {
+                        self.show_incoming_call(channel_id);
+                    } else {
+                        self.set_status("Incoming call on another account");
+                    }
+                } else {
+                    self.dismiss_incoming_call(channel_id);
                 }
             }
             UiEvent::VideoStarted {

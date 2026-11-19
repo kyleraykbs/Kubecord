@@ -104,6 +104,8 @@ pub(crate) struct AppState {
     /// The enlarged video in the voice view: `(user, is_stream)`. Clicking a
     /// tile focuses it; clicking the big one again clears this.
     pub focused_video: Cell<Option<(Snowflake, bool)>>,
+    /// The ringing card for an incoming call, and its channel.
+    pub incoming_call: RefCell<Option<(Snowflake, adw::Dialog)>>,
     /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
     /// slider to reopen at the chosen level.
     pub user_volumes: RefCell<HashMap<Snowflake, f32>>,
@@ -811,6 +813,7 @@ impl AppState {
             voice_tiles: RefCell::new(HashMap::new()),
             videos: RefCell::new(HashMap::new()),
             focused_video: Cell::new(None),
+            incoming_call: RefCell::new(None),
             user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),
             typing_label,

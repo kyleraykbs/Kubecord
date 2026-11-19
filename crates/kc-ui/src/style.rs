@@ -246,6 +246,29 @@ const CSS: &str = r#"
     font-size: 1.45em;
 }
 
+/* The incoming call card: a pulsing ring round the caller, and Discord's
+   red and green buttons. */
+@keyframes kc-ring-pulse {
+    from { box-shadow: 0 0 0 0 alpha(@success_bg_color, 0.7); }
+    to { box-shadow: 0 0 0 18px alpha(@success_bg_color, 0); }
+}
+
+.kc-ringing {
+    border-radius: 9999px;
+    animation: kc-ring-pulse 1.4s ease-out infinite;
+}
+
+.kc-call-decline,
+.kc-call-accept {
+    min-width: 72px;
+    min-height: 44px;
+    border-radius: 10px;
+    color: white;
+}
+
+.kc-call-decline { background-color: @error_bg_color; }
+.kc-call-accept { background-color: @success_bg_color; }
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;

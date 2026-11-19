@@ -377,10 +377,11 @@ pub enum UiEvent {
         account: AccountId,
         message: String,
     },
-    /// A DM call is ringing us; offer to join it.
-    IncomingCall {
+    /// A DM call started or stopped ringing us.
+    CallRinging {
         account: AccountId,
         channel_id: Snowflake,
+        ringing: bool,
     },
     StreamStarted {
         account: AccountId,
@@ -791,9 +792,11 @@ fn spawn_account(
                                     )
                                     .await;
                                 }
-                                "CALL_CREATE" => {
-                                    // Someone is ringing us in a DM we are not
-                                    // already in: surface it so we can join.
+                                // A call rings us when it starts (CALL_CREATE)
+                                // or when we are rung again in one already
+                                // going (CALL_UPDATE); it stops when they hang
+                                // up, we answer elsewhere, or it ends.
+                                "CALL_CREATE" | "CALL_UPDATE" => {
                                     let channel_id: Option<Snowflake> =
                                         serde_json::from_value(data["channel_id"].clone()).ok();
                                     let ringing: Vec<Snowflake> = data["ringing"]
@@ -811,14 +814,26 @@ fn spawn_account(
                                             .connection
                                             .as_ref()
                                             .is_some_and(|c| c.channel_id == channel_id);
-                                        if ringing.contains(&me) && !in_call {
-                                            let _ = ui
-                                                .send(UiEvent::IncomingCall {
-                                                    account,
-                                                    channel_id,
-                                                })
-                                                .await;
-                                        }
+                                        let _ = ui
+                                            .send(UiEvent::CallRinging {
+                                                account,
+                                                channel_id,
+                                                ringing: ringing.contains(&me) && !in_call,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "CALL_DELETE" => {
+                                    if let Ok(channel_id) =
+                                        serde_json::from_value::<Snowflake>(data["channel_id"].clone())
+                                    {
+                                        let _ = ui
+                                            .send(UiEvent::CallRinging {
+                                                account,
+                                                channel_id,
+                                                ringing: false,
+                                            })
+                                            .await;
                                     }
                                 }
                                 _ => {}

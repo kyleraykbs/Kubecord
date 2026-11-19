@@ -231,8 +231,23 @@ impl AppState {
                 guild_id: None,
                 channel_id,
             });
-            // Ring so the others get an incoming call; a best-effort call.
-            self.spawn(async move { http.ring_call(channel_id).await }, |_, _| {});
+            // Starting a call rings the others; answering or joining one
+            // already going does not.
+            let others_in_call = self
+                .with_session(|session| {
+                    let me = session.user.as_ref().map(|user| user.id);
+                    session.store.read(|state| {
+                        state.voice_states.values().any(|voice| {
+                            voice.guild_id.is_none()
+                                && voice.channel_id == Some(channel_id)
+                                && Some(voice.user_id) != me
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            if !others_in_call {
+                self.spawn(async move { http.ring_call(channel_id).await }, |_, _| {});
+            }
         }
         self.render_voice_view(channel_id);
     }
@@ -650,6 +665,163 @@ impl AppState {
             } else {
                 widget.remove_css_class("kc-speaking");
             }
+        }
+    }
+}
+
+impl AppState {
+    /// The ringing card for a call to us, centred over the window as in
+    /// Discord: who is calling, Decline and Accept.
+    pub(crate) fn show_incoming_call(self: &Rc<Self>, channel_id: Snowflake) {
+        use libadwaita as adw;
+        use libadwaita::prelude::*;
+
+        if self
+            .incoming_call
+            .borrow()
+            .as_ref()
+            .is_some_and(|(ringing, _)| *ringing == channel_id)
+        {
+            return;
+        }
+        if let Some((_, old)) = self.incoming_call.borrow_mut().take() {
+            old.close();
+        }
+        let Some(caller) = self
+            .with_session(|session| {
+                session.store.read(|state| {
+                    let channel = state.channels.get(&channel_id)?;
+                    // A DM shows the other person; a group DM shows itself.
+                    let solo = channel
+                        .recipients
+                        .as_ref()
+                        .filter(|recipients| recipients.len() == 1)
+                        .and_then(|recipients| recipients.first());
+                    Some(match solo {
+                        Some(user) => (
+                            state.display_name(None, user),
+                            Some(cdn::user_avatar(user.id, user.avatar.as_deref(), 160)),
+                        ),
+                        None => (
+                            channel.display_name(),
+                            channel
+                                .icon
+                                .as_deref()
+                                .map(|hash| cdn::channel_icon(channel_id, hash, 160)),
+                        ),
+                    })
+                })
+            })
+            .flatten()
+        else {
+            return;
+        };
+        let (name, avatar_url) = caller;
+
+        let dialog = adw::Dialog::new();
+        dialog.set_title("Incoming Call");
+        dialog.set_content_width(300);
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        card.set_margin_top(28);
+        card.set_margin_bottom(24);
+        card.set_margin_start(24);
+        card.set_margin_end(24);
+        let avatar = self.images.avatar(96, &name, avatar_url.as_deref());
+        avatar.add_css_class("kc-ringing");
+        avatar.set_halign(gtk::Align::Center);
+        avatar.set_margin_bottom(10);
+        card.append(&avatar);
+        let title = gtk::Label::new(Some(&name));
+        title.add_css_class("title-3");
+        title.set_wrap(true);
+        title.set_justify(gtk::Justification::Center);
+        card.append(&title);
+        let subtitle = gtk::Label::new(Some("Incoming Call…"));
+        subtitle.add_css_class("dim-label");
+        card.append(&subtitle);
+
+        let decline = gtk::Button::from_icon_name("call-stop-symbolic");
+        decline.add_css_class("kc-call-decline");
+        decline.set_tooltip_text(Some("Decline"));
+        let accept = gtk::Button::from_icon_name("call-start-symbolic");
+        accept.add_css_class("kc-call-accept");
+        accept.set_tooltip_text(Some("Accept"));
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        buttons.set_halign(gtk::Align::Center);
+        buttons.set_margin_top(18);
+        buttons.append(&decline);
+        buttons.append(&accept);
+        card.append(&buttons);
+        dialog.set_child(Some(&card));
+        dialog.set_focus(Some(&accept));
+
+        let app = self.clone();
+        decline.connect_clicked(move |_| {
+            app.dismiss_incoming_call(channel_id);
+            let Some((_, http, _)) = app.active() else {
+                return;
+            };
+            let me = app
+                .with_session(|session| session.user.as_ref().map(|user| user.id))
+                .flatten();
+            app.spawn(
+                async move {
+                    let me: Vec<Snowflake> = me.into_iter().collect();
+                    http.stop_ringing(channel_id, Some(&me)).await
+                },
+                |app, result| {
+                    if let Err(error) = result {
+                        app.set_status(&format!("Could not decline: {error}"));
+                    }
+                },
+            );
+        });
+        let app = self.clone();
+        accept.connect_clicked(move |_| {
+            app.dismiss_incoming_call(channel_id);
+            let channel = app
+                .with_session(|session| {
+                    session
+                        .store
+                        .read(|state| state.channels.get(&channel_id).cloned())
+                })
+                .flatten();
+            if let Some(channel) = channel {
+                app.open_channel(channel.clone());
+                app.join_call(&channel);
+            }
+        });
+        // Closed any other way (Escape, a click outside), the card just goes.
+        let app = Rc::downgrade(self);
+        dialog.connect_closed(move |closed| {
+            if let Some(app) = app.upgrade() {
+                let mut current = app.incoming_call.borrow_mut();
+                if current.as_ref().is_some_and(|(_, dialog)| dialog == closed) {
+                    current.take();
+                }
+            }
+        });
+        dialog.present(Some(&self.window));
+        *self.incoming_call.borrow_mut() = Some((channel_id, dialog));
+    }
+
+    /// Takes the ringing card for `channel_id` away, if it shows.
+    pub(crate) fn dismiss_incoming_call(&self, channel_id: Snowflake) {
+        use libadwaita::prelude::*;
+
+        let dialog = {
+            let mut current = self.incoming_call.borrow_mut();
+            if current
+                .as_ref()
+                .is_some_and(|(ringing, _)| *ringing == channel_id)
+            {
+                current.take().map(|(_, dialog)| dialog)
+            } else {
+                None
+            }
+        };
+        if let Some(dialog) = dialog {
+            dialog.close();
         }
     }
 }
