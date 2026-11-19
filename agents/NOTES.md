@@ -473,3 +473,9 @@ dispatch; contains account data).
 - `kc-probe share-audio list | desktop | node | app <key> [seconds]` captures without sending and prints frames and RMS each second. For a test source that plays nowhere use `pw-cat --playback --target 0 --properties '{ application.name = "x" }' file.wav`; a `pipewiresink mode=provide` fake app stalls once linked.
 - The user's machine runs Patch Space (their patchbay) as the default output; see the warnings in memory about never pattern-killing `pw-cli` and never mixing a nix-shell interpreter with the dev shell's GStreamer plugin path.
 - flake: `gappsWrapperArgs = [...]` as a derivation attribute is ignored by wrapGAppsHook (the GStreamer path in the launcher came from the hook's own handling). Extra launcher arguments go in `preFixup` with `gappsWrapperArgs+=(...)`; checked in `result/bin/kylecord`.
+
+## Stream brightness (2026-11-19)
+
+- User suspected the camera's limited-range fix also brightened Go Live screens. It does not: only `pipeline_downstream` (cameras, and the Camera option of Go Live) forces `colorimetry=bt709/bt601`; `screen_description` (portal screens) does not. Measured through the screen pipeline with a BGRx source: black→Y16, 64→Y71, white→Y235; decoded back 0 / 62 / 253, whether the decoder honours the declared range or assumes limited.
+- Encoder-input caps carry no colorimetry field; GStreamer falls back to the default for the format and size (I420 ≥720p → bt709 limited). Each capture now logs "capture formats" on its first frame: `captured` (what entered videoconvert) and `encoded`, with the effective colorimetry (`describe_video_caps`). For a screen expect `BGRx … sRGB` → `I420 … bt709`. If the compositor sends YUV with a wrong range label, it shows up here.
+- Not yet known: where the user saw the brightening (official viewer, kylecord's own view, or their friend's).

@@ -89,6 +89,58 @@ struct KeyframeRequests {
     deferred: bool,
 }
 
+/// Logs the format a capture's picture arrives in and the one it is
+/// encoded in, including the colour range: what to look at when a picture
+/// comes out lighter or darker than it went in.
+fn log_formats(pipeline: &gst::Pipeline) {
+    let (captured, encoded) = capture_formats(pipeline);
+    tracing::info!(captured, encoded, "capture formats");
+}
+
+/// A picture format as `I420 1280x720 colorimetry bt709`, the
+/// colorimetry being what GStreamer takes it to be: caps often leave it
+/// out, and then a default for the format and size applies. The range is
+/// its first field: 1 full (0–255), 2 limited (16–235).
+fn describe_video_caps(caps: &gst::CapsRef) -> String {
+    match gstreamer_video::VideoInfo::from_caps(caps) {
+        Ok(info) => format!(
+            "{} {}x{} colorimetry {}",
+            info.format().to_str(),
+            info.width(),
+            info.height(),
+            info.colorimetry()
+        ),
+        Err(_) => caps.to_string(),
+    }
+}
+
+/// The format entering the colour conversion, and the one the encoder
+/// receives.
+fn capture_formats(pipeline: &gst::Pipeline) -> (String, String) {
+    let caps_at = |factory: &str, pad: &str| {
+        pipeline
+            .iterate_recurse()
+            .into_iter()
+            .flatten()
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|found| found.name() == factory)
+            })
+            .and_then(|element| element.static_pad(pad))
+            .and_then(|pad| pad.current_caps())
+            .map(|caps| describe_video_caps(&caps))
+            .unwrap_or_else(|| "unknown".to_owned())
+    };
+    let encoder = pipeline
+        .by_name("enc")
+        .and_then(|encoder| encoder.static_pad("sink"))
+        .and_then(|pad| pad.current_caps())
+        .map(|caps| describe_video_caps(&caps))
+        .unwrap_or_else(|| "unknown".to_owned());
+    (caps_at("videoconvert", "sink"), encoder)
+}
+
 /// Asks the encoder for a keyframe, at most one per `KEYFRAME_SPACING`; a
 /// request inside that time is not dropped but served when it ends.
 fn request_keyframe(pipeline: &gst::Pipeline, keyframes: &Arc<Mutex<KeyframeRequests>>) {
@@ -709,7 +761,11 @@ impl VideoSource {
                         }
                     }
                     last_arrival = Some(now);
-                    thread_produced.store(true, Ordering::Relaxed);
+                    if !thread_produced.swap(true, Ordering::Relaxed)
+                        && let Some(pipeline) = thread_pipeline.upgrade()
+                    {
+                        log_formats(&pipeline);
+                    }
                     let gap = u64::from(thread_gap.load(Ordering::Relaxed));
                     if is_keyframe(map.as_slice()) {
                         last_keyframe = now;
@@ -1326,6 +1382,31 @@ mod tests {
             (3..=5).contains(&with_gap),
             "expected about four, got {with_gap}"
         );
+    }
+
+    /// What a screen picture arrives as and what is encoded, colour range
+    /// included, can be read from a running capture.
+    #[test]
+    fn capture_formats_are_reported() {
+        gst::init().unwrap();
+        let settings = VideoSettings {
+            encoder: EncoderPreference::Cpu,
+            ..VideoSettings::default()
+        };
+        let description = screen_description(&settings, false).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true name=src ! video/x-raw,format=BGRx",
+        );
+        let source =
+            VideoSource::start_pipeline_with(&description, 33, |_: EncodedFrame| {}, |_| Ok(()))
+                .unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let (captured, encoded) = capture_formats(&source.pipeline);
+        drop(source);
+        assert!(captured.starts_with("BGRx"), "{captured}");
+        // A screen is sent in limited range, which is what decoders assume.
+        assert_eq!(encoded, "I420 1280x720 colorimetry bt709");
+        println!("captured: {captured}\nencoded: {encoded}");
     }
 
     /// The encoder's bitrate can be changed while it runs.
