@@ -912,8 +912,14 @@ fn page_scroll(page: &gtk::Box) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_child(Some(&clamp));
-    // Development aid: `KYLECORD_SETTINGS_SCROLL=<pixels>` scrolls the
-    // pages down once they are laid out, for screenshots of long ones.
+    dev_scroll(&scroll);
+    scroll
+}
+
+/// Development aid: `KYLECORD_SETTINGS_SCROLL=<pixels>` scrolls settings
+/// pages and popups down once they are laid out, for screenshots of long
+/// ones.
+pub(crate) fn dev_scroll(scroll: &gtk::ScrolledWindow) {
     if let Some(offset) = std::env::var("KYLECORD_SETTINGS_SCROLL")
         .ok()
         .and_then(|offset| offset.parse::<f64>().ok())
@@ -923,7 +929,6 @@ fn page_scroll(page: &gtk::Box) -> gtk::ScrolledWindow {
             target.vadjustment().set_value(offset);
         });
     }
-    scroll
 }
 
 fn section_title(text: &str) -> gtk::Label {

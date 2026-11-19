@@ -33,7 +33,9 @@ pub const DROP_AFTER_MS: [u32; 6] = [0, 100, 250, 500, 1000, 2000];
 
 pub const RETRANSMIT_WINDOWS_MS: [u32; 5] = [0, 1000, 2000, 5000, 10000];
 
-pub const BITRATES: [u32; 7] = [1000, 1500, 2500, 4000, 6000, 8000, 10000];
+pub const BITRATES: [u32; 10] = [
+    1000, 1500, 2500, 4000, 6000, 8000, 10000, 12000, 15000, 20000,
+];
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
 
@@ -51,6 +53,9 @@ pub struct CapturePreferences {
     pub fps_auto: bool,
     pub fps_auto_min: u32,
     pub fps_auto_max: u32,
+    /// The framerate used while the connection is clean; `None` is the
+    /// highest.
+    pub fps_auto_target: Option<u32>,
     /// `None` means automatic: the bitrate follows the network.
     pub bitrate_kbps: Option<u32>,
     /// The range an automatic bitrate moves in, in kbit/s. `None` leaves
@@ -58,6 +63,9 @@ pub struct CapturePreferences {
     /// bottom at three tenths of the top.
     pub auto_bitrate_min: Option<u32>,
     pub auto_bitrate_max: Option<u32>,
+    /// The bitrate used while the connection is clean; `None` is the
+    /// highest (or, with no highest set, worked out from the picture).
+    pub auto_bitrate_target: Option<u32>,
     /// With both automatic, which is kept longest when the connection
     /// struggles: 0 balanced, 1 bitrate, 2 framerate.
     pub adapt_priority: u32,
@@ -158,9 +166,11 @@ impl Default for CapturePreferences {
             fps_auto: false,
             fps_auto_min: 15,
             fps_auto_max: 30,
+            fps_auto_target: None,
             bitrate_kbps: None,
             auto_bitrate_min: None,
             auto_bitrate_max: None,
+            auto_bitrate_target: None,
             adapt_priority: 0,
             keyframe_secs: 0,
             drop_frames_after_ms: 250,
@@ -197,30 +207,48 @@ impl Default for CapturePreferences {
 impl CapturePreferences {
     pub fn video_settings(&self) -> VideoSettings {
         // An automatic framerate starts at the top of its range.
+        // An automatic framerate's capture is built for its highest and
+        // starts at its target.
         let fps = if self.fps_auto {
             self.fps_auto_max
         } else {
             self.fps
         };
+        let fps_target = if self.fps_auto {
+            self.fps_auto_target.unwrap_or(fps).min(fps)
+        } else {
+            fps
+        };
         let automatic = self.bitrate_kbps.is_none();
-        // The most an automatic bitrate uses: the top of the range if one
-        // was set, else worked out from the picture.
-        let top = self.bitrate_kbps.unwrap_or_else(|| {
-            self.auto_bitrate_max.unwrap_or_else(|| {
-                VideoSettings::automatic_bitrate_kbps(self.width, self.height, fps)
-            })
-        });
+        // An automatic bitrate's highest, and its target: either one set by
+        // hand stands for the other when left automatic; with neither, it
+        // is worked out from the picture and there is nothing above it.
+        let (target, top) = match self.bitrate_kbps {
+            Some(fixed) => (fixed, fixed),
+            None => {
+                let top = self
+                    .auto_bitrate_max
+                    .or(self.auto_bitrate_target)
+                    .unwrap_or_else(|| {
+                        VideoSettings::automatic_bitrate_kbps(self.width, self.height, fps_target)
+                    });
+                (self.auto_bitrate_target.unwrap_or(top).min(top), top)
+            }
+        };
         VideoSettings {
             width: self.width,
             height: self.height,
             fps,
-            bitrate_kbps: top,
+            fps_target,
+            bitrate_kbps: target,
+            bitrate_top_kbps: top,
             bitrate_floor_kbps: match self.auto_bitrate_min {
-                Some(floor) if automatic => floor.min(top),
+                Some(floor) if automatic => floor.min(target),
                 _ => 0,
             },
-            // A top set by hand is trusted over Discord's estimate.
-            bitrate_follows_estimate: !(automatic && self.auto_bitrate_max.is_some()),
+            // A bitrate set by hand is trusted over Discord's estimate.
+            bitrate_follows_estimate: !(automatic
+                && (self.auto_bitrate_max.is_some() || self.auto_bitrate_target.is_some())),
             adapt_priority: match self.adapt_priority {
                 1 => kc_media::video::AdaptPriority::Bitrate,
                 2 => kc_media::video::AdaptPriority::Framerate,
@@ -311,9 +339,11 @@ impl CapturePreferences {
         self.fps_auto = defaults.fps_auto;
         self.fps_auto_min = defaults.fps_auto_min;
         self.fps_auto_max = defaults.fps_auto_max;
+        self.fps_auto_target = defaults.fps_auto_target;
         self.bitrate_kbps = defaults.bitrate_kbps;
         self.auto_bitrate_min = defaults.auto_bitrate_min;
         self.auto_bitrate_max = defaults.auto_bitrate_max;
+        self.auto_bitrate_target = defaults.auto_bitrate_target;
         self.adapt_priority = defaults.adapt_priority;
         self.keyframe_secs = defaults.keyframe_secs;
         self.drop_frames_after_ms = defaults.drop_frames_after_ms;
@@ -365,6 +395,18 @@ impl CapturePreferences {
             .is_some_and(|top| !BITRATES.contains(&top))
         {
             self.auto_bitrate_max = None;
+        }
+        if self
+            .fps_auto_target
+            .is_some_and(|fps| !FRAMERATES.contains(&fps))
+        {
+            self.fps_auto_target = None;
+        }
+        if self
+            .auto_bitrate_target
+            .is_some_and(|kbps| !BITRATES.contains(&kbps))
+        {
+            self.auto_bitrate_target = None;
         }
         if self.adapt_priority > 2 {
             self.adapt_priority = 0;
@@ -490,6 +532,18 @@ mod tests {
             (2000, 6000)
         );
         assert_eq!((settings.fps_floor, settings.fps), (15, 24));
+
+        // A target inside the range: started at, above it only later.
+        prefs.auto_bitrate_target = Some(4000);
+        prefs.fps_auto_target = Some(20);
+        let settings = prefs.video_settings();
+        assert_eq!(
+            (settings.bitrate_kbps, settings.bitrate_top_kbps),
+            (4000, 6000)
+        );
+        assert_eq!((settings.fps_target, settings.fps), (20, 24));
+        prefs.auto_bitrate_target = None;
+        prefs.fps_auto_target = None;
 
         // A fixed bitrate has no range; a floor above the top is the top.
         prefs.bitrate_kbps = Some(2500);

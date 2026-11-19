@@ -269,6 +269,15 @@ pub struct VideoSettings {
     /// Let the framerate follow the network too, between this and `fps`.
     /// Zero (or `fps` and above) keeps the framerate fixed.
     pub fps_floor: u32,
+    /// With an adapting framerate, the one used while the connection is
+    /// clean; `fps` is then the most it climbs to after a long clean
+    /// spell. Zero: `fps`. (The capture is built for `fps` and starts at
+    /// this.)
+    pub fps_target: u32,
+    /// With an adapting bitrate, the most it climbs to after a long clean
+    /// spell; `bitrate_kbps` is what it starts at and comes back to. Zero:
+    /// `bitrate_kbps`.
+    pub bitrate_top_kbps: u32,
     /// With both adapting, which is kept longest.
     pub adapt_priority: AdaptPriority,
 }
@@ -331,8 +340,8 @@ struct Adaptation {
     /// the controller still runs, to steer the framerate.)
     bitrate: bool,
     follows_estimate: bool,
-    /// The framerate's range, when it adapts.
-    fps: Option<(u32, u32)>,
+    /// The framerate's range, when it adapts: lowest, target, highest.
+    fps: Option<(u32, u32, u32)>,
     current_fps: u32,
     fps_changed: Option<Instant>,
     /// With both adapting, which gives way first.
@@ -347,8 +356,11 @@ struct Adaptation {
 /// connection has does not count as trouble.
 #[derive(Clone, Debug)]
 pub struct BitrateController {
+    /// Where it sits while the connection is clean.
     target: u32,
     floor: u32,
+    /// The most it climbs to after a long clean spell.
+    top: u32,
     current: u32,
     /// Recent reports, as (sent, lost).
     recent: std::collections::VecDeque<(u32, u32)>,
@@ -360,6 +372,10 @@ impl BitrateController {
     /// Loss over `CLEAN_REPORTS` reports below which it has room again.
     const CLEAN: f64 = 0.008;
     const CLEAN_REPORTS: usize = 5;
+    /// Clean reports needed per step above the target: a long clean spell
+    /// (30 s), so it only goes past what was asked for on a connection
+    /// that has shown it has room.
+    const CLEAN_REPORTS_ABOVE: usize = 15;
 
     pub fn new(target_kbps: u32) -> Self {
         Self::with_floor(target_kbps, 0)
@@ -368,6 +384,13 @@ impl BitrateController {
     /// Adapts between `floor_kbps` and `target_kbps`; a floor of zero is
     /// three tenths of the target.
     pub fn with_floor(target_kbps: u32, floor_kbps: u32) -> Self {
+        Self::with_range(floor_kbps, target_kbps, target_kbps)
+    }
+
+    /// Starts at `target_kbps`, drops toward `floor_kbps` (zero: three
+    /// tenths of the target) on loss, and climbs above the target toward
+    /// `top_kbps` only after a long clean spell.
+    pub fn with_range(floor_kbps: u32, target_kbps: u32, top_kbps: u32) -> Self {
         let floor = match floor_kbps {
             0 => (target_kbps * 3 / 10).max(300),
             floor => floor,
@@ -375,6 +398,7 @@ impl BitrateController {
         Self {
             target: target_kbps,
             floor: floor.min(target_kbps),
+            top: top_kbps.max(target_kbps),
             current: target_kbps,
             recent: Default::default(),
         }
@@ -384,17 +408,28 @@ impl BitrateController {
         self.current
     }
 
-    /// The range it moves in: `(floor, top)`.
+    /// The range below the target: `(floor, target)`.
     pub fn range(&self) -> (u32, u32) {
         (self.floor, self.target)
     }
 
-    /// Where the bitrate stands in its range: 1 at the top, 0 at the floor.
+    /// Where it stands between the floor and the target: 1 at the target
+    /// (or above), 0 at the floor.
     pub fn level(&self) -> f64 {
         if self.target <= self.floor {
             return 1.0;
         }
-        f64::from(self.current - self.floor) / f64::from(self.target - self.floor)
+        (f64::from(self.current.saturating_sub(self.floor)) / f64::from(self.target - self.floor))
+            .min(1.0)
+    }
+
+    /// How far above the target it has climbed: 0 at the target (or
+    /// below), 1 at the top.
+    pub fn headroom(&self) -> f64 {
+        if self.top <= self.target {
+            return 0.0;
+        }
+        f64::from(self.current.saturating_sub(self.target)) / f64::from(self.top - self.target)
     }
 
     /// Takes one report; returns the new bitrate when it changes.
@@ -412,15 +447,21 @@ impl BitrateController {
             self.recent.clear();
         } else {
             self.recent.push_back((sent, lost));
-            if self.recent.len() >= Self::CLEAN_REPORTS {
+            // Back to the target readily; past it only after a long spell.
+            let (needed, limit) = if self.current < self.target {
+                (Self::CLEAN_REPORTS, self.target)
+            } else {
+                (Self::CLEAN_REPORTS_ABOVE, self.top)
+            };
+            if self.recent.len() >= needed {
                 let (sent, lost) = self
                     .recent
                     .iter()
                     .fold((0u64, 0u64), |(s, l), (sent, lost)| {
                         (s + u64::from(*sent), l + u64::from(*lost))
                     });
-                if (lost as f64) < sent as f64 * Self::CLEAN && self.current < self.target {
-                    self.current = (self.current * 110 / 100).min(self.target);
+                if (lost as f64) < sent as f64 * Self::CLEAN && self.current < limit {
+                    self.current = (self.current * 110 / 100).max(self.current + 1).min(limit);
                 }
                 // One step up per run of clean reports.
                 self.recent.clear();
@@ -478,6 +519,8 @@ impl Default for VideoSettings {
             bitrate_floor_kbps: 0,
             bitrate_follows_estimate: true,
             fps_floor: 0,
+            fps_target: 0,
+            bitrate_top_kbps: 0,
             adapt_priority: AdaptPriority::Balanced,
         }
     }
@@ -991,21 +1034,42 @@ impl VideoSource {
     /// (when it is automatic), the framerate (when it has a range), both
     /// or neither.
     pub fn adapt(&self, settings: &VideoSettings) {
-        let fps = (settings.fps_floor > 0 && settings.fps_floor < settings.fps)
-            .then_some((settings.fps_floor, settings.fps));
-        let adaptation = (settings.adaptive_bitrate || fps.is_some()).then(|| Adaptation {
-            controller: BitrateController::with_floor(
+        let top_fps = settings.fps;
+        let target_fps = match settings.fps_target {
+            0 => top_fps,
+            target => target.min(top_fps),
+        };
+        let fps = (settings.fps_floor > 0 && settings.fps_floor < top_fps).then_some((
+            settings.fps_floor,
+            target_fps.max(settings.fps_floor),
+            top_fps,
+        ));
+        let controller = if settings.adaptive_bitrate {
+            BitrateController::with_range(
+                settings.bitrate_floor_kbps,
                 settings.bitrate_kbps,
-                if settings.adaptive_bitrate {
-                    settings.bitrate_floor_kbps
-                } else {
-                    0
-                },
-            ),
+                settings.bitrate_top_kbps,
+            )
+        } else {
+            // A fixed bitrate: the controller only steers the framerate,
+            // in units of its own.
+            BitrateController::with_range(300, 1000, 2000)
+        };
+        // The capture is built for the highest framerate and starts at the
+        // target.
+        let mut current_fps = top_fps;
+        if let Some((_, target, _)) = fps
+            && target < top_fps
+            && self.set_framerate(target)
+        {
+            current_fps = target;
+        }
+        let adaptation = (settings.adaptive_bitrate || fps.is_some()).then_some(Adaptation {
+            controller,
             bitrate: settings.adaptive_bitrate,
             follows_estimate: settings.bitrate_follows_estimate,
             fps,
-            current_fps: settings.fps,
+            current_fps,
             fps_changed: None,
             priority: settings.adapt_priority,
             applied_kbps: settings.bitrate_kbps,
@@ -1051,9 +1115,15 @@ impl VideoSource {
             AdaptPriority::Balanced
         };
         let (bitrate_level, fps_level) = split_level(adaptation.controller.level(), priority);
+        // Above the target both climb together, toward their highest.
+        let headroom = adaptation.controller.headroom();
         if adaptation.bitrate {
-            let (floor, top) = adaptation.controller.range();
-            let kbps = floor + (bitrate_level * f64::from(top - floor)).round() as u32;
+            let (floor, target) = adaptation.controller.range();
+            let kbps = if headroom > 0.0 {
+                adaptation.controller.current()
+            } else {
+                floor + (bitrate_level * f64::from(target - floor)).round() as u32
+            };
             if kbps != adaptation.applied_kbps {
                 tracing::info!(
                     from_kbps = adaptation.applied_kbps,
@@ -1068,10 +1138,14 @@ impl VideoSource {
                 self.set_bitrate(kbps);
             }
         }
-        let Some((min, max)) = adaptation.fps else {
+        let Some((min, target, max)) = adaptation.fps else {
             return;
         };
-        let wanted = framerate_for(fps_level, min, max);
+        let wanted = if headroom > 0.0 {
+            framerate_for(headroom, target, max)
+        } else {
+            framerate_for(fps_level, min, target)
+        };
         if wanted != adaptation.current_fps
             && adaptation
                 .fps_changed
@@ -1708,6 +1782,39 @@ mod tests {
     }
 
     #[test]
+    fn the_target_is_kept_and_the_top_reached_only_after_a_long_clean_spell() {
+        let mut controller = BitrateController::with_range(2000, 4000, 8000);
+        assert_eq!(controller.current(), 4000);
+        assert_eq!((controller.level(), controller.headroom()), (1.0, 0.0));
+        // Ten seconds clean is not enough to go past the target.
+        for _ in 0..5 {
+            controller.report(1000, 0, 0);
+        }
+        assert_eq!(controller.current(), 4000);
+        // Thirty seconds is: one step up.
+        for _ in 0..10 {
+            controller.report(1000, 0, 0);
+        }
+        assert_eq!(controller.current(), 4400);
+        assert!(controller.headroom() > 0.0);
+        // A long clean run reaches the top and stops there.
+        for _ in 0..600 {
+            controller.report(1000, 0, 0);
+        }
+        assert_eq!((controller.current(), controller.headroom()), (8000, 1.0));
+        // Loss brings it down past the target toward the floor; it comes
+        // back to the target readily.
+        for _ in 0..20 {
+            controller.report(1000, 100, 0);
+        }
+        assert_eq!(controller.current(), 2000);
+        for _ in 0..40 {
+            controller.report(1000, 0, 0);
+        }
+        assert_eq!(controller.current(), 4000);
+    }
+
+    #[test]
     fn a_bitrate_range_set_by_hand_is_kept_to() {
         let mut controller = BitrateController::with_floor(6000, 2000);
         assert_eq!(controller.level(), 1.0);
@@ -1823,6 +1930,7 @@ mod tests {
                 width: 640,
                 height: 360,
                 fps: 30,
+                fps_target: 24,
                 fps_floor: 10,
                 adaptive_bitrate: false,
                 ..VideoSettings::default()
@@ -1858,7 +1966,11 @@ mod tests {
         let _ = provider.wait();
         let (before, after, failure) = outcome.expect("the test source did not appear");
         println!("frames in 2 s before the change: {before}, after: {after}, error: {failure:?}");
-        assert!(before > 40, "capture never ran: {before}");
+        // About 48 at the target of 24, then about 40 a step down (20).
+        assert!(
+            (42..=52).contains(&before),
+            "capture never ran at its target: {before}"
+        );
         assert!(
             after > 30,
             "capture died at the change: {after} frames, {failure:?}"

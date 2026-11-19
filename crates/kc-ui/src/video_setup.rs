@@ -288,6 +288,9 @@ pub(crate) fn quality_controls(
         .collect();
     let fps_min = string_dropdown(&fps_floor_names);
     let fps_max = string_dropdown(&fps_names);
+    let mut fps_target_names = vec!["Automatic".to_owned()];
+    fps_target_names.extend(fps_names.iter().cloned());
+    let fps_target = string_dropdown(&fps_target_names);
     let mut bitrate_names = vec!["Automatic".to_owned()];
     bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate = string_dropdown(&bitrate_names);
@@ -297,17 +300,20 @@ pub(crate) fn quality_controls(
     floor_names.extend(BITRATE_FLOORS.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate_min = string_dropdown(&floor_names);
     let bitrate_max = string_dropdown(&bitrate_names);
+    let bitrate_target = string_dropdown(&bitrate_names);
     let fps_range = range_row(
         "Framerate Range",
+        &fps_target,
         &fps_min,
         &fps_max,
-        "Highest is used while the connection is clean; it drops toward Lowest while packets are being lost. Fewer frames leave more of the bitrate for each one.",
+        "Target is used while the connection is clean. It drops toward Lowest while packets are being lost, and climbs toward Highest only after 30 seconds without loss. Automatic Target is Highest. Fewer frames leave more of the bitrate for each one.",
     );
     let bitrate_range = range_row(
         "Bitrate Range",
+        &bitrate_target,
         &bitrate_min,
         &bitrate_max,
-        "Highest is used while the connection is clean; it drops toward Lowest while packets are being lost. Automatic Highest is worked out from the resolution and framerate and stays under Discord's own estimate (about 4 Mbit/s for a stream); a value set here is used even above it. Automatic Lowest is three tenths of Highest.",
+        "Target is used while the connection is clean. It drops toward Lowest while packets are being lost, and climbs toward Highest only after 30 seconds without loss. Left on Automatic, Target and Highest are the same: one set by hand stands for the other, and with neither set it is worked out from the resolution and framerate and kept under Discord's own estimate (about 4 Mbit/s for a stream). Values set here are used even above that estimate. Automatic Lowest is three tenths of Target.",
     );
     let priority = gtk::DropDown::from_strings(&ADAPT_PRIORITIES);
     let priority_row = setting_row("When the Connection Struggles", &priority);
@@ -383,6 +389,7 @@ pub(crate) fn quality_controls(
         let bitrate = bitrate.clone();
         let (fps_min, fps_max) = (fps_min.clone(), fps_max.clone());
         let (bitrate_min, bitrate_max) = (bitrate_min.clone(), bitrate_max.clone());
+        let (fps_target, bitrate_target) = (fps_target.clone(), bitrate_target.clone());
         let (fps_range, bitrate_range) = (fps_range.clone(), bitrate_range.clone());
         let (priority, priority_row) = (priority.clone(), priority_row.clone());
         let delay = delay.clone();
@@ -419,6 +426,8 @@ pub(crate) fn quality_controls(
             bitrate.set_selected(listed(&BITRATES, prefs.bitrate_kbps));
             bitrate_min.set_selected(listed(&BITRATE_FLOORS, prefs.auto_bitrate_min));
             bitrate_max.set_selected(listed(&BITRATES, prefs.auto_bitrate_max));
+            bitrate_target.set_selected(listed(&BITRATES, prefs.auto_bitrate_target));
+            fps_target.set_selected(listed(&FRAMERATES, prefs.fps_auto_target));
             // The ranges only mean something on Automatic.
             fps_range.set_visible(prefs.fps_auto);
             bitrate_range.set_visible(prefs.bitrate_kbps.is_none());
@@ -476,6 +485,22 @@ pub(crate) fn quality_controls(
                 prefs.fps = fps;
             }
         });
+    });
+    let target = apply.clone();
+    fps_target.connect_selected_notify(move |dropdown| {
+        let fps = match dropdown.selected() as usize {
+            0 => None,
+            index => FRAMERATES.get(index - 1).copied(),
+        };
+        target(&move |prefs| prefs.fps_auto_target = fps);
+    });
+    let target = apply.clone();
+    bitrate_target.connect_selected_notify(move |dropdown| {
+        let kbps = match dropdown.selected() as usize {
+            0 => None,
+            index => BITRATES.get(index - 1).copied(),
+        };
+        target(&move |prefs| prefs.auto_bitrate_target = kbps);
     });
     let target = apply.clone();
     fps_min.connect_selected_notify(move |dropdown| {
@@ -744,10 +769,11 @@ pub(crate) fn setting_row(title: &str, widget: &impl IsA<gtk::Widget>) -> adw::A
 /// the order of `CapturePreferences::adapt_priority`.
 const ADAPT_PRIORITIES: [&str; 3] = ["Balanced", "Prefer Bitrate", "Prefer Framerate"];
 
-/// A setting with a low and a high end, chosen side by side under its
-/// title and explanation.
+/// A setting with a target and a low and a high end, chosen side by side
+/// under its title and explanation.
 fn range_row(
     title: &str,
+    aim: &gtk::DropDown,
     lowest: &gtk::DropDown,
     highest: &gtk::DropDown,
     guide: &str,
@@ -766,10 +792,10 @@ fn range_row(
     explanation.add_css_class("dim-label");
     explanation.add_css_class("caption");
     column.append(&explanation);
-    let ends = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let ends = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     ends.set_homogeneous(true);
     ends.set_margin_top(6);
-    for (name, dropdown) in [("Lowest", lowest), ("Highest", highest)] {
+    for (name, dropdown) in [("Target", aim), ("Lowest", lowest), ("Highest", highest)] {
         let end = gtk::Box::new(gtk::Orientation::Vertical, 4);
         let label = gtk::Label::new(Some(name));
         label.set_xalign(0.0);
@@ -822,6 +848,7 @@ fn popout(title: &str, action: &str) -> Popout {
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_vexpand(true);
     scroll.set_child(Some(&page));
+    crate::settings_panel::dev_scroll(&scroll);
 
     let action = gtk::Button::with_label(action);
     action.add_css_class("suggested-action");

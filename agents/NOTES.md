@@ -518,3 +518,11 @@ dispatch; contains account data).
 - Fix: `hold_source_format` puts a probe on the sink pad of the videorate (`name=pace`, both pipelines) that drops upstream RECONFIGURE events, installed at the first framerate change. videorate takes any input rate, so nothing upstream needs to change. Same test: 59 → 48 (24 fps). The earlier framerate tests used videotestsrc, which renegotiates happily; test live changes against a real pipewiresrc.
 - A dead stream capture is now noticed: `VideoSource::failed()` (bus error) or `quiet_for()` ≥ 10 s (a healthy screencast resends a still screen every second) ends the stream with a message. kc-voice sends `VideoNetwork` every 2 s while video is on even when nothing went out, so the check keeps running.
 - That log also shows the trigger: bursts where more packets were asked for again than were sent in the window (sent=1271 lost=1654) at a Highest Bitrate of 8000.
+
+## Targets inside the automatic ranges; bitrates to 20000 (2026-11-19)
+
+- Each range row is Target | Lowest | Highest (prefs `fps_auto_target`, `auto_bitrate_target`; `None` = Automatic). Target is used while clean and is where it starts; loss takes it toward Lowest and it returns to Target after 5 clean reports per +10% step; above Target it climbs toward Highest only with 15 clean reports (30 s) per step (`BitrateController::with_range(floor, target, top)`, `level()` below target, `headroom()` above). Above Target, bitrate and framerate climb together.
+- Settings mapping: Automatic Target = Highest; Automatic Highest = Target if set; neither = computed from the picture (and kept under Discord's REMB). Either set by hand turns off the REMB cap. So with neither target set, behaviour is unchanged.
+- `VideoSettings.fps` is the highest the capture is built for; `fps_target` is applied at `adapt()` via `set_framerate` (through the RECONFIGURE-dropping probe). Checked on a real PipeWire source: 47 frames per 2 s at 24 out of a 30 build, then 40 at the next step down. `bitrate_top_kbps` is the bitrate's highest.
+- `BITRATES` now go to 20000 (12000, 15000, 20000 added).
+- `KYLECORD_SETTINGS_SCROLL` also scrolls the share and camera popups (`settings_panel::dev_scroll`).
