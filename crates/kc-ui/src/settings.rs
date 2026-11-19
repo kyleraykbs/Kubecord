@@ -17,6 +17,9 @@ pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 /// needed.
 pub const KEYFRAME_INTERVALS: [u32; 5] = [0, 2, 4, 6, 10];
 
+/// How far one person's volume can be turned up, as a multiple of normal.
+pub const VOLUME_BOOST_CAPS: [u32; 5] = [1, 2, 3, 4, 5];
+
 /// The longest a stream goes without a keyframe, in seconds (0: no limit).
 pub const KEYFRAME_GAPS: [u32; 5] = [0, 3, 5, 10, 15];
 
@@ -90,6 +93,9 @@ pub struct CapturePreferences {
     /// Send a keyframe when none has gone out for this many seconds (0:
     /// only when asked or on loss).
     pub keyframe_gap_secs: u32,
+    /// The most one person's volume can be turned up, as a multiple of
+    /// normal (the top of the User Volume slider).
+    pub volume_boost_cap: u32,
     /// Write the log file (see [`crate::logging`]).
     pub log_to_file: bool,
     /// Also log every media and voice event; far larger.
@@ -137,6 +143,7 @@ impl Default for CapturePreferences {
             self_preview: true,
             loss_keyframe_ms: 1000,
             keyframe_gap_secs: 5,
+            volume_boost_cap: 3,
             log_to_file: true,
             log_detailed: false,
         }
@@ -273,6 +280,9 @@ impl CapturePreferences {
         }
         if !KEYFRAME_GAPS.contains(&self.keyframe_gap_secs) {
             self.keyframe_gap_secs = 5;
+        }
+        if !VOLUME_BOOST_CAPS.contains(&self.volume_boost_cap) {
+            self.volume_boost_cap = 3;
         }
         if self.camera_format > 2 {
             self.camera_format = 0;

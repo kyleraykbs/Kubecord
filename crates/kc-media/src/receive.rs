@@ -20,6 +20,9 @@ use parking_lot::Mutex;
 
 use crate::error::{Error, Result};
 
+/// The most one participant's volume can be turned up.
+pub const MAX_USER_VOLUME: f32 = 5.0;
+
 const SAMPLE_RATE: u32 = 48_000;
 /// Samples per channel in a 20 ms frame.
 const FRAME_SAMPLES: usize = 960;
@@ -405,10 +408,11 @@ impl RemoteAudio {
         self.mixer.lock().speakers.remove(&user_id);
     }
 
-    /// Volume of one participant, from 0.0 to 2.0.
+    /// Volume of one participant, from silent to `MAX_USER_VOLUME` times
+    /// normal. The mix is clipped, not wrapped, when a boost overdrives it.
     pub fn set_volume(&self, user_id: u64, volume: f32) {
         if let Some(speaker) = self.mixer.lock().speakers.get_mut(&user_id) {
-            speaker.volume = volume.clamp(0.0, 2.0);
+            speaker.volume = volume.clamp(0.0, MAX_USER_VOLUME);
         }
     }
 

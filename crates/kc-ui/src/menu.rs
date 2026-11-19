@@ -31,8 +31,6 @@ struct UserContext {
     in_voice: bool,
     streaming: bool,
     watching: bool,
-    /// A camera (`false`) or stream (`true`) picture is arriving for them.
-    video: Option<bool>,
 }
 
 impl AppState {
@@ -115,7 +113,6 @@ impl AppState {
                     in_voice,
                     streaming,
                     watching,
-                    video: None,
                 })
             })
         })
@@ -129,19 +126,8 @@ impl AppState {
         let account_user = self
             .with_session(|session| session.user.as_ref().map(|u| u.id))
             .flatten();
-        let Some(mut ctx) = self.user_context(account_user, user_id) else {
+        let Some(ctx) = self.user_context(account_user, user_id) else {
             return;
-        };
-        // The video maps live on the UI side, not in the store.
-        ctx.video = {
-            let videos = self.videos.borrow();
-            if videos.contains_key(&(account, user_id, true)) {
-                Some(true)
-            } else if videos.contains_key(&(account, user_id, false)) {
-                Some(false)
-            } else {
-                None
-            }
         };
 
         let popover = gtk::Popover::new();
@@ -264,16 +250,45 @@ impl AppState {
                 self,
             );
         }
-        if let Some(is_stream) = ctx.video {
-            let what = if is_stream {
-                "Focus Stream"
-            } else {
-                "Focus Camera"
-            };
+        // Each picture arriving for them (their stream, their camera) can
+        // be enlarged, or moved into a window of its own and back.
+        for is_stream in [true, false] {
+            let key = (account, user_id, is_stream);
+            if !self.videos.borrow().contains_key(&key) {
+                continue;
+            }
+            let what = if is_stream { "Stream" } else { "Camera" };
+            if self.popouts.borrow().contains_key(&key) {
+                add(
+                    &format!("Pop {what} Back In"),
+                    false,
+                    Box::new(move |app| app.pop_in_video(key)),
+                    self,
+                );
+                continue;
+            }
             add(
-                what,
+                &format!("Focus {what}"),
                 false,
                 Box::new(move |app| app.set_focused_video(Some((user_id, is_stream)))),
+                self,
+            );
+            let title = self
+                .with_session(|session| {
+                    session.store.read(|state| {
+                        state
+                            .users
+                            .get(&user_id)
+                            .map(|user| user.display_name().to_owned())
+                    })
+                })
+                .flatten()
+                .map(|name| format!("{name}'s {}", what.to_lowercase()))
+                .unwrap_or_else(|| what.to_owned());
+            add(
+                &format!("Pop Out {what}"),
+                false,
+                Box::new(move |app| app.pop_out_video(key, &title)),
                 self,
             );
         }
@@ -345,7 +360,8 @@ impl AppState {
         popover.popup();
     }
 
-    /// A labelled slider for one person's local playback volume (0–200%).
+    /// A labelled slider for one person's local playback volume, from
+    /// silent up to the boost allowed in Settings → Features.
     fn volume_control(
         self: &Rc<Self>,
         account: crate::session::AccountId,
@@ -356,22 +372,36 @@ impl AppState {
         row.set_margin_end(8);
         row.set_margin_top(4);
         row.append(&label("User Volume", &["caption", "dim-label"]));
-        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 200.0, 1.0);
+        let most = f64::from(self.capture.borrow().volume_boost_cap) * 100.0;
+        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, most, 1.0);
         scale.set_hexpand(true);
         scale.set_draw_value(false);
         let current = self
             .user_volumes
             .borrow()
             .get(&user_id)
-            .map(|volume| (*volume as f64 * 100.0).clamp(0.0, 200.0))
+            .map(|volume| (*volume as f64 * 100.0).clamp(0.0, most))
             .unwrap_or(100.0);
         scale.set_value(current);
-        scale.add_mark(100.0, gtk::PositionType::Bottom, None);
+        let percent = gtk::Label::new(Some(&format!("{current:.0}%")));
+        percent.add_css_class("caption");
+        percent.add_css_class("dim-label");
+        percent.set_halign(gtk::Align::End);
+        let mut mark = 100.0;
+        while mark <= most {
+            scale.add_mark(mark, gtk::PositionType::Bottom, None);
+            mark += 100.0;
+        }
+        let shown = percent.clone();
+        scale.connect_value_changed(move |scale| {
+            shown.set_label(&format!("{:.0}%", scale.value()));
+        });
         let app = self.clone();
         scale.connect_value_changed(move |scale| {
             app.set_user_volume(account, user_id, scale.value() / 100.0);
         });
         row.append(&scale);
+        row.append(&percent);
         row
     }
 

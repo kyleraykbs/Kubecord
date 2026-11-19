@@ -238,6 +238,39 @@ impl AppState {
         show.connect_active_notify(move |row| app.set_send_typing(row.is_active()));
         typing.add(&show);
         page.append(&typing);
+
+        let voice = adw::PreferencesGroup::new();
+        voice.set_title("Voice");
+        let names: Vec<String> = crate::settings::VOLUME_BOOST_CAPS
+            .iter()
+            .map(|times| format!("{times}×"))
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let boost = adw::ComboRow::new();
+        boost.set_title("Maximum User Volume");
+        boost.set_subtitle(
+            "How far the User Volume slider in a person's right-click menu goes: 3× is up to 300%. Above 1× makes quiet people louder; very high settings can distort people who are already loud.",
+        );
+        boost.set_subtitle_lines(0);
+        boost.set_model(Some(&gtk::StringList::new(&names)));
+        let current = self.capture.borrow().volume_boost_cap;
+        boost.set_selected(
+            crate::settings::VOLUME_BOOST_CAPS
+                .iter()
+                .position(|times| *times == current)
+                .unwrap_or(2) as u32,
+        );
+        let app = self.clone();
+        boost.connect_selected_notify(move |row| {
+            if let Some(times) = crate::settings::VOLUME_BOOST_CAPS
+                .get(row.selected() as usize)
+                .copied()
+            {
+                app.update_prefs(|prefs| prefs.volume_boost_cap = times);
+            }
+        });
+        voice.add(&boost);
+        page.append(&voice);
         page
     }
 

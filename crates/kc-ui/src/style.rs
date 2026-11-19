@@ -310,13 +310,6 @@ const CSS: &str = r#"
     padding: 2px 4px;
 }
 
-.kc-voice-tile {
-    padding: 20px 16px 12px 16px;
-    min-width: 168px;
-    border-radius: 12px;
-    background-color: alpha(@window_fg_color, 0.06);
-}
-
 /* Right-click context menu. */
 .kc-menu {
     padding: 4px;
@@ -348,10 +341,6 @@ const CSS: &str = r#"
     opacity: 0.6;
 }
 
-.kc-voice-tile avatar {
-    transition: box-shadow 120ms ease;
-}
-
 .kc-video {
     border-radius: 8px;
     background-color: black;
@@ -359,15 +348,74 @@ const CSS: &str = r#"
     outline: 3px solid transparent;
 }
 
-/* The camera in a corner of the same person's stream. */
-.kc-video-inset {
-    border-radius: 6px;
-    background-color: black;
-    box-shadow: 0 0 0 2px alpha(black, 0.6), 0 2px 6px alpha(black, 0.5);
+/* A tile of the call: a person or a stream. */
+.kc-tile {
+    border-radius: 10px;
+    background-color: alpha(@window_fg_color, 0.07);
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    transition: outline-color 120ms ease;
 }
 
-.kc-voice-tile.kc-speaking .kc-video {
+.kc-tile.kc-tile-dark {
+    background-color: black;
+}
+
+.kc-tile.kc-speaking {
     outline-color: @success_bg_color;
+}
+
+.kc-tile-name {
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.85em;
+    color: white;
+    background-color: alpha(black, 0.6);
+}
+
+.kc-tile-caption {
+    font-size: 0.9em;
+    opacity: 0.7;
+}
+
+.kc-tile-dark .kc-tile-caption {
+    color: white;
+}
+
+/* Controls on a tile show while the pointer is over it; on the enlarged
+   tile they stay. */
+.kc-tile-controls {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+.kc-tile:hover .kc-tile-controls,
+.kc-tile-controls.kc-shown {
+    opacity: 1;
+}
+
+.kc-tile-controls button,
+.kc-members-toggle {
+    min-height: 26px;
+    min-width: 26px;
+    padding: 2px 8px;
+    border-radius: 8px;
+    color: white;
+    background-color: alpha(black, 0.6);
+}
+
+.kc-tile-controls button:hover,
+.kc-members-toggle:hover {
+    background-color: alpha(black, 0.8);
+}
+
+.kc-members-toggle {
+    border-radius: 999px;
+    padding: 2px 10px;
+}
+
+.kc-popout {
+    background-color: black;
 }
 
 /* Profile card: an opaque surface so the ring around the avatar, in the
@@ -438,10 +486,6 @@ const CSS: &str = r#"
     min-height: 0;
     padding: 2px 10px;
     font-size: 0.85em;
-}
-
-.kc-voice-tile.kc-speaking avatar {
-    box-shadow: 0 0 0 3px @success_bg_color;
 }
 
 .kc-voice-row avatar {

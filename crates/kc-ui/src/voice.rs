@@ -12,22 +12,81 @@ use kc_state::Channel;
 
 use crate::session::{AccountId, Command};
 use crate::shell::AppState;
+use crate::tile_grid::{self, TileGrid};
 use crate::widgets::{clear_box, empty_state, label};
 
 const TILE_AVATAR: i32 = 80;
-/// Size of a camera picture in a tile (16:9).
-const TILE_VIDEO: (i32, i32) = (288, 162);
+/// Size of a tile in the row under an enlarged one (16:9).
+const MINI_TILE: (i32, i32) = (176, 99);
+
+/// A camera or stream: account, person, and whether it is their stream.
+pub(crate) type VideoKey = (AccountId, Snowflake, bool);
 
 /// One person connected to a voice channel.
-struct Participant {
+#[derive(Clone)]
+pub(crate) struct Participant {
     id: Snowflake,
     name: String,
     avatar: String,
     muted: bool,
     deafened: bool,
-    video: bool,
     streaming: bool,
     is_self: bool,
+}
+
+/// A made-up call for `KYLECORD_VIDEO_DEMO`.
+pub(crate) struct DemoCall {
+    people: Vec<Participant>,
+    watching: Option<Snowflake>,
+}
+
+/// A video shown in a window of its own.
+pub(crate) struct Popout {
+    window: gtk::Window,
+    picture: gtk::Picture,
+}
+
+impl Popout {
+    pub(crate) fn close(self) {
+        self.window.close();
+    }
+}
+
+/// What the tiles of one drawing of the call have in common.
+struct CallContext {
+    account: AccountId,
+    /// We are in this call ourselves.
+    joined: bool,
+    /// Whose stream we are tuned into.
+    watching: Option<Snowflake>,
+    speaking: std::collections::HashSet<Snowflake>,
+}
+
+/// What a tile shows.
+enum Face {
+    /// A camera or stream picture.
+    Video(gtk::gdk::Paintable),
+    /// No camera: the person's avatar.
+    Avatar,
+    /// A stream we asked to watch whose first picture has not arrived.
+    Connecting,
+    /// Someone's stream we are not watching.
+    NotWatching,
+    /// Our own stream, with its preview turned off.
+    OwnStream,
+    /// The picture is in a window of its own.
+    PoppedOut,
+}
+
+/// Where a tile sits, which decides its size and controls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// One of the grid, sized by it.
+    Grid,
+    /// Small, in the row under the enlarged tile.
+    Mini,
+    /// Enlarged; `true` when there are other tiles to hide or show.
+    Stage(bool),
 }
 
 /// Whether a channel is voice-only (no text history of its own).
@@ -137,6 +196,16 @@ impl AppState {
     /// Redraws the call for the open channel, or takes it away when no one
     /// is in one any more.
     pub(crate) fn refresh_voice_view(self: &Rc<Self>) {
+        let demo = self
+            .voice_demo
+            .borrow()
+            .as_ref()
+            .map(|demo| (demo.people.clone(), demo.watching));
+        if let Some((people, watching)) = demo {
+            let account = self.model.borrow().active.unwrap_or(0);
+            self.build_call_view(account, &people, true, watching, None);
+            return;
+        }
         let Some(channel_id) = self
             .with_session(|session| session.selected_channel)
             .flatten()
@@ -252,10 +321,8 @@ impl AppState {
         self.render_voice_view(channel_id);
     }
 
-    /// Shows the people connected to a voice channel as tiles.
+    /// Shows the call in a channel: a tile for each person and each stream.
     pub(crate) fn render_voice_view(self: &Rc<Self>, channel_id: Snowflake) {
-        clear_box(&self.voice_view);
-        self.voice_tiles.borrow_mut().clear();
         let layout = match self.call_layout(channel_id) {
             CallLayout::Only => CallLayout::Only,
             _ => CallLayout::WithChat,
@@ -296,7 +363,6 @@ impl AppState {
                                 avatar,
                                 muted: voice.mute || voice.self_mute,
                                 deafened: voice.deaf || voice.self_deaf,
-                                video: voice.self_video,
                                 streaming: voice.self_stream,
                                 is_self: Some(user.id) == me,
                             })
@@ -308,27 +374,28 @@ impl AppState {
             })
             .flatten()
         else {
+            clear_box(&self.voice_view);
+            self.voice_tiles.borrow_mut().clear();
             return;
         };
+        self.build_call_view(account, &people, joined, watching, Some(channel_id));
+    }
 
-        // The enlarged video, if one is focused and still live. A stream
-        // counts as live while connecting; a camera only once it decodes.
-        let focused = self.focused_video.get().filter(|(user, is_stream)| {
-            people.iter().any(|person| person.id == *user)
-                && ((*is_stream && watching == Some(*user))
-                    || self
-                        .videos
-                        .borrow()
-                        .contains_key(&(account, *user, *is_stream)))
-        });
-
-        // A focused video fills the pane; a plain grid of tiles sits centred.
-        self.voice_view.set_valign(if focused.is_some() {
-            gtk::Align::Fill
-        } else {
-            gtk::Align::Center
-        });
+    /// Lays the call out. With nothing enlarged, every tile sits in a grid
+    /// that fills the room; with one enlarged, it takes the room and the
+    /// rest line up small beneath it.
+    fn build_call_view(
+        self: &Rc<Self>,
+        account: AccountId,
+        people: &[Participant],
+        joined: bool,
+        watching: Option<Snowflake>,
+        channel_id: Option<Snowflake>,
+    ) {
+        clear_box(&self.voice_view);
+        self.voice_tiles.borrow_mut().clear();
         if people.is_empty() {
+            self.voice_view.set_valign(gtk::Align::Center);
             self.voice_view.append(&empty_state(
                 "audio-volume-high-symbolic",
                 "No One Is Here",
@@ -336,44 +403,74 @@ impl AppState {
             ));
             return;
         }
+        self.voice_view.set_valign(gtk::Align::Fill);
 
-        if let Some((user, is_stream)) = focused {
-            let name = people
+        // Streams first, then people, as Discord orders them. A stream is
+        // always a tile of its own, next to its owner's.
+        let tiles: Vec<(&Participant, bool)> = people
+            .iter()
+            .filter(|person| person.streaming)
+            .map(|person| (person, true))
+            .chain(people.iter().map(|person| (person, false)))
+            .collect();
+
+        let call = CallContext {
+            account,
+            joined,
+            watching,
+            speaking: self.speaking.borrow().clone(),
+        };
+        // The enlarged tile, if it still shows a picture (or is about to).
+        let focused = self.focused_video.get().filter(|(user, is_stream)| {
+            tiles
                 .iter()
-                .find(|person| person.id == user)
-                .map(|person| person.name.as_str())
-                .unwrap_or("Someone");
-            self.voice_view
-                .append(&self.video_stage(account, user, is_stream, name));
+                .find(|(person, stream)| person.id == *user && stream == is_stream)
+                .is_some_and(|(person, stream)| {
+                    matches!(
+                        self.tile_face(&call, person, *stream),
+                        Face::Video(_) | Face::Connecting
+                    )
+                })
+        });
+
+        match focused {
+            Some((user, is_stream)) => {
+                let others: Vec<&(&Participant, bool)> = tiles
+                    .iter()
+                    .filter(|(person, stream)| !(person.id == user && *stream == is_stream))
+                    .collect();
+                if let Some((person, stream)) = tiles
+                    .iter()
+                    .find(|(person, stream)| person.id == user && *stream == is_stream)
+                {
+                    let stage =
+                        self.call_tile(&call, person, *stream, Role::Stage(!others.is_empty()));
+                    self.voice_view.append(&stage);
+                }
+                if !others.is_empty() && !self.members_hidden.get() {
+                    let strip = gtk::Box::new(gtk::Orientation::Horizontal, tile_grid::SPACING);
+                    strip.set_halign(gtk::Align::Center);
+                    for (person, stream) in others {
+                        strip.append(&self.call_tile(&call, person, *stream, Role::Mini));
+                    }
+                    let scroll = gtk::ScrolledWindow::new();
+                    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+                    scroll.set_child(Some(&strip));
+                    self.voice_view.append(&scroll);
+                }
+            }
+            None => {
+                let grid = TileGrid::new();
+                grid.set_hexpand(true);
+                grid.set_vexpand(true);
+                for (person, stream) in &tiles {
+                    grid.append(&self.call_tile(&call, person, *stream, Role::Grid));
+                }
+                self.voice_view.append(&grid);
+            }
         }
 
-        let tiles = gtk::FlowBox::new();
-        tiles.set_selection_mode(gtk::SelectionMode::None);
-        tiles.set_homogeneous(true);
-        // A flow box asks for room for its maximum per line; size that to the
-        // people present so a lone tile is centred, not placed at the start.
-        tiles.set_max_children_per_line(people.len().clamp(1, 4) as u32);
-        tiles.set_column_spacing(12);
-        tiles.set_row_spacing(12);
-        tiles.set_halign(gtk::Align::Center);
-        let speaking = self.speaking.borrow().clone();
-        for person in &people {
-            let tile = self.voice_tile(
-                person,
-                speaking.contains(&person.id),
-                account,
-                joined,
-                watching,
-                focused,
-            );
-            tiles.insert(&tile, -1);
-            self.voice_tiles
-                .borrow_mut()
-                .insert(person.id, tile.upcast());
-        }
-        self.voice_view.append(&tiles);
-
-        if !joined {
+        if !joined && let Some(channel_id) = channel_id {
             // A DM call you are not in: join it from here. A voice channel
             // is joined from the sidebar.
             let channel = self
@@ -408,35 +505,294 @@ impl AppState {
         }
     }
 
-    /// Development aid (`KYLECORD_VIDEO_DEMO`): shows a locally generated
-    /// test video in the stream view, to check decoding and display
-    /// without a call.
-    pub(crate) fn show_video_demo(self: &Rc<Self>) {
-        let Some(account) = self.model.borrow().active else {
-            return;
+    /// What a tile has to show for a person (or, with `is_stream`, for
+    /// their stream).
+    fn tile_face(&self, call: &CallContext, person: &Participant, is_stream: bool) -> Face {
+        let key = (call.account, person.id, is_stream);
+        if self.popouts.borrow().contains_key(&key) {
+            return Face::PoppedOut;
+        }
+        let video = self
+            .videos
+            .borrow()
+            .get(&key)
+            .map(|video| video.paintable.clone());
+        if !is_stream {
+            return video.map_or(Face::Avatar, Face::Video);
+        }
+        // Your own stream needs no watching: it is previewed locally.
+        let tuned_in = person.is_self || call.watching == Some(person.id);
+        match video {
+            Some(paintable) if tuned_in => Face::Video(paintable),
+            _ if person.is_self => Face::OwnStream,
+            _ if call.watching == Some(person.id) => Face::Connecting,
+            _ => Face::NotWatching,
+        }
+    }
+
+    /// One tile of the call: a person (their camera, or their avatar) or a
+    /// stream, at the size its place in the layout gives it.
+    fn call_tile(
+        self: &Rc<Self>,
+        call: &CallContext,
+        person: &Participant,
+        is_stream: bool,
+        role: Role,
+    ) -> gtk::Widget {
+        let account = call.account;
+        let user_id = person.id;
+        let key = (account, user_id, is_stream);
+        let face = self.tile_face(call, person, is_stream);
+        let stage = matches!(role, Role::Stage(_));
+        let title = if is_stream {
+            format!("{}'s stream", person.name)
+        } else {
+            format!("{}'s camera", person.name)
         };
-        let owner = Snowflake::new(1);
-        let feed = std::sync::Arc::new(kc_media::decode::VideoFeed::default());
-        let source = feed.clone();
-        std::thread::spawn(move || {
-            let Ok(frames) = kc_media::decode::test_pattern(90, 30) else {
-                return;
-            };
-            for frame in frames.iter().cycle().take(900) {
-                source.push(frame.clone(), kc_voice::rtp::is_keyframe(frame));
-                std::thread::sleep(Duration::from_millis(33));
+
+        let tile = gtk::Overlay::new();
+        tile.add_css_class("kc-tile");
+        tile.set_overflow(gtk::Overflow::Hidden);
+        if is_stream || matches!(face, Face::Video(_)) {
+            tile.add_css_class("kc-tile-dark");
+        }
+        if !is_stream && call.speaking.contains(&user_id) {
+            tile.add_css_class("kc-speaking");
+        }
+        match role {
+            Role::Grid => {}
+            Role::Mini => tile.set_size_request(MINI_TILE.0, MINI_TILE.1),
+            Role::Stage(_) => {
+                tile.set_hexpand(true);
+                tile.set_vexpand(true);
+                tile.set_size_request(-1, 180);
+            }
+        }
+
+        // -- what fills the tile -----------------------------------------
+        let avatar_size = match role {
+            Role::Mini => 44,
+            _ => TILE_AVATAR,
+        };
+        let centred = |children: &[gtk::Widget]| {
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            column.set_halign(gtk::Align::Center);
+            column.set_valign(gtk::Align::Center);
+            for child in children {
+                child.set_halign(gtk::Align::Center);
+                column.append(child);
+            }
+            column
+        };
+        let caption = |text: &str| {
+            let caption = label(text, &["kc-tile-caption"]);
+            caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            caption.upcast::<gtk::Widget>()
+        };
+        let content: gtk::Widget = match &face {
+            Face::Video(paintable) => {
+                let picture = gtk::Picture::for_paintable(paintable);
+                // A camera fills its tile; a screen is shown whole.
+                picture.set_content_fit(if is_stream || stage {
+                    gtk::ContentFit::Contain
+                } else {
+                    gtk::ContentFit::Cover
+                });
+                picture.upcast()
+            }
+            Face::Avatar => {
+                let avatar = self
+                    .images
+                    .avatar(avatar_size, &person.name, Some(&person.avatar));
+                centred(&[avatar.upcast()]).upcast()
+            }
+            Face::Connecting => {
+                let spinner = gtk::Spinner::new();
+                spinner.set_spinning(true);
+                spinner.set_size_request(28, 28);
+                let mut children = vec![spinner.upcast::<gtk::Widget>()];
+                if role != Role::Mini {
+                    children.push(caption("Connecting to stream…"));
+                }
+                centred(&children).upcast()
+            }
+            Face::NotWatching => {
+                if call.joined {
+                    let watch = gtk::Button::with_label(if role == Role::Mini {
+                        "Watch"
+                    } else {
+                        "Watch Stream"
+                    });
+                    watch.add_css_class("kc-watch");
+                    watch.add_css_class("suggested-action");
+                    let app = self.clone();
+                    watch.connect_clicked(move |_| {
+                        let _ = app
+                            .cmd_tx
+                            .try_send(Command::WatchStream { account, user_id });
+                    });
+                    centred(&[watch.upcast()]).upcast()
+                } else {
+                    centred(&[caption("Join to watch")]).upcast()
+                }
+            }
+            Face::OwnStream => centred(&[caption("You're live")]).upcast(),
+            Face::PoppedOut => {
+                let back = gtk::Button::with_label("Pop In");
+                back.add_css_class("kc-watch");
+                let app = self.clone();
+                back.connect_clicked(move |_| app.pop_in_video(key));
+                let mut children = Vec::new();
+                if role != Role::Mini {
+                    children.push(caption("In its own window"));
+                }
+                children.push(back.upcast());
+                centred(&children).upcast()
+            }
+        };
+        tile.set_child(Some(&content));
+
+        // -- name, bottom left -------------------------------------------
+        let name = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        name.add_css_class("kc-tile-name");
+        name.set_halign(gtk::Align::Start);
+        name.set_valign(gtk::Align::End);
+        name.set_margin_start(6);
+        name.set_margin_bottom(6);
+        name.set_margin_end(6);
+        let small_icon = |icon: &str, tooltip: &str| {
+            let image = gtk::Image::from_icon_name(icon);
+            image.set_pixel_size(12);
+            image.set_tooltip_text(Some(tooltip));
+            image
+        };
+        if is_stream {
+            name.append(&small_icon("video-display-symbolic", "Stream"));
+        }
+        let text = gtk::Label::new(Some(&person.name));
+        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        text.set_max_width_chars(if role == Role::Mini { 12 } else { 28 });
+        name.append(&text);
+        if !is_stream {
+            if person.muted {
+                name.append(&small_icon(
+                    "microphone-sensitivity-muted-symbolic",
+                    "Muted",
+                ));
+            }
+            if person.deafened {
+                name.append(&small_icon("audio-volume-muted-symbolic", "Deafened"));
+            }
+        }
+        tile.add_overlay(&name);
+
+        if is_stream && !stage {
+            let live = gtk::Label::new(Some("LIVE"));
+            live.add_css_class("kc-badge");
+            live.set_halign(gtk::Align::End);
+            live.set_valign(gtk::Align::Start);
+            live.set_margin_end(6);
+            live.set_margin_top(6);
+            tile.add_overlay(&live);
+        }
+
+        // -- controls: pop out, and on the enlarged tile the rest ---------
+        let has_video = matches!(face, Face::Video(_));
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        controls.add_css_class("kc-tile-controls");
+        controls.set_valign(gtk::Align::Start);
+        controls.set_margin_top(6);
+        if stage {
+            controls.add_css_class("kc-shown");
+            controls.set_halign(gtk::Align::End);
+            controls.set_margin_end(6);
+        } else {
+            controls.set_halign(gtk::Align::Start);
+            controls.set_margin_start(6);
+        }
+        let control = |icon: &str, tooltip: &str| {
+            let button = gtk::Button::from_icon_name(icon);
+            button.set_tooltip_text(Some(tooltip));
+            button
+        };
+        if has_video {
+            let pop = control("window-new-symbolic", "Pop out into its own window");
+            let app = self.clone();
+            let title = title.clone();
+            pop.connect_clicked(move |_| app.pop_out_video(key, &title));
+            controls.append(&pop);
+        }
+        if stage {
+            let minimise = control("view-restore-symbolic", "Back to the grid");
+            let app = self.clone();
+            minimise.connect_clicked(move |_| app.set_focused_video(None));
+            controls.append(&minimise);
+            if is_stream && !person.is_self {
+                let stop = gtk::Button::with_label("Stop Watching");
+                let app = self.clone();
+                stop.connect_clicked(move |_| {
+                    let _ = app.cmd_tx.try_send(Command::StopWatching { account });
+                });
+                controls.append(&stop);
+            }
+        }
+        if controls.first_child().is_some() {
+            tile.add_overlay(&controls);
+        }
+
+        // -- hide or show the others, under the enlarged tile -------------
+        if role == Role::Stage(true) {
+            let hidden = self.members_hidden.get();
+            let toggle = gtk::Button::new();
+            toggle.add_css_class("kc-members-toggle");
+            let icons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            icons.append(&gtk::Image::from_icon_name(if hidden {
+                "pan-up-symbolic"
+            } else {
+                "pan-down-symbolic"
+            }));
+            icons.append(&gtk::Image::from_icon_name("system-users-symbolic"));
+            toggle.set_child(Some(&icons));
+            toggle.set_tooltip_text(Some(if hidden {
+                "Show Members"
+            } else {
+                "Hide Members"
+            }));
+            toggle.set_halign(gtk::Align::Center);
+            toggle.set_valign(gtk::Align::End);
+            toggle.set_margin_bottom(6);
+            let app = self.clone();
+            toggle.connect_clicked(move |_| {
+                app.members_hidden.set(!app.members_hidden.get());
+                app.refresh_voice_view();
+            });
+            tile.add_overlay(&toggle);
+        }
+
+        // Clicking a picture enlarges it (or, enlarged, puts it back); an
+        // avatar opens the profile. Right-click always opens the user menu.
+        let focusable = matches!(face, Face::Video(_) | Face::Connecting);
+        let click = gtk::GestureClick::new();
+        let app = self.clone();
+        click.connect_released(move |gesture, _, _, _| {
+            if focusable {
+                app.set_focused_video((!stage).then_some((user_id, is_stream)));
+            } else if !is_stream && let Some(widget) = gesture.widget() {
+                app.show_profile(user_id, &widget);
             }
         });
-        if let Some(video) = crate::live::LiveVideo::start(feed) {
-            self.videos
-                .borrow_mut()
-                .insert((account, owner, true), video);
+        tile.add_controller(click);
+        if focusable || !is_stream {
+            tile.set_cursor_from_name(Some("pointer"));
         }
-        clear_box(&self.voice_view);
-        self.set_call_layout(CallLayout::Only);
-        self.voice_view.set_valign(gtk::Align::Fill);
-        self.voice_view
-            .append(&self.video_stage(account, owner, true, "Test pattern"));
+        self.attach_user_menu(&tile, user_id);
+
+        if !is_stream {
+            self.voice_tiles
+                .borrow_mut()
+                .insert(user_id, tile.clone().upcast());
+        }
+        tile.upcast()
     }
 
     /// Sets (or clears) the enlarged video and redraws the voice view.
@@ -445,249 +801,187 @@ impl AppState {
         self.refresh_voice_view();
     }
 
-    /// One video shown large: a watched stream or a focused camera. Clicking
-    /// the picture, or the minimise button, shrinks it back to a tile.
-    fn video_stage(
-        self: &Rc<Self>,
-        account: AccountId,
-        user: Snowflake,
-        is_stream: bool,
-        name: &str,
-    ) -> gtk::Box {
-        let stage = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        stage.add_css_class("kc-stage");
-        stage.set_vexpand(true);
+    // -- videos in their own windows -------------------------------------
 
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        if is_stream {
-            let live = gtk::Label::new(Some("LIVE"));
-            live.add_css_class("kc-badge");
-            live.set_valign(gtk::Align::Center);
-            header.append(&live);
+    /// Moves a camera or stream into a window of its own. Closing that
+    /// window puts it back in the call.
+    pub(crate) fn pop_out_video(self: &Rc<Self>, key: VideoKey, title: &str) {
+        if let Some(popout) = self.popouts.borrow().get(&key) {
+            popout.window.present();
+            return;
         }
-        let heading = if is_stream {
-            format!("{name}'s stream")
-        } else {
-            format!("{name}'s camera")
-        };
-        let title = label(&heading, &["heading"]);
-        title.set_hexpand(true);
-        title.set_xalign(0.0);
-        header.append(&title);
-        let minimise = gtk::Button::from_icon_name("view-restore-symbolic");
-        minimise.add_css_class("flat");
-        minimise.set_tooltip_text(Some("Minimise"));
-        let app = self.clone();
-        minimise.connect_clicked(move |_| app.set_focused_video(None));
-        header.append(&minimise);
-        let own = self
-            .with_session(|session| session.user.as_ref().map(|me| me.id))
-            .flatten()
-            == Some(user);
-        if is_stream && !own {
-            let stop = gtk::Button::with_label("Stop Watching");
-            let app = self.clone();
-            stop.connect_clicked(move |_| {
-                let _ = app.cmd_tx.try_send(Command::StopWatching { account });
-            });
-            header.append(&stop);
-        }
-        stage.append(&header);
-
-        let video = self
+        let Some(paintable) = self
             .videos
             .borrow()
-            .get(&(account, user, is_stream))
-            .map(|video| video.paintable.clone());
-        match video {
-            Some(paintable) => {
-                let picture = gtk::Picture::for_paintable(&paintable);
-                picture.add_css_class("kc-video");
-                picture.set_content_fit(gtk::ContentFit::Contain);
-                picture.set_hexpand(true);
-                picture.set_vexpand(true);
-                picture.set_size_request(-1, 240);
-                picture.set_cursor_from_name(Some("pointer"));
-                let click = gtk::GestureClick::new();
-                let app = self.clone();
-                click.connect_released(move |_, _, _, _| app.set_focused_video(None));
-                picture.add_controller(click);
-                stage.append(&picture);
-            }
-            None => {
-                // Asked to watch; the first picture has not arrived yet.
-                let waiting = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                waiting.add_css_class("kc-video");
-                waiting.set_vexpand(true);
-                waiting.set_valign(gtk::Align::Fill);
-                let spinner = gtk::Spinner::new();
-                spinner.set_spinning(true);
-                spinner.set_size_request(32, 32);
-                spinner.set_vexpand(true);
-                spinner.set_valign(gtk::Align::End);
-                waiting.append(&spinner);
-                let text = label("Connecting to stream…", &["dim-label"]);
-                text.set_vexpand(true);
-                text.set_valign(gtk::Align::Start);
-                waiting.append(&text);
-                waiting.set_size_request(-1, 240);
-                stage.append(&waiting);
-            }
-        }
-        stage
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn voice_tile(
-        self: &Rc<Self>,
-        person: &Participant,
-        speaking: bool,
-        account: AccountId,
-        joined: bool,
-        watching: Option<Snowflake>,
-        focused: Option<(Snowflake, bool)>,
-    ) -> gtk::Box {
-        let tile = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        tile.add_css_class("kc-voice-tile");
-        if speaking {
-            tile.add_css_class("kc-speaking");
-        }
-
-        // Prefer their stream while we watch it, else their camera; the
-        // avatar stands in when neither is arriving.
-        let video = {
-            let videos = self.videos.borrow();
-            // Your own stream needs no watching: it is previewed locally.
-            let stream = (watching == Some(person.id) || person.is_self)
-                .then(|| videos.get(&(account, person.id, true)))
-                .flatten();
-            let camera = videos.get(&(account, person.id, false));
-            // With both, the camera rides in a corner of the stream.
-            let inset = stream.and(camera).map(|camera| camera.paintable.clone());
-            stream
-                .map(|video| (video.paintable.clone(), true))
-                .or_else(|| camera.map(|video| (video.paintable.clone(), false)))
-                .map(|(paintable, is_stream)| (paintable, is_stream, inset))
+            .get(&key)
+            .map(|video| video.paintable.clone())
+        else {
+            return;
         };
-        let face: gtk::Widget = match &video {
-            Some((paintable, _, inset)) => {
-                let picture = gtk::Picture::for_paintable(paintable);
-                picture.add_css_class("kc-video");
-                picture.set_content_fit(gtk::ContentFit::Cover);
-                picture.set_size_request(TILE_VIDEO.0, TILE_VIDEO.1);
-                match inset {
-                    Some(camera) => {
-                        let small = gtk::Picture::for_paintable(camera);
-                        small.add_css_class("kc-video-inset");
-                        small.set_content_fit(gtk::ContentFit::Cover);
-                        small.set_size_request(TILE_VIDEO.0 / 3, TILE_VIDEO.1 / 3);
-                        small.set_halign(gtk::Align::End);
-                        small.set_valign(gtk::Align::End);
-                        small.set_margin_end(6);
-                        small.set_margin_bottom(6);
-                        small.set_overflow(gtk::Overflow::Hidden);
-                        small.set_tooltip_text(Some("Camera: click to enlarge"));
-                        small.set_cursor_from_name(Some("pointer"));
-                        // A click on the corner picture enlarges the camera,
-                        // not the stream under it.
-                        let enlarge = gtk::GestureClick::new();
-                        let app = self.clone();
-                        let user_id = person.id;
-                        enlarge.connect_released(move |gesture, _, _, _| {
-                            gesture.set_state(gtk::EventSequenceState::Claimed);
-                            let next =
-                                (focused != Some((user_id, false))).then_some((user_id, false));
-                            app.set_focused_video(next);
-                        });
-                        small.add_controller(enlarge);
-                        let both = gtk::Overlay::new();
-                        both.set_child(Some(&picture));
-                        both.add_overlay(&small);
-                        both.upcast()
-                    }
-                    None => picture.upcast(),
-                }
-            }
-            None => {
-                let avatar = self
-                    .images
-                    .avatar(TILE_AVATAR, &person.name, Some(&person.avatar));
-                avatar.set_vexpand(true);
-                avatar.set_valign(gtk::Align::Center);
-                avatar.upcast()
-            }
-        };
-        face.set_halign(gtk::Align::Center);
-        // Clicking a video focuses it (or un-focuses the current one); the
-        // avatar opens the profile. Right-click always opens the user menu.
-        let click = gtk::GestureClick::new();
-        let app = self.clone();
-        let user_id = person.id;
-        let video_target = video.as_ref().map(|(_, is_stream, _)| *is_stream);
-        click.connect_released(move |gesture, _, _, _| match video_target {
-            Some(is_stream) => {
-                let next = (focused != Some((user_id, is_stream))).then_some((user_id, is_stream));
-                app.set_focused_video(next);
-            }
-            None => {
-                if let Some(widget) = gesture.widget() {
-                    app.show_profile(user_id, &widget);
-                }
+        let picture = gtk::Picture::for_paintable(&paintable);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.add_css_class("kc-popout");
+        let window = gtk::Window::builder()
+            .title(title)
+            .default_width(960)
+            .default_height(540)
+            .child(&picture)
+            .build();
+        window.set_application(self.window.application().as_ref());
+
+        // Double-click (or F / F11) fills the screen; Escape leaves it.
+        let double = gtk::GestureClick::new();
+        let target = window.clone();
+        double.connect_released(move |_, presses, _, _| {
+            if presses == 2 {
+                target.set_fullscreened(!target.is_fullscreen());
             }
         });
-        face.add_controller(click);
-        face.set_cursor_from_name(Some("pointer"));
-        self.attach_user_menu(&face, person.id);
-        tile.append(&face);
+        picture.add_controller(double);
+        let keys = gtk::EventControllerKey::new();
+        let target = window.clone();
+        keys.connect_key_pressed(move |_, key, _, _| match key {
+            gtk::gdk::Key::f | gtk::gdk::Key::F | gtk::gdk::Key::F11 => {
+                target.set_fullscreened(!target.is_fullscreen());
+                gtk::glib::Propagation::Stop
+            }
+            gtk::gdk::Key::Escape if target.is_fullscreen() => {
+                target.set_fullscreened(false);
+                gtk::glib::Propagation::Stop
+            }
+            _ => gtk::glib::Propagation::Proceed,
+        });
+        window.add_controller(keys);
 
-        let name = label(&person.name, &["heading"]);
-        name.set_halign(gtk::Align::Center);
-        name.set_max_width_chars(16);
-        tile.append(&name);
+        let app = self.clone();
+        window.connect_close_request(move |_| {
+            // Closed by hand: back into the call. (Closed because the
+            // video ended, it has been forgotten already.)
+            if app.popouts.borrow_mut().remove(&key).is_some() {
+                app.refresh_voice_view();
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        self.popouts.borrow_mut().insert(
+            key,
+            Popout {
+                window: window.clone(),
+                picture,
+            },
+        );
+        if self.focused_video.get() == Some((key.1, key.2)) {
+            self.focused_video.set(None);
+        }
+        window.present();
+        self.refresh_voice_view();
+    }
 
-        let badges = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        badges.set_halign(gtk::Align::Center);
-        // Keeps tiles the same height whether or not they show badges.
-        badges.set_height_request(18);
-        if person.streaming {
-            let live = gtk::Label::new(Some("LIVE"));
-            live.add_css_class("kc-badge");
-            live.set_valign(gtk::Align::Center);
-            badges.append(&live);
-            // Anyone in the call can tune into someone else's stream.
-            if joined && !person.is_self && watching != Some(person.id) {
-                let watch = gtk::Button::with_label("Watch Stream");
-                watch.add_css_class("kc-watch");
-                watch.add_css_class("suggested-action");
+    /// Closes a video's own window, which puts it back in the call.
+    pub(crate) fn pop_in_video(self: &Rc<Self>, key: VideoKey) {
+        let popout = self.popouts.borrow_mut().remove(&key);
+        if let Some(popout) = popout {
+            popout.window.close();
+            self.refresh_voice_view();
+        }
+    }
+
+    /// A video restarted: its window, if it has one, shows the new picture.
+    pub(crate) fn update_popout(&self, key: VideoKey) {
+        if let (Some(popout), Some(video)) = (
+            self.popouts.borrow().get(&key),
+            self.videos.borrow().get(&key),
+        ) {
+            popout.picture.set_paintable(Some(&video.paintable));
+        }
+    }
+
+    /// Closes every video window (the call ended, or kylecord is closing).
+    pub(crate) fn close_popouts(&self) {
+        let popouts: Vec<Popout> = self.popouts.borrow_mut().drain().map(|(_, p)| p).collect();
+        for popout in popouts {
+            popout.close();
+        }
+    }
+
+    /// Development aid (`KYLECORD_VIDEO_DEMO`): a made-up call with
+    /// locally generated video, to check the layout without a real one.
+    /// The value picks the state: `grid`, `focus`, `hidden` (focused, with
+    /// the others hidden), `popout`, or `sequence` (watch a stream,
+    /// enlarge a camera, then put it back).
+    pub(crate) fn show_video_demo(self: &Rc<Self>, mode: &str) {
+        let account = self.model.borrow().active.unwrap_or(0);
+        let person = |id: u64, name: &str, streaming: bool| Participant {
+            id: Snowflake::new(id),
+            name: name.to_owned(),
+            avatar: String::new(),
+            muted: id.is_multiple_of(3),
+            deafened: id == 6,
+            streaming,
+            is_self: id == 2,
+        };
+        let people = vec![
+            person(1, "kyleraykbs", true),
+            person(2, "Lambda Ignition", true),
+            person(3, "lain", false),
+            person(4, "Gamma", false),
+            person(5, "someone with a rather long name", false),
+            person(6, "Delta", false),
+        ];
+        // Streams from the first two, cameras from the first three.
+        let keys = [(1, true), (2, true), (1, false), (2, false), (3, false)];
+        let mut feeds = Vec::new();
+        for (id, stream) in keys {
+            let feed = std::sync::Arc::new(kc_media::decode::VideoFeed::default());
+            if let Some(video) = crate::live::LiveVideo::start(feed.clone()) {
+                self.videos
+                    .borrow_mut()
+                    .insert((account, Snowflake::new(id), stream), video);
+            }
+            feeds.push(feed);
+        }
+        std::thread::spawn(move || {
+            let Ok(frames) = kc_media::decode::test_pattern(90, 30) else {
+                return;
+            };
+            for frame in frames.iter().cycle().take(1800) {
+                for feed in &feeds {
+                    feed.push(frame.clone(), kc_voice::rtp::is_keyframe(frame));
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+        });
+        *self.voice_demo.borrow_mut() = Some(DemoCall {
+            people,
+            watching: Some(Snowflake::new(1)),
+        });
+        self.stack.set_visible_child_name("chat");
+        self.set_call_layout(CallLayout::Only);
+        let stream = (Snowflake::new(1), true);
+        let camera = (Snowflake::new(3), false);
+        match mode {
+            "focus" => self.focused_video.set(Some(stream)),
+            "hidden" => {
+                self.focused_video.set(Some(stream));
+                self.members_hidden.set(true);
+            }
+            "popout" => {
+                self.refresh_voice_view();
+                self.pop_out_video((account, stream.0, true), "kyleraykbs's stream");
+            }
+            "sequence" => {
+                self.focused_video.set(Some(stream));
                 let app = self.clone();
-                let user_id = person.id;
-                watch.connect_clicked(move |_| {
-                    let _ = app
-                        .cmd_tx
-                        .try_send(Command::WatchStream { account, user_id });
+                gtk::glib::timeout_add_local_once(Duration::from_millis(700), move || {
+                    app.set_focused_video(Some(camera));
                 });
-                badges.append(&watch);
+                let app = self.clone();
+                gtk::glib::timeout_add_local_once(Duration::from_millis(1400), move || {
+                    app.set_focused_video(None);
+                });
             }
+            _ => {}
         }
-        for (shown, icon, tooltip) in [
-            (person.video, "camera-video-symbolic", "Camera on"),
-            (
-                person.muted,
-                "microphone-sensitivity-muted-symbolic",
-                "Muted",
-            ),
-            (person.deafened, "audio-volume-muted-symbolic", "Deafened"),
-        ] {
-            if shown {
-                let image = gtk::Image::from_icon_name(icon);
-                image.set_pixel_size(14);
-                image.add_css_class("dim-label");
-                image.set_tooltip_text(Some(tooltip));
-                badges.append(&image);
-            }
-        }
-        tile.append(&badges);
-        tile
+        self.refresh_voice_view();
     }
 
     /// Lights or clears the speaking ring on a person's tile and sidebar

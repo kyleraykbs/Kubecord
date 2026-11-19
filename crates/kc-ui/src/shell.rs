@@ -107,6 +107,12 @@ pub(crate) struct AppState {
     /// The enlarged video in the voice view: `(user, is_stream)`. Clicking a
     /// tile focuses it; clicking the big one again clears this.
     pub focused_video: Cell<Option<(Snowflake, bool)>>,
+    /// Cameras and streams moved into windows of their own.
+    pub popouts: RefCell<HashMap<crate::voice::VideoKey, crate::voice::Popout>>,
+    /// With a video enlarged: the row of other tiles under it is hidden.
+    pub members_hidden: Cell<bool>,
+    /// A made-up call shown by `KYLECORD_VIDEO_DEMO`.
+    pub voice_demo: RefCell<Option<crate::voice::DemoCall>>,
     /// The ringing card for an incoming call, and its channel.
     pub incoming_call: RefCell<Option<(Snowflake, adw::Dialog)>>,
     /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
@@ -494,12 +500,12 @@ impl AppState {
         placeholder_scroll.set_child(Some(&chat_placeholder));
 
         // Voice channels show who is connected instead of a message list.
-        let voice_view = gtk::Box::new(gtk::Orientation::Vertical, 20);
+        let voice_view = gtk::Box::new(gtk::Orientation::Vertical, 8);
         voice_view.set_valign(gtk::Align::Center);
-        voice_view.set_margin_top(24);
-        voice_view.set_margin_bottom(24);
-        voice_view.set_margin_start(24);
-        voice_view.set_margin_end(24);
+        voice_view.set_margin_top(12);
+        voice_view.set_margin_bottom(12);
+        voice_view.set_margin_start(12);
+        voice_view.set_margin_end(12);
         let voice_scroll = gtk::ScrolledWindow::new();
         voice_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         voice_scroll.set_child(Some(&voice_view));
@@ -820,6 +826,9 @@ impl AppState {
             voice_tiles: RefCell::new(HashMap::new()),
             videos: RefCell::new(HashMap::new()),
             focused_video: Cell::new(None),
+            popouts: RefCell::new(HashMap::new()),
+            members_hidden: Cell::new(false),
+            voice_demo: RefCell::new(None),
             incoming_call: RefCell::new(None),
             user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),

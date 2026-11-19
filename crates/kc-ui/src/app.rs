@@ -136,10 +136,10 @@ pub fn run() -> glib::ExitCode {
                 }
             });
         }
-        if std::env::var_os("KYLECORD_VIDEO_DEMO").is_some() {
+        if let Ok(mode) = std::env::var("KYLECORD_VIDEO_DEMO") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
-                app_state.show_video_demo();
+                app_state.show_video_demo(&mode);
             });
         }
         if let Ok(popup) = std::env::var("KYLECORD_POPUP") {
@@ -541,6 +541,7 @@ impl AppState {
         let app = self.clone();
         let leaving = Rc::new(std::cell::Cell::new(false));
         self.window.connect_close_request(move |window| {
+            app.close_popouts();
             if leaving.get() {
                 return glib::Propagation::Proceed;
             }
@@ -1483,6 +1484,7 @@ impl AppState {
                         .borrow_mut()
                         .insert((account, user_id, stream), video);
                 }
+                self.update_popout((account, user_id, stream));
                 if self.model.borrow().active == Some(account) {
                     self.refresh_voice_view();
                 }
@@ -1509,6 +1511,11 @@ impl AppState {
                     }
                     if self.focused_video.get() == Some((user_id, stream)) {
                         self.focused_video.set(None);
+                    }
+                    // Its own window, if it had one, goes with it.
+                    let popout = self.popouts.borrow_mut().remove(&key);
+                    if let Some(popout) = popout {
+                        popout.close();
                     }
                     if self.model.borrow().active == Some(account) {
                         self.refresh_voice_view();
