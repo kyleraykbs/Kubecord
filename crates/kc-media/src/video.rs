@@ -67,7 +67,43 @@ pub struct VideoSource {
     thread: Option<std::thread::JoinHandle<()>>,
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
-    last_force_keyframe: Mutex<Option<Instant>>,
+    keyframes: Arc<Mutex<KeyframeRequests>>,
+}
+
+/// The least time between forced keyframes. Viewers repeat their requests
+/// while frozen, and a keyframe per request would flood the stream.
+const KEYFRAME_SPACING: Duration = Duration::from_millis(750);
+
+#[derive(Default)]
+struct KeyframeRequests {
+    last: Option<Instant>,
+    /// A request is waiting for the spacing to pass.
+    deferred: bool,
+}
+
+/// Sends the force-key-unit event up the pipeline to the encoder.
+/// `all_headers` re-sends SPS/PPS with the IDR so a viewer that lost the
+/// stream headers can decode again. A bin routes an upstream event to its
+/// sinks, which forward it to the encoder; sending on the appsink's own pad
+/// is the fallback.
+fn send_keyframe_request(pipeline: &gst::Pipeline) {
+    let build_event = || {
+        gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+            .all_headers(true)
+            .build()
+    };
+    if pipeline.send_event(build_event()) {
+        tracing::info!("forced encoder keyframe");
+        return;
+    }
+    if let Some(sink) = pipeline.by_name("sink")
+        && let Some(pad) = sink.static_pad("sink")
+        && pad.send_event(build_event())
+    {
+        tracing::info!("forced encoder keyframe (pad fallback)");
+        return;
+    }
+    tracing::warn!("could not send force-key-unit event upstream");
 }
 
 /// Encoder choice for a capture pipeline.
@@ -504,7 +540,7 @@ impl VideoSource {
             thread: Some(thread),
             _portal: None,
             _camera: None,
-            last_force_keyframe: Mutex::new(None),
+            keyframes: Arc::default(),
         })
     }
 
@@ -567,42 +603,47 @@ impl VideoSource {
         Err(last_error.unwrap_or_else(|| Error::Message("no capture pipeline variant".into())))
     }
 
-    /// Asks the encoder for an immediate keyframe in response to PLI/FIR.
+    /// Asks the encoder for a keyframe: a viewer cannot decode (PLI/FIR), or
+    /// packets were lost on the way. At most one goes out per
+    /// `KEYFRAME_SPACING`; a request inside that time is not dropped but
+    /// served when it ends, so a loss just after a keyframe is still
+    /// repaired without waiting for the next scheduled one.
     pub fn force_keyframe(&self) {
-        // Viewers can send PLI/FIR repeatedly when they are starved. Re-encoding
-        // a keyframe for every request creates larger periodic freezes, so cap
-        // forced keyframes to one per second. This is short enough that a viewer
-        // whose decoder froze (a dropped/lost P-frame) recovers in well under a
-        // GOP instead of waiting for the next scheduled IDR, but long enough
-        // that a PLI storm cannot flood the pacer with back-to-back keyframes.
-        if let Ok(mut last) = self.last_force_keyframe.lock() {
-            if last.is_some_and(|last| last.elapsed() < Duration::from_secs(1)) {
+        let wait = {
+            let Ok(mut state) = self.keyframes.lock() else {
                 return;
+            };
+            match state.last {
+                Some(last) if last.elapsed() < KEYFRAME_SPACING => {
+                    if state.deferred {
+                        return;
+                    }
+                    state.deferred = true;
+                    Some(KEYFRAME_SPACING - last.elapsed())
+                }
+                _ => {
+                    state.last = Some(Instant::now());
+                    None
+                }
             }
-            *last = Some(Instant::now());
-        }
-        // `all_headers=true` re-sends SPS/PPS with the IDR so a viewer that lost
-        // the stream headers can decode again. Inject via the pipeline: a bin
-        // routes an upstream event to its sink elements, which forward it up to
-        // the encoder. Sending on the appsink's static sink pad returned false
-        // (the event was not handled), so that path never produced a keyframe.
-        let build_event = || {
-            gstreamer_video::UpstreamForceKeyUnitEvent::builder()
-                .all_headers(true)
-                .build()
         };
-        if self.pipeline.send_event(build_event()) {
-            tracing::info!("forced encoder keyframe from viewer request");
-            return;
+        match wait {
+            None => send_keyframe_request(&self.pipeline),
+            Some(wait) => {
+                let pipeline = self.pipeline.downgrade();
+                let keyframes = self.keyframes.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(wait);
+                    if let Ok(mut state) = keyframes.lock() {
+                        state.deferred = false;
+                        state.last = Some(Instant::now());
+                    }
+                    if let Some(pipeline) = pipeline.upgrade() {
+                        send_keyframe_request(&pipeline);
+                    }
+                });
+            }
         }
-        if let Some(sink) = self.pipeline.by_name("sink")
-            && let Some(pad) = sink.static_pad("sink")
-            && pad.send_event(build_event())
-        {
-            tracing::info!("forced encoder keyframe from viewer request (pad fallback)");
-            return;
-        }
-        tracing::warn!("could not send force-key-unit event upstream");
     }
 
     /// Opens a V4L2 camera, or the first available one when `device` is None.

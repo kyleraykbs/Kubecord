@@ -1835,13 +1835,17 @@ impl SessionState {
                     .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
                 "RTCP video NACK/RTPFB received"
             ),
-            206 => tracing::debug!(
+            // Bandwidth estimates (15) come constantly; anything else here
+            // is a viewer's picture feedback and worth seeing in the log.
+            206 if fmt != 15 => info!(
                 fmt,
                 len = cleartext.len(),
                 media = cleartext
                     .get(8..12)
                     .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
-                "RTCP video PSFB received"
+                video_ssrc = self.video_ssrc,
+                rtx_ssrc = self.rtx_ssrc,
+                "picture feedback received"
             ),
             _ => {}
         }
@@ -1923,11 +1927,12 @@ impl SessionState {
                 // Logged as it happens, so a hitch someone saw can be matched
                 // to the second.
                 info!(requested, found, "video packets asked for again");
-                if found < requested {
-                    // Some are too old to resend: only a keyframe repairs
-                    // the picture now, so do not wait to be asked.
-                    let _ = self.events.send(VoiceEvent::ForceKeyframe);
-                }
+                // Resending the packets has not been seen to unfreeze a
+                // viewer on its own: they waited for the next scheduled
+                // keyframe, up to the whole keyframe interval. A keyframe
+                // now ends the freeze in a fraction of a second. The encoder
+                // limits how often these go out.
+                let _ = self.events.send(VoiceEvent::ForceKeyframe);
                 self.sent.nack_requested += requested as u64;
                 self.sent.nack_found += found as u64;
             } else {
