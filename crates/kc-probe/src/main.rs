@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
         "camera-timing" => {
             // Runs a camera through the real encode pipeline and reports how
             // evenly frames come out: `camera-timing [seconds] [name part]
-            // [cpu|auto] [kbit/s]`. Local only.
+            // [cpu|auto] [kbit/s] [auto|mjpeg|raw]`. Local only.
             let seconds: u64 = filtered.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
             let wanted = filtered.get(2).map(|name| name.to_lowercase());
             let Some(access) = kc_media::portal::request_cameras().await? else {
@@ -235,6 +235,11 @@ async fn main() -> Result<()> {
             if let Some(kbps) = filtered.get(4).and_then(|kbps| kbps.parse().ok()) {
                 settings.bitrate_kbps = kbps;
             }
+            settings.camera_format = match filtered.get(5).map(String::as_str) {
+                Some("mjpeg") => kc_media::video::CameraFormat::Mjpeg,
+                Some("raw") => kc_media::video::CameraFormat::Raw,
+                _ => kc_media::video::CameraFormat::Auto,
+            };
             println!(
                 "settings: {}x{} {} fps, {} kbit/s, {:?}",
                 settings.width,
@@ -253,6 +258,8 @@ async fn main() -> Result<()> {
             let mut last: Option<std::time::Instant> = None;
             let mut per_second = vec![0u32; seconds as usize + 1];
             let mut bytes_per_second = vec![0usize; seconds as usize + 1];
+            // Frames with real content; a repeated picture encodes to ~150 B.
+            let mut real_per_second = vec![0u32; seconds as usize + 1];
             let (mut frames, mut keys, mut max_key, mut max_gap) = (0u32, 0u32, 0usize, 0u128);
             while start.elapsed().as_secs() < seconds {
                 let Ok((at, size, key)) = rx.recv_timeout(std::time::Duration::from_millis(200))
@@ -264,6 +271,9 @@ async fn main() -> Result<()> {
                 if let Some(slot) = per_second.get_mut(second) {
                     *slot += 1;
                     bytes_per_second[second] += size;
+                    if size > 400 {
+                        real_per_second[second] += 1;
+                    }
                 }
                 if key {
                     keys += 1;
@@ -286,6 +296,7 @@ async fn main() -> Result<()> {
                 "frames {frames}, keyframes {keys}, largest keyframe {max_key} B, max gap {max_gap} ms"
             );
             println!("fps per second: {per_second:?}");
+            println!("changed frames per second: {real_per_second:?}");
             println!(
                 "kbit per second: {:?}",
                 bytes_per_second

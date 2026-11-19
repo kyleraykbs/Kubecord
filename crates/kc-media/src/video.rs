@@ -205,7 +205,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before the encoder.
         "capsfilter caps=video/x-raw ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0{leaky} \
-         ! videoconvert ! videoscale ! videorate \
+         ! videoconvert ! videoscale ! videorate skip-to-first=true \
          ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1 \
          ! {encoder} \
          ! h264parse config-interval=-1 \
@@ -285,9 +285,10 @@ fn camera_inputs(settings: &VideoSettings) -> Vec<String> {
     }
 }
 
-/// How long a camera format gets to produce its first frame before the next
-/// one is tried. A format the camera lacks usually fails at once.
-const CAMERA_FORMAT_WAIT: Duration = Duration::from_millis(2500);
+/// How long a format the camera accepted gets to produce its first frame. A
+/// format the camera lacks is refused at once, so silence means a camera
+/// that is slow to start (some take ten seconds), not a wrong format.
+const CAMERA_FORMAT_WAIT: Duration = Duration::from_secs(15);
 
 /// Why a camera format was not kept.
 enum StartFailure {
@@ -657,13 +658,12 @@ impl VideoSource {
         let inputs = camera_inputs(settings);
         let last_input = inputs.len() - 1;
         let mut last_error = None;
-        // A format the camera lacks is refused at once; one that starts but
-        // stays silent costs a wait. After two of those the camera is taken
-        // as it comes, so a camera that is not delivering cannot hold the
-        // start up for long.
+        // A format the camera lacks is refused at once; one it accepts but
+        // never delivers costs the whole wait. After that the camera is
+        // taken as it comes, so a dead camera holds the start up only once.
         let mut silent = 0;
         for (index, input) in inputs.iter().enumerate() {
-            if silent >= 2 && index < last_input {
+            if silent >= 1 && index < last_input {
                 continue;
             }
             let source = format!("pipewiresrc name=src do-timestamp=true ! {input}");
@@ -949,7 +949,7 @@ mod tests {
         let element = gst::parse::launch(
             "videotestsrc num-buffers=5 \
              ! video/x-raw,width=320,height=240,framerate=30/1 \
-             ! videoconvert ! videoscale ! videorate \
+             ! videoconvert ! videoscale ! videorate skip-to-first=true \
              ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 \
              ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=500 key-int-max=30 bframes=0 \
              ! h264parse config-interval=-1 \
