@@ -113,6 +113,8 @@ pub(crate) struct AppState {
     pub members_hidden: Cell<bool>,
     /// A made-up call shown by `KYLECORD_VIDEO_DEMO`.
     pub voice_demo: RefCell<Option<crate::voice::DemoCall>>,
+    /// The videos whose information panel is showing, and what it needs.
+    pub video_info: RefCell<crate::video_info::VideoInfo>,
     /// The ringing card for an incoming call, and its channel.
     pub incoming_call: RefCell<Option<(Snowflake, adw::Dialog)>>,
     /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
@@ -829,6 +831,7 @@ impl AppState {
             popouts: RefCell::new(HashMap::new()),
             members_hidden: Cell::new(false),
             voice_demo: RefCell::new(None),
+            video_info: RefCell::default(),
             incoming_call: RefCell::new(None),
             user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),

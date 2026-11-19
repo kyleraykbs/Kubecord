@@ -136,6 +136,12 @@ pub fn run() -> glib::ExitCode {
                 }
             });
         }
+        // Keeps the information panels on videos current.
+        let info_state = state.clone();
+        glib::timeout_add_seconds_local(1, move || {
+            info_state.refresh_video_info();
+            glib::ControlFlow::Continue
+        });
         if let Ok(mode) = std::env::var("KYLECORD_VIDEO_DEMO") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
@@ -1374,6 +1380,16 @@ impl AppState {
                         self.set_status(&format!("Discord closed the connection: {reason}"));
                     }
                 }
+            }
+            UiEvent::VideoUpload {
+                account,
+                stream,
+                upload,
+            } => {
+                self.video_info
+                    .borrow_mut()
+                    .uploads
+                    .insert((account, stream), upload);
             }
             UiEvent::RequiredAction { account, action } => {
                 if self.model.borrow().active == Some(account) {

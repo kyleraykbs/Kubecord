@@ -26,6 +26,7 @@ mod shell;
 mod sidebar;
 mod style;
 mod tile_grid;
+mod video_info;
 mod video_setup;
 mod voice;
 mod widgets;

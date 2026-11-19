@@ -957,6 +957,18 @@ impl VideoSource {
         }
     }
 
+    /// Where an adapting capture stands: the bitrate it aims for (when
+    /// the bitrate adapts) and its framerate (when that does).
+    pub fn adapted(&self) -> (Option<u32>, Option<u32>) {
+        match self.adaptation.lock().ok().as_deref() {
+            Some(Some(adaptation)) => (
+                adaptation.bitrate.then(|| adaptation.controller.current()),
+                adaptation.fps.map(|_| adaptation.current_fps),
+            ),
+            _ => (None, None),
+        }
+    }
+
     /// How the network treated the video lately (see
     /// [`BitrateController::report`]); changes the encoder's bitrate and
     /// the framerate when that calls for it. Does nothing unless the

@@ -501,3 +501,10 @@ dispatch; contains account data).
 - Framerate can be Automatic (prefs `fps_auto`, `fps_auto_min`, `fps_auto_max`; `VideoSettings.fps` is then the top and `fps_floor` the bottom). It follows the same controller: `BitrateController::level()` (1 at the top of the bitrate range, 0 at the floor) → `framerate_for(level, min, max)`, the highest of 5/10/15/20/24/30/45/60 (or an end of the range) not above that share. With a fixed bitrate the controller still runs, only to steer the framerate.
 - A live framerate change sets new caps on the `name=rate` capsfilter (both pipelines); the encoder restarts its stream with a keyframe, so changes are at least 10 s apart (`FRAMERATE_CHANGE_SPACING`). `VideoSource.frame_ms` follows, so frame durations stay right. Tested on x264enc and vah264enc. `VideoSource::adapt(&settings)` replaces `adapt_bitrate`.
 - UI: Framerate and Bitrate each list Automatic; the Lowest/Highest rows show only on Automatic. Not yet seen on screen (below the fold of the dev screenshot) or in a real call.
+
+## Stream information panel (2026-11-19)
+
+- An (i) button in a video tile's controls (hover on grid tiles, always on the enlarged one, hover in a pop-out window) toggles a panel over the picture: size and shown fps, bitrate, frames in/shown, full frames and how long since the last. For your own camera or stream it adds upload loss and where adaptation stands. Not on the small tiles under an enlarged one.
+- `video_info.rs`: `VideoInfo` (which keys show, weak refs to the labels, last sample per key, latest `VideoUpload` per own camera/stream) and a pure `describe`. One 1 s timer (`refresh_video_info`, started in app.rs) measures every shown video; tiles are redrawn often, so labels register themselves weakly and pick up the last text.
+- Sources: `VideoFeed::stats()` (frames, bytes, keyframes, frames since the last keyframe), decoder's decoded count, the paintable's intrinsic size; `UiEvent::VideoUpload` forwarded from `VoiceControl::VideoNetwork` with `VideoSource::adapted()`.
+- `KYLECORD_VIDEO_DEMO=info | info-grid` shows it offline. The pop-out window's button was not captured.

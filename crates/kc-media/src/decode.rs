@@ -32,13 +32,32 @@ struct Feed {
 pub struct VideoFeed {
     feed: Mutex<Feed>,
     pushed: AtomicU64,
+    bytes: AtomicU64,
+    keyframes: AtomicU64,
+    /// The value of `pushed` at the latest keyframe.
+    keyframe_at: AtomicU64,
+}
+
+/// What has gone into a feed so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeedStats {
+    pub frames: u64,
+    pub bytes: u64,
+    pub keyframes: u64,
+    /// Frames since the latest keyframe.
+    pub since_keyframe: u64,
 }
 
 impl VideoFeed {
     /// Takes one complete Annex-B frame. `keyframe` marks a frame that
     /// decodes without the ones before it.
     pub fn push(&self, frame: Vec<u8>, keyframe: bool) {
-        self.pushed.fetch_add(1, Ordering::Relaxed);
+        let count = self.pushed.fetch_add(1, Ordering::Relaxed) + 1;
+        self.bytes.fetch_add(frame.len() as u64, Ordering::Relaxed);
+        if keyframe {
+            self.keyframes.fetch_add(1, Ordering::Relaxed);
+            self.keyframe_at.store(count, Ordering::Relaxed);
+        }
         let Ok(mut feed) = self.feed.lock() else {
             return;
         };
@@ -61,6 +80,16 @@ impl VideoFeed {
     /// Frames pushed so far.
     pub fn pushed(&self) -> u64 {
         self.pushed.load(Ordering::Relaxed)
+    }
+
+    pub fn stats(&self) -> FeedStats {
+        let frames = self.pushed.load(Ordering::Relaxed);
+        FeedStats {
+            frames,
+            bytes: self.bytes.load(Ordering::Relaxed),
+            keyframes: self.keyframes.load(Ordering::Relaxed),
+            since_keyframe: frames.saturating_sub(self.keyframe_at.load(Ordering::Relaxed)),
+        }
     }
 
     fn attach(&self, decoder: gst_app::AppSrc) {

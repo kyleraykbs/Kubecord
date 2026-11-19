@@ -418,6 +418,20 @@ const CSS: &str = r#"
     background-color: black;
 }
 
+.kc-popout:hover .kc-tile-controls {
+    opacity: 1;
+}
+
+/* What a video is made of, over its picture. */
+.kc-video-info {
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-family: monospace;
+    font-size: 0.8em;
+    color: white;
+    background-color: alpha(black, 0.72);
+}
+
 /* Profile card: an opaque surface so the ring around the avatar, in the
    same colour, cuts cleanly into the banner. */
 .kc-profile-card {

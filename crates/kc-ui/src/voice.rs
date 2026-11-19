@@ -715,6 +715,15 @@ impl AppState {
             button.set_tooltip_text(Some(tooltip));
             button
         };
+        if has_video && role != Role::Mini {
+            let info = control("dialog-information-symbolic", "Stream information");
+            let app = self.clone();
+            info.connect_clicked(move |_| {
+                app.video_info.borrow_mut().toggle(key);
+                app.refresh_voice_view();
+            });
+            controls.append(&info);
+        }
         if has_video {
             let pop = control("window-new-symbolic", "Pop out into its own window");
             let app = self.clone();
@@ -738,6 +747,17 @@ impl AppState {
         }
         if controls.first_child().is_some() {
             tile.add_overlay(&controls);
+        }
+
+        // -- information about the picture, when asked for ----------------
+        if has_video && role != Role::Mini && self.video_info.borrow().shown(key) {
+            let panel = self.video_info_label(key);
+            panel.set_halign(gtk::Align::Start);
+            panel.set_valign(gtk::Align::Start);
+            panel.set_margin_start(6);
+            // Clear of the controls, which share this corner on a tile.
+            panel.set_margin_top(if stage { 6 } else { 40 });
+            tile.add_overlay(&panel);
         }
 
         // -- hide or show the others, under the enlarged tile -------------
@@ -820,12 +840,39 @@ impl AppState {
         };
         let picture = gtk::Picture::for_paintable(&paintable);
         picture.set_content_fit(gtk::ContentFit::Contain);
-        picture.add_css_class("kc-popout");
+        // The information button shows while the pointer is over the
+        // window; its panel stays until it is clicked again.
+        let view = gtk::Overlay::new();
+        view.add_css_class("kc-popout");
+        view.set_child(Some(&picture));
+        let panel = self.video_info_label(key);
+        panel.set_halign(gtk::Align::Start);
+        panel.set_valign(gtk::Align::Start);
+        panel.set_margin_start(6);
+        panel.set_margin_top(40);
+        panel.set_visible(self.video_info.borrow().shown(key));
+        view.add_overlay(&panel);
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        controls.add_css_class("kc-tile-controls");
+        controls.set_halign(gtk::Align::Start);
+        controls.set_valign(gtk::Align::Start);
+        controls.set_margin_start(6);
+        controls.set_margin_top(6);
+        let info = gtk::Button::from_icon_name("dialog-information-symbolic");
+        info.set_tooltip_text(Some("Stream information"));
+        let app = self.clone();
+        let shown = panel.clone();
+        info.connect_clicked(move |_| {
+            let on = app.video_info.borrow_mut().toggle(key);
+            shown.set_visible(on);
+        });
+        controls.append(&info);
+        view.add_overlay(&controls);
         let window = gtk::Window::builder()
             .title(title)
             .default_width(960)
             .default_height(540)
-            .child(&picture)
+            .child(&view)
             .build();
         window.set_application(self.window.application().as_ref());
 
@@ -906,8 +953,9 @@ impl AppState {
     /// Development aid (`KYLECORD_VIDEO_DEMO`): a made-up call with
     /// locally generated video, to check the layout without a real one.
     /// The value picks the state: `grid`, `focus`, `hidden` (focused, with
-    /// the others hidden), `popout`, or `sequence` (watch a stream,
-    /// enlarge a camera, then put it back).
+    /// the others hidden), `popout`, `info` and `info-grid` (information
+    /// panels showing), or `sequence` (watch a stream, enlarge a camera,
+    /// then put it back).
     pub(crate) fn show_video_demo(self: &Rc<Self>, mode: &str) {
         let account = self.model.borrow().active.unwrap_or(0);
         let person = |id: u64, name: &str, streaming: bool| Participant {
@@ -960,6 +1008,18 @@ impl AppState {
         let camera = (Snowflake::new(3), false);
         match mode {
             "focus" => self.focused_video.set(Some(stream)),
+            // Information panels: on the enlarged stream, or on grid tiles.
+            "info" => {
+                self.focused_video.set(Some(stream));
+                self.video_info
+                    .borrow_mut()
+                    .toggle((account, stream.0, true));
+            }
+            "info-grid" => {
+                let mut info = self.video_info.borrow_mut();
+                info.toggle((account, stream.0, true));
+                info.toggle((account, camera.0, false));
+            }
             "hidden" => {
                 self.focused_video.set(Some(stream));
                 self.members_hidden.set(true);

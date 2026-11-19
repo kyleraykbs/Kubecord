@@ -63,6 +63,11 @@ impl LiveVideo {
         }
     }
 
+    /// What has arrived for this video, and how many frames were shown.
+    pub(crate) fn stats(&self) -> (kc_media::decode::FeedStats, u64) {
+        (self.feed.stats(), self.decoder.decoded())
+    }
+
     /// Frames received and frames decoded so far.
     pub(crate) fn progress(&self) -> (u64, u64) {
         (self.feed.pushed(), self.decoder.decoded())

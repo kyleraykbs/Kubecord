@@ -63,6 +63,16 @@ impl ConnState {
     }
 }
 
+/// One report of how video we send fared: packets sent and asked for
+/// again, and where an adapting capture stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VideoUpload {
+    pub sent: u32,
+    pub lost: u32,
+    pub target_kbps: Option<u32>,
+    pub fps: Option<u32>,
+}
+
 /// What the voice control bar shows for the active voice connection.
 #[derive(Clone, Debug)]
 pub struct VoiceUiState {
@@ -369,6 +379,13 @@ pub enum UiEvent {
         code: Option<u16>,
         reason: String,
         fatal: bool,
+    },
+    /// How our own camera (or, with `stream`, our stream) fared on the way
+    /// up over the last couple of seconds.
+    VideoUpload {
+        account: AccountId,
+        stream: bool,
+        upload: VideoUpload,
     },
     /// Discord wants the account verified before it does more (`None`
     /// once it is satisfied).
@@ -1213,6 +1230,17 @@ async fn handle_voice_control(
             if let Some(source) = source {
                 source.network_report(sent, lost, remb_kbps);
             }
+            let (target_kbps, fps) = source.map(VideoSource::adapted).unwrap_or_default();
+            let _ = ui.try_send(UiEvent::VideoUpload {
+                account,
+                stream,
+                upload: VideoUpload {
+                    sent,
+                    lost,
+                    target_kbps,
+                    fps,
+                },
+            });
         }
         VoiceControl::ForceCameraKeyframe { generation } => {
             if generation == voice.generation
