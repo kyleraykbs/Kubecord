@@ -74,8 +74,10 @@ pub struct VideoSource {
     /// The longest the stream goes without a keyframe, in milliseconds
     /// (zero: no limit). The capture thread asks for one when it passes.
     keyframe_gap_ms: Arc<AtomicU32>,
-    /// Present when the bitrate adapts to the network.
-    bitrate: Mutex<Option<BitrateController>>,
+    /// Present when the bitrate or framerate adapts to the network.
+    adaptation: Mutex<Option<Adaptation>>,
+    /// The time each frame stands for, which follows the framerate.
+    frame_ms: Arc<AtomicU32>,
 }
 
 /// The least time between forced keyframes. Viewers repeat their requests
@@ -250,6 +252,52 @@ pub struct VideoSettings {
     pub keyframe_gap_secs: u32,
     /// Send every video packet a second time, 20 ms later.
     pub send_twice: bool,
+    /// The least an adapting bitrate goes down to, in kbit/s. Zero: three
+    /// tenths of `bitrate_kbps`.
+    pub bitrate_floor_kbps: u32,
+    /// Keep an adapting bitrate under the receiver's bandwidth estimate.
+    /// Off when the top of the range was set by hand: Discord's estimate
+    /// for a stream sits near 4 Mbit/s whatever the connection carries.
+    pub bitrate_follows_estimate: bool,
+    /// Let the framerate follow the network too, between this and `fps`.
+    /// Zero (or `fps` and above) keeps the framerate fixed.
+    pub fps_floor: u32,
+}
+
+/// Framerates an adapting capture moves between, besides the ends of its
+/// own range.
+const FRAMERATE_STEPS: [u32; 8] = [5, 10, 15, 20, 24, 30, 45, 60];
+/// The least time between changes of framerate: each one restarts the
+/// encoder's stream with a keyframe.
+const FRAMERATE_CHANGE_SPACING: Duration = Duration::from_secs(10);
+
+/// The framerate for a `level` of the connection (1 good, 0 at its worst)
+/// within `min..=max`: the highest step not above that share of the range.
+pub fn framerate_for(level: f64, min: u32, max: u32) -> u32 {
+    if min >= max {
+        return max;
+    }
+    let wanted = f64::from(min) + level.clamp(0.0, 1.0) * f64::from(max - min);
+    FRAMERATE_STEPS
+        .iter()
+        .copied()
+        .chain([min, max])
+        .filter(|step| (min..=max).contains(step) && f64::from(*step) <= wanted + 0.5)
+        .max()
+        .unwrap_or(min)
+}
+
+/// What a running capture adapts to the network, and where it stands.
+struct Adaptation {
+    controller: BitrateController,
+    /// The encoder's bitrate follows the controller. (With a fixed bitrate
+    /// the controller still runs, to steer the framerate.)
+    bitrate: bool,
+    follows_estimate: bool,
+    /// The framerate's range, when it adapts.
+    fps: Option<(u32, u32)>,
+    current_fps: u32,
+    fps_changed: Option<Instant>,
 }
 
 /// Follows how the network treats the video and picks a bitrate for it:
@@ -273,9 +321,19 @@ impl BitrateController {
     const CLEAN_REPORTS: usize = 5;
 
     pub fn new(target_kbps: u32) -> Self {
+        Self::with_floor(target_kbps, 0)
+    }
+
+    /// Adapts between `floor_kbps` and `target_kbps`; a floor of zero is
+    /// three tenths of the target.
+    pub fn with_floor(target_kbps: u32, floor_kbps: u32) -> Self {
+        let floor = match floor_kbps {
+            0 => (target_kbps * 3 / 10).max(300),
+            floor => floor,
+        };
         Self {
             target: target_kbps,
-            floor: (target_kbps * 3 / 10).max(300).min(target_kbps),
+            floor: floor.min(target_kbps),
             current: target_kbps,
             recent: Default::default(),
         }
@@ -283,6 +341,14 @@ impl BitrateController {
 
     pub fn current(&self) -> u32 {
         self.current
+    }
+
+    /// Where the bitrate stands in its range: 1 at the top, 0 at the floor.
+    pub fn level(&self) -> f64 {
+        if self.target <= self.floor {
+            return 1.0;
+        }
+        f64::from(self.current - self.floor) / f64::from(self.target - self.floor)
     }
 
     /// Takes one report; returns the new bitrate when it changes.
@@ -363,6 +429,9 @@ impl Default for VideoSettings {
             loss_keyframe_ms: 1000,
             keyframe_gap_secs: 0,
             send_twice: false,
+            bitrate_floor_kbps: 0,
+            bitrate_follows_estimate: true,
+            fps_floor: 0,
         }
     }
 }
@@ -441,7 +510,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         // the chroma conversion before the encoder.
         "capsfilter caps=video/x-raw ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0{leaky} \
          ! videoconvert ! videoscale ! videorate skip-to-first=true \
-         ! capsfilter caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1,colorimetry={colorimetry} \
+         ! capsfilter name=rate caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1,colorimetry={colorimetry} \
          ! {encoder} \
          ! h264parse config-interval=-1 \
          ! capsfilter caps=video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au \
@@ -549,7 +618,7 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
     format!(
         "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
          ! videorate skip-to-first=true \
-         ! capsfilter caps=video/x-raw,framerate={fps}/1 \
+         ! capsfilter name=rate caps=video/x-raw,framerate={fps}/1 \
          ! queue max-size-buffers=8{leaky} \
          ! videoconvert \
          ! videoscale \
@@ -698,6 +767,8 @@ impl VideoSource {
         let keyframe_gap_ms = Arc::new(AtomicU32::new(0));
         let (thread_keyframes, thread_gap) = (keyframes.clone(), keyframe_gap_ms.clone());
         let thread_pipeline = pipeline.downgrade();
+        let frame_ms = Arc::new(AtomicU32::new(frame_ms));
+        let thread_frame_ms = frame_ms.clone();
         let thread = std::thread::spawn(move || {
             let mut last_arrival: Option<Instant> = None;
             // When a keyframe last came out of the encoder, or was last
@@ -753,6 +824,7 @@ impl VideoSource {
                 };
                 if !map.as_slice().is_empty() {
                     let now = Instant::now();
+                    let frame_ms = thread_frame_ms.load(Ordering::Relaxed);
                     if let Some(last) = last_arrival {
                         let gap = now.saturating_duration_since(last);
                         if gap > Duration::from_millis(frame_ms as u64 * 2) {
@@ -801,7 +873,8 @@ impl VideoSource {
             _camera: None,
             keyframes,
             keyframe_gap_ms,
-            bitrate: Mutex::new(None),
+            adaptation: Mutex::new(None),
+            frame_ms,
         })
     }
 
@@ -858,35 +931,96 @@ impl VideoSource {
         );
     }
 
-    /// Lets the bitrate follow the network, never above `target_kbps`.
-    pub fn adapt_bitrate(&self, target_kbps: u32) {
-        if let Ok(mut bitrate) = self.bitrate.lock() {
-            *bitrate = Some(BitrateController::new(target_kbps));
+    /// Lets the capture follow the network as `settings` ask: the bitrate
+    /// (when it is automatic), the framerate (when it has a range), both
+    /// or neither.
+    pub fn adapt(&self, settings: &VideoSettings) {
+        let fps = (settings.fps_floor > 0 && settings.fps_floor < settings.fps)
+            .then_some((settings.fps_floor, settings.fps));
+        let adaptation = (settings.adaptive_bitrate || fps.is_some()).then(|| Adaptation {
+            controller: BitrateController::with_floor(
+                settings.bitrate_kbps,
+                if settings.adaptive_bitrate {
+                    settings.bitrate_floor_kbps
+                } else {
+                    0
+                },
+            ),
+            bitrate: settings.adaptive_bitrate,
+            follows_estimate: settings.bitrate_follows_estimate,
+            fps,
+            current_fps: settings.fps,
+            fps_changed: None,
+        });
+        if let Ok(mut slot) = self.adaptation.lock() {
+            *slot = adaptation;
         }
     }
 
     /// How the network treated the video lately (see
-    /// [`BitrateController::report`]); changes the encoder's bitrate when
-    /// that calls for it. Does nothing unless the bitrate adapts.
-    pub fn network_report(&self, sent: u32, lost: u32, ceiling_kbps: u32) {
-        let Ok(mut bitrate) = self.bitrate.lock() else {
+    /// [`BitrateController::report`]); changes the encoder's bitrate and
+    /// the framerate when that calls for it. Does nothing unless the
+    /// capture adapts.
+    pub fn network_report(&self, sent: u32, lost: u32, estimate_kbps: u32) {
+        let Ok(mut slot) = self.adaptation.lock() else {
             return;
         };
-        let Some(controller) = bitrate.as_mut() else {
+        let Some(adaptation) = slot.as_mut() else {
             return;
         };
-        let before = controller.current();
-        if let Some(kbps) = controller.report(sent, lost, ceiling_kbps) {
+        let ceiling = if adaptation.follows_estimate {
+            estimate_kbps
+        } else {
+            0
+        };
+        let before = adaptation.controller.current();
+        if let Some(kbps) = adaptation.controller.report(sent, lost, ceiling)
+            && adaptation.bitrate
+        {
             tracing::info!(
                 from_kbps = before,
                 to_kbps = kbps,
                 sent,
                 lost,
-                ceiling_kbps,
+                ceiling_kbps = ceiling,
                 "video bitrate adapted"
             );
             self.set_bitrate(kbps);
         }
+        let Some((min, max)) = adaptation.fps else {
+            return;
+        };
+        let wanted = framerate_for(adaptation.controller.level(), min, max);
+        if wanted != adaptation.current_fps
+            && adaptation
+                .fps_changed
+                .is_none_or(|changed| changed.elapsed() >= FRAMERATE_CHANGE_SPACING)
+            && self.set_framerate(wanted)
+        {
+            tracing::info!(
+                from_fps = adaptation.current_fps,
+                to_fps = wanted,
+                "video framerate adapted"
+            );
+            adaptation.current_fps = wanted;
+            adaptation.fps_changed = Some(Instant::now());
+        }
+    }
+
+    /// Changes the framerate while the capture runs: the frame-rate limit
+    /// ahead of the encoder is renegotiated, which makes the encoder start
+    /// afresh with a keyframe.
+    fn set_framerate(&self, fps: u32) -> bool {
+        let Some(limit) = self.pipeline.by_name("rate") else {
+            return false;
+        };
+        let mut caps = limit.property::<gst::Caps>("caps");
+        for structure in caps.make_mut().iter_mut() {
+            structure.set("framerate", gst::Fraction::new(fps as i32, 1));
+        }
+        limit.set_property("caps", &caps);
+        self.frame_ms.store(1000 / fps.max(1), Ordering::Relaxed);
+        true
     }
 
     /// Changes the encoder's bitrate while it runs.
@@ -1410,6 +1544,98 @@ mod tests {
         // A screen is sent in limited range, which is what decoders assume.
         assert_eq!(encoded, "I420 1280x720 colorimetry bt709");
         println!("captured: {captured}\nencoded: {encoded}");
+    }
+
+    #[test]
+    fn the_framerate_follows_the_level_in_steps_within_its_range() {
+        assert_eq!(framerate_for(1.0, 15, 30), 30);
+        assert_eq!(framerate_for(0.0, 15, 30), 15);
+        // Halfway between 15 and 30 is 22.5: the step below it.
+        assert_eq!(framerate_for(0.5, 15, 30), 20);
+        assert_eq!(framerate_for(0.7, 15, 30), 24);
+        // The ends of the range count even when they are not steps.
+        assert_eq!(framerate_for(0.0, 12, 50), 12);
+        assert_eq!(framerate_for(1.0, 12, 50), 50);
+        // No range, no change.
+        assert_eq!(framerate_for(0.2, 30, 30), 30);
+    }
+
+    #[test]
+    fn a_bitrate_range_set_by_hand_is_kept_to() {
+        let mut controller = BitrateController::with_floor(6000, 2000);
+        assert_eq!(controller.level(), 1.0);
+        for _ in 0..30 {
+            controller.report(1000, 100, 0);
+        }
+        assert_eq!(controller.current(), 2000);
+        assert_eq!(controller.level(), 0.0);
+        // A floor above the top is the top.
+        assert_eq!(BitrateController::with_floor(1000, 5000).current(), 1000);
+    }
+
+    /// The framerate of a running capture drops and comes back as the
+    /// network reports go, and frames keep coming throughout.
+    #[test]
+    fn the_framerate_adapts_while_encoding() {
+        gst::init().unwrap();
+        framerate_adapts(false);
+        // The hardware encoder too, where there is one.
+        if gst::ElementFactory::find("vah264enc").is_some() {
+            framerate_adapts(true);
+        }
+    }
+
+    fn framerate_adapts(hardware: bool) {
+        let settings = VideoSettings {
+            encoder: EncoderPreference::Cpu,
+            fps: 30,
+            fps_floor: 10,
+            adaptive_bitrate: false,
+            ..VideoSettings::default()
+        };
+        let description = screen_description(&settings, hardware).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true name=src",
+        );
+        let frames = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let seen = frames.clone();
+        let source = VideoSource::start_pipeline_with(
+            &description,
+            33,
+            move |frame: EncodedFrame| seen.lock().unwrap().push(frame.duration_ms),
+            |_| Ok(()),
+        )
+        .unwrap();
+        source.adapt(&settings);
+        let count = |seconds: u64| {
+            std::thread::sleep(Duration::from_millis(600));
+            frames.lock().unwrap().clear();
+            std::thread::sleep(Duration::from_secs(seconds));
+            let frames = frames.lock().unwrap();
+            (
+                frames.len() as u64 / seconds,
+                frames.last().copied().unwrap_or(0),
+            )
+        };
+        let (full, full_ms) = count(2);
+        // Heavy loss: the first report takes it one step down, to 24. More
+        // reports change nothing yet: changes are spaced out, since each
+        // one costs a keyframe.
+        for _ in 0..30 {
+            source.network_report(1000, 100, 0);
+        }
+        let (low, low_ms) = count(2);
+        drop(source);
+        assert!(
+            (27..=32).contains(&full),
+            "expected about 30 fps, got {full} (hardware: {hardware})"
+        );
+        assert_eq!(full_ms, 33);
+        assert!(
+            (22..=26).contains(&low),
+            "expected about 24 fps, got {low} (hardware: {hardware})"
+        );
+        assert_eq!(low_ms, 41);
     }
 
     /// The encoder's bitrate can be changed while it runs.

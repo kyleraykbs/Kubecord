@@ -1266,9 +1266,7 @@ async fn handle_voice_control(
                     let share_audio = voice.stream_audio.clone();
                     if let Some(connection) = &mut voice.stream_connection {
                         tracing::info!("stream source ready");
-                        if voice.stream_settings.adaptive_bitrate {
-                            source.adapt_bitrate(voice.stream_settings.bitrate_kbps);
-                        }
+                        source.adapt(&voice.stream_settings);
                         source.set_keyframe_gap(Duration::from_secs(u64::from(
                             voice.stream_settings.keyframe_gap_secs,
                         )));
@@ -2051,7 +2049,7 @@ async fn start_camera(
     handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
     handle.set_redundancy(settings.send_twice);
     handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(settings.loss_keyframe_ms)));
-    let adapt = settings.adaptive_bitrate.then_some(settings.bitrate_kbps);
+    let adaptation = settings.clone();
     let keyframe_gap = Duration::from_secs(u64::from(settings.keyframe_gap_secs));
     // Opening a camera can take a few seconds while formats are tried; keep
     // it off the account loop.
@@ -2064,9 +2062,7 @@ async fn start_camera(
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    if let Some(target) = adapt {
-        source.adapt_bitrate(target);
-    }
+    source.adapt(&adaptation);
     source.set_keyframe_gap(keyframe_gap);
     connection.camera = Some(source);
     connection.handle.set_video(true);

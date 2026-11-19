@@ -22,9 +22,9 @@ use kc_media::video::{
 use crate::live::LiveVideo;
 use crate::session::{AccountId, CameraPurpose, Command};
 use crate::settings::{
-    BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_GAPS,
-    KEYFRAME_INTERVALS, LOSS_KEYFRAME_SPACINGS_MS, RESOLUTIONS, RETRANSMIT_WINDOWS_MS,
-    SHARE_SOURCES, STREAM_DELAYS,
+    BITRATE_FLOORS, BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATE_FLOORS,
+    FRAMERATES, KEYFRAME_GAPS, KEYFRAME_INTERVALS, LOSS_KEYFRAME_SPACINGS_MS, RESOLUTIONS,
+    RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
 };
 use crate::shell::AppState;
 
@@ -277,11 +277,52 @@ pub(crate) fn quality_controls(
 ) -> QualityControls {
     let resolution_names: Vec<&str> = RESOLUTIONS.iter().map(|(_, _, name)| *name).collect();
     let resolution = gtk::DropDown::from_strings(&resolution_names);
-    let framerate_names: Vec<String> = FRAMERATES.iter().map(|fps| format!("{fps} fps")).collect();
+    let fps_names: Vec<String> = FRAMERATES.iter().map(|fps| format!("{fps} fps")).collect();
+    let mut framerate_names = vec!["Automatic".to_owned()];
+    framerate_names.extend(fps_names.iter().cloned());
     let framerate = string_dropdown(&framerate_names);
+    // The range an automatic framerate moves in.
+    let fps_floor_names: Vec<String> = FRAMERATE_FLOORS
+        .iter()
+        .map(|fps| format!("{fps} fps"))
+        .collect();
+    let fps_min = string_dropdown(&fps_floor_names);
+    let fps_max = string_dropdown(&fps_names);
     let mut bitrate_names = vec!["Automatic".to_owned()];
     bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate = string_dropdown(&bitrate_names);
+    // The range an automatic bitrate moves in; either end can be left to
+    // kylecord.
+    let mut floor_names = vec!["Automatic".to_owned()];
+    floor_names.extend(BITRATE_FLOORS.iter().map(|kbps| format!("{kbps} kbps")));
+    let bitrate_min = string_dropdown(&floor_names);
+    let bitrate_max = string_dropdown(&bitrate_names);
+    let range_row = |title: &str, widget: &gtk::DropDown, guide: &str| {
+        let row = setting_row(title, widget);
+        row.set_subtitle(guide);
+        row.set_subtitle_lines(0);
+        row
+    };
+    let fps_min_row = range_row(
+        "Lowest Framerate",
+        &fps_min,
+        "How far the framerate may drop while packets are being lost. Fewer frames leave more of the bitrate for each one.",
+    );
+    let fps_max_row = range_row(
+        "Highest Framerate",
+        &fps_max,
+        "The framerate used while the connection is clean.",
+    );
+    let bitrate_min_row = range_row(
+        "Lowest Bitrate",
+        &bitrate_min,
+        "How far the bitrate may drop while packets are being lost. Automatic is three tenths of the highest.",
+    );
+    let bitrate_max_row = range_row(
+        "Highest Bitrate",
+        &bitrate_max,
+        "The bitrate used while the connection is clean. Automatic works it out from the resolution and framerate and stays under Discord's own estimate (about 4 Mbit/s for a stream); a value set here is used even above that estimate.",
+    );
     let delay = gtk::DropDown::from_strings(&["None", "0.5 s", "1 s", "2 s", "3 s"]);
     let cpu_encoder = gtk::Switch::new();
     let camera_format = gtk::DropDown::from_strings(&CAMERA_FORMATS);
@@ -348,6 +389,10 @@ pub(crate) fn quality_controls(
         let resolution = resolution.clone();
         let framerate = framerate.clone();
         let bitrate = bitrate.clone();
+        let (fps_min, fps_max) = (fps_min.clone(), fps_max.clone());
+        let (bitrate_min, bitrate_max) = (bitrate_min.clone(), bitrate_max.clone());
+        let (fps_min_row, fps_max_row) = (fps_min_row.clone(), fps_max_row.clone());
+        let (bitrate_min_row, bitrate_max_row) = (bitrate_min_row.clone(), bitrate_max_row.clone());
         let delay = delay.clone();
         let cpu_encoder = cpu_encoder.clone();
         let camera_format = camera_format.clone();
@@ -365,14 +410,28 @@ pub(crate) fn quality_controls(
                     .position(|(width, height, _)| *width == prefs.width && *height == prefs.height)
                     .unwrap_or(1) as u32,
             );
-            framerate.set_selected(position(&FRAMERATES, &prefs.fps, 1));
-            bitrate.set_selected(
-                prefs
-                    .bitrate_kbps
-                    .and_then(|kbps| BITRATES.iter().position(|value| *value == kbps))
+            framerate.set_selected(if prefs.fps_auto {
+                0
+            } else {
+                position(&FRAMERATES, &prefs.fps, 1) + 1
+            });
+            fps_min.set_selected(position(&FRAMERATE_FLOORS, &prefs.fps_auto_min, 2));
+            fps_max.set_selected(position(&FRAMERATES, &prefs.fps_auto_max, 1));
+            // 0 is Automatic; the fixed values follow.
+            let listed = |values: &[u32], value: Option<u32>| {
+                value
+                    .and_then(|value| values.iter().position(|candidate| *candidate == value))
                     .map(|index| index + 1)
-                    .unwrap_or(0) as u32,
-            );
+                    .unwrap_or(0) as u32
+            };
+            bitrate.set_selected(listed(&BITRATES, prefs.bitrate_kbps));
+            bitrate_min.set_selected(listed(&BITRATE_FLOORS, prefs.auto_bitrate_min));
+            bitrate_max.set_selected(listed(&BITRATES, prefs.auto_bitrate_max));
+            // The ranges only mean something on Automatic.
+            fps_min_row.set_visible(prefs.fps_auto);
+            fps_max_row.set_visible(prefs.fps_auto);
+            bitrate_min_row.set_visible(prefs.bitrate_kbps.is_none());
+            bitrate_max_row.set_visible(prefs.bitrate_kbps.is_none());
             delay.set_selected(position(&STREAM_DELAYS, &prefs.stream_delay_ms, 0));
             cpu_encoder.set_active(prefs.cpu_encoder);
             camera_format.set_selected(prefs.camera_format.min(2));
@@ -404,18 +463,59 @@ pub(crate) fn quality_controls(
         }
     });
     let target = apply.clone();
+    let (low_row, high_row) = (fps_min_row.clone(), fps_max_row.clone());
     framerate.connect_selected_notify(move |dropdown| {
-        if let Some(fps) = FRAMERATES.get(dropdown.selected() as usize).copied() {
-            target(&move |prefs| prefs.fps = fps);
+        let fixed = match dropdown.selected() as usize {
+            0 => None,
+            index => FRAMERATES.get(index - 1).copied(),
+        };
+        low_row.set_visible(fixed.is_none());
+        high_row.set_visible(fixed.is_none());
+        target(&move |prefs| {
+            prefs.fps_auto = fixed.is_none();
+            if let Some(fps) = fixed {
+                prefs.fps = fps;
+            }
+        });
+    });
+    let target = apply.clone();
+    fps_min.connect_selected_notify(move |dropdown| {
+        if let Some(fps) = FRAMERATE_FLOORS.get(dropdown.selected() as usize).copied() {
+            target(&move |prefs| prefs.fps_auto_min = fps);
         }
     });
     let target = apply.clone();
+    fps_max.connect_selected_notify(move |dropdown| {
+        if let Some(fps) = FRAMERATES.get(dropdown.selected() as usize).copied() {
+            target(&move |prefs| prefs.fps_auto_max = fps);
+        }
+    });
+    let target = apply.clone();
+    let (low_row, high_row) = (bitrate_min_row.clone(), bitrate_max_row.clone());
     bitrate.connect_selected_notify(move |dropdown| {
         let kbps = match dropdown.selected() as usize {
             0 => None,
             index => BITRATES.get(index - 1).copied(),
         };
+        low_row.set_visible(kbps.is_none());
+        high_row.set_visible(kbps.is_none());
         target(&move |prefs| prefs.bitrate_kbps = kbps);
+    });
+    let target = apply.clone();
+    bitrate_min.connect_selected_notify(move |dropdown| {
+        let kbps = match dropdown.selected() as usize {
+            0 => None,
+            index => BITRATE_FLOORS.get(index - 1).copied(),
+        };
+        target(&move |prefs| prefs.auto_bitrate_min = kbps);
+    });
+    let target = apply.clone();
+    bitrate_max.connect_selected_notify(move |dropdown| {
+        let kbps = match dropdown.selected() as usize {
+            0 => None,
+            index => BITRATES.get(index - 1).copied(),
+        };
+        target(&move |prefs| prefs.auto_bitrate_max = kbps);
     });
     let target = apply.clone();
     delay.connect_selected_notify(move |dropdown| {
@@ -499,13 +599,17 @@ pub(crate) fn quality_controls(
         guided(
             "Framerate",
             &framerate,
-            "30 fps suits calls and most screens. 60 fps is for games and fast motion; it doubles the upload and the encoding work.",
+            "30 fps suits calls and most screens. 60 fps is for games and fast motion; it doubles the upload and the encoding work. Automatic drops the framerate while packets are being lost and brings it back when the connection is clean, within the range below.",
         ),
+        fps_min_row,
+        fps_max_row,
         guided(
             "Bitrate",
             &bitrate,
-            "Automatic aims for about 2 Mbit/s at 720p30 and 4.4 at 1080p30, backs off while packets are being lost, and climbs back when the connection is clean. A fixed value is kept to whatever happens. Discord carries about 4 Mbit/s per stream.",
+            "Automatic backs off while packets are being lost and climbs back when the connection is clean, within the range below. A fixed value is kept to whatever happens.",
         ),
+        bitrate_min_row,
+        bitrate_max_row,
     ];
     if stream {
         rows.push(guided(

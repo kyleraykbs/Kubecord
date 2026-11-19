@@ -13,6 +13,12 @@ pub const RESOLUTIONS: [(u32, u32, &str); 4] = [
 
 pub const FRAMERATES: [u32; 4] = [60, 30, 24, 15];
 
+/// The lowest framerate an automatic framerate may go down to.
+pub const FRAMERATE_FLOORS: [u32; 6] = [5, 10, 15, 20, 24, 30];
+
+/// The lowest bitrate an automatic bitrate may go down to, in kbit/s.
+pub const BITRATE_FLOORS: [u32; 8] = [300, 500, 800, 1000, 1500, 2000, 3000, 4000];
+
 /// Seconds between scheduled Go Live keyframes; zero sends them only when
 /// needed.
 pub const KEYFRAME_INTERVALS: [u32; 5] = [0, 2, 4, 6, 10];
@@ -40,8 +46,18 @@ pub struct CapturePreferences {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// `None` means derive the bitrate from resolution and framerate.
+    /// Let the framerate follow the network instead of holding `fps`:
+    /// between `fps_auto_min` and `fps_auto_max`.
+    pub fps_auto: bool,
+    pub fps_auto_min: u32,
+    pub fps_auto_max: u32,
+    /// `None` means automatic: the bitrate follows the network.
     pub bitrate_kbps: Option<u32>,
+    /// The range an automatic bitrate moves in, in kbit/s. `None` leaves
+    /// that end to kylecord: the top from resolution and framerate, the
+    /// bottom at three tenths of the top.
+    pub auto_bitrate_min: Option<u32>,
+    pub auto_bitrate_max: Option<u32>,
     /// Seconds between scheduled Go Live keyframes; zero sends them only
     /// when a viewer asks or packets are lost.
     /// Stored under a new name so the old two-second default, which made
@@ -136,7 +152,12 @@ impl Default for CapturePreferences {
             width: 1280,
             height: 720,
             fps: 30,
+            fps_auto: false,
+            fps_auto_min: 15,
+            fps_auto_max: 30,
             bitrate_kbps: None,
+            auto_bitrate_min: None,
+            auto_bitrate_max: None,
             keyframe_secs: 0,
             drop_frames_after_ms: 250,
             leaky_queue: true,
@@ -171,13 +192,36 @@ impl Default for CapturePreferences {
 
 impl CapturePreferences {
     pub fn video_settings(&self) -> VideoSettings {
+        // An automatic framerate starts at the top of its range.
+        let fps = if self.fps_auto {
+            self.fps_auto_max
+        } else {
+            self.fps
+        };
+        let automatic = self.bitrate_kbps.is_none();
+        // The most an automatic bitrate uses: the top of the range if one
+        // was set, else worked out from the picture.
+        let top = self.bitrate_kbps.unwrap_or_else(|| {
+            self.auto_bitrate_max.unwrap_or_else(|| {
+                VideoSettings::automatic_bitrate_kbps(self.width, self.height, fps)
+            })
+        });
         VideoSettings {
             width: self.width,
             height: self.height,
-            fps: self.fps,
-            bitrate_kbps: self.bitrate_kbps.unwrap_or_else(|| {
-                VideoSettings::automatic_bitrate_kbps(self.width, self.height, self.fps)
-            }),
+            fps,
+            bitrate_kbps: top,
+            bitrate_floor_kbps: match self.auto_bitrate_min {
+                Some(floor) if automatic => floor.min(top),
+                _ => 0,
+            },
+            // A top set by hand is trusted over Discord's estimate.
+            bitrate_follows_estimate: !(automatic && self.auto_bitrate_max.is_some()),
+            fps_floor: if self.fps_auto {
+                self.fps_auto_min.min(fps)
+            } else {
+                0
+            },
             keyframe_secs: self.keyframe_secs,
             drop_frames_after_ms: self.drop_frames_after_ms,
             leaky_queue: self.leaky_queue,
@@ -255,7 +299,12 @@ impl CapturePreferences {
         self.width = defaults.width;
         self.height = defaults.height;
         self.fps = defaults.fps;
+        self.fps_auto = defaults.fps_auto;
+        self.fps_auto_min = defaults.fps_auto_min;
+        self.fps_auto_max = defaults.fps_auto_max;
         self.bitrate_kbps = defaults.bitrate_kbps;
+        self.auto_bitrate_min = defaults.auto_bitrate_min;
+        self.auto_bitrate_max = defaults.auto_bitrate_max;
         self.keyframe_secs = defaults.keyframe_secs;
         self.drop_frames_after_ms = defaults.drop_frames_after_ms;
         self.leaky_queue = defaults.leaky_queue;
@@ -288,6 +337,24 @@ impl CapturePreferences {
         }
         if !FRAMERATES.contains(&self.fps) {
             self.fps = 30;
+        }
+        if !FRAMERATES.contains(&self.fps_auto_max) {
+            self.fps_auto_max = 30;
+        }
+        if !FRAMERATE_FLOORS.contains(&self.fps_auto_min) {
+            self.fps_auto_min = 15;
+        }
+        if self
+            .auto_bitrate_min
+            .is_some_and(|floor| !BITRATE_FLOORS.contains(&floor))
+        {
+            self.auto_bitrate_min = None;
+        }
+        if self
+            .auto_bitrate_max
+            .is_some_and(|top| !BITRATES.contains(&top))
+        {
+            self.auto_bitrate_max = None;
         }
         if let Some(bitrate) = self.bitrate_kbps
             && !(500..=50_000).contains(&bitrate)
@@ -387,6 +454,39 @@ mod tests {
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1280, 720, 30), 1935);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 30), 4354);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 60), 6000);
+    }
+
+    #[test]
+    fn automatic_ranges_reach_the_capture() {
+        // Left alone: the top from the picture, Discord's estimate heeded.
+        let mut prefs = CapturePreferences::default();
+        let settings = prefs.video_settings();
+        assert_eq!((settings.bitrate_floor_kbps, settings.fps_floor), (0, 0));
+        assert!(settings.bitrate_follows_estimate);
+
+        // A range set by hand, and a framerate that adapts.
+        prefs.auto_bitrate_min = Some(2000);
+        prefs.auto_bitrate_max = Some(6000);
+        prefs.fps_auto = true;
+        prefs.fps_auto_min = 15;
+        prefs.fps_auto_max = 24;
+        let settings = prefs.video_settings();
+        assert!(settings.adaptive_bitrate && !settings.bitrate_follows_estimate);
+        assert_eq!(
+            (settings.bitrate_floor_kbps, settings.bitrate_kbps),
+            (2000, 6000)
+        );
+        assert_eq!((settings.fps_floor, settings.fps), (15, 24));
+
+        // A fixed bitrate has no range; a floor above the top is the top.
+        prefs.bitrate_kbps = Some(2500);
+        assert_eq!(prefs.video_settings().bitrate_floor_kbps, 0);
+        prefs.bitrate_kbps = None;
+        prefs.auto_bitrate_min = Some(4000);
+        prefs.auto_bitrate_max = Some(2500);
+        assert_eq!(prefs.video_settings().bitrate_floor_kbps, 2500);
+        prefs.fps_auto_min = 30;
+        assert_eq!(prefs.video_settings().fps_floor, 24);
     }
 
     #[test]
