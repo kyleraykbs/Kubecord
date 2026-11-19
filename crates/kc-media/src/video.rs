@@ -62,6 +62,8 @@ pub struct PreparedCapture {
 pub struct VideoSource {
     pipeline: gst::Pipeline,
     stop: Arc<AtomicBool>,
+    /// Set once the pipeline has produced an encoded frame.
+    produced: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     _portal: Option<crate::portal::ScreenCast>,
     _camera: Option<crate::portal::CameraCast>,
@@ -97,6 +99,20 @@ pub struct VideoSettings {
     /// x264 preset; `zerolatency` tuning is always applied.
     pub preset: String,
     pub encoder: EncoderPreference,
+    /// Which of a camera's formats to capture.
+    pub camera_format: CameraFormat,
+}
+
+/// The format a camera is asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CameraFormat {
+    /// MJPEG at the wanted size and framerate, else raw video.
+    #[default]
+    Auto,
+    /// Compressed in the camera: full framerate at large sizes.
+    Mjpeg,
+    /// Uncompressed: no decoding, but most webcams slow down above 480p.
+    Raw,
 }
 
 impl VideoSettings {
@@ -120,6 +136,7 @@ impl Default for VideoSettings {
             retransmit_ms: 2000,
             preset: "ultrafast".into(),
             encoder: EncoderPreference::Auto,
+            camera_format: CameraFormat::Auto,
         }
     }
 }
@@ -203,6 +220,11 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
     )
 }
 
+/// A camera pipeline; `source` ends in raw video.
+fn camera_description(source: &str, settings: &VideoSettings, hardware: bool) -> String {
+    format!("{source} ! {}", pipeline_downstream(settings, hardware))
+}
+
 fn pipeline_description(source: &str, settings: &VideoSettings, hardware: bool) -> String {
     format!("{source} ! {}", pipeline_downstream(settings, hardware))
 }
@@ -227,6 +249,52 @@ fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
         encoder = encoder_chain(settings, hardware),
         leaky = queue_properties(settings),
     )
+}
+
+/// What to ask a camera for, best first. Webcams deliver their full
+/// framerate only as MJPEG above small sizes (a C920 gives raw 720p at
+/// 10 fps but MJPEG 720p at 30), so MJPEG at the wanted size and rate comes
+/// first; plain raw video, whatever the camera prefers, is the last resort.
+/// Each entry is the pipeline between the source and the scaler.
+fn camera_inputs(settings: &VideoSettings) -> Vec<String> {
+    let (width, height, fps) = (settings.width, settings.height, settings.fps);
+    let mjpeg = [
+        format!(
+            "capsfilter caps=\"image/jpeg,width={width},height={height},framerate={fps}/1\" ! jpegdec"
+        ),
+        format!(
+            "capsfilter caps=\"image/jpeg,width=[{width},4096],height=[{height},4096],framerate={fps}/1\" ! jpegdec"
+        ),
+        format!("capsfilter caps=\"image/jpeg,width={width},height={height}\" ! jpegdec"),
+    ];
+    let raw = [
+        format!("capsfilter caps=\"video/x-raw,width={width},height={height},framerate={fps}/1\""),
+        format!(
+            "capsfilter caps=\"video/x-raw,width=[640,4096],height=[360,4096],framerate={fps}/1\""
+        ),
+        "capsfilter caps=video/x-raw".to_owned(),
+    ];
+    match settings.camera_format {
+        CameraFormat::Auto => mjpeg.into_iter().chain(raw).collect(),
+        // Any MJPEG the camera has before giving up on the choice.
+        CameraFormat::Mjpeg => mjpeg
+            .into_iter()
+            .chain(["capsfilter caps=image/jpeg ! jpegdec".to_owned()])
+            .collect(),
+        CameraFormat::Raw => raw.into(),
+    }
+}
+
+/// How long a camera format gets to produce its first frame before the next
+/// one is tried. A format the camera lacks usually fails at once.
+const CAMERA_FORMAT_WAIT: Duration = Duration::from_millis(2500);
+
+/// Why a camera format was not kept.
+enum StartFailure {
+    /// The pipeline would not start, or reported an error.
+    Refused(Error),
+    /// It started but no frame came in time.
+    Silent,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -300,6 +368,8 @@ impl VideoSource {
 
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let produced = Arc::new(AtomicBool::new(false));
+        let thread_produced = produced.clone();
         let thread = std::thread::spawn(move || {
             let mut last_arrival: Option<Instant> = None;
             while !thread_stop.load(Ordering::Relaxed) {
@@ -334,6 +404,7 @@ impl VideoSource {
                         }
                     }
                     last_arrival = Some(now);
+                    thread_produced.store(true, Ordering::Relaxed);
                     on_frame(EncodedFrame {
                         data: map.as_slice().to_vec(),
                         duration_ms: frame_ms,
@@ -345,11 +416,45 @@ impl VideoSource {
         Ok(Self {
             pipeline,
             stop,
+            produced,
             thread: Some(thread),
             _portal: None,
             _camera: None,
             last_force_keyframe: Mutex::new(None),
         })
+    }
+
+    /// Waits until the pipeline has produced a frame; an error from the
+    /// pipeline, or `timeout` passing first, fails.
+    fn wait_for_first_frame(&self, timeout: Duration) -> std::result::Result<(), StartFailure> {
+        let deadline = Instant::now() + timeout;
+        let bus = self.pipeline.bus();
+        loop {
+            if self.produced.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let error = bus.as_ref().and_then(|bus| {
+                bus.timed_pop_filtered(
+                    gst::ClockTime::from_mseconds(25),
+                    &[gst::MessageType::Error],
+                )
+            });
+            if let Some(message) = error
+                && let gst::MessageView::Error(error) = message.view()
+            {
+                return Err(StartFailure::Refused(Error::Message(format!(
+                    "{}: {}",
+                    error.error(),
+                    error.debug().unwrap_or_default()
+                ))));
+            }
+            if bus.is_none() {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            if Instant::now() >= deadline {
+                return Err(StartFailure::Silent);
+            }
+        }
     }
 
     fn start_with_fallback(
@@ -370,7 +475,7 @@ impl VideoSource {
             match Self::start_pipeline_with(&description, frame_ms, callback, &configure) {
                 Ok(source) => return Ok(source),
                 Err(error) => {
-                    tracing::warn!(%error, "capture encoder attempt failed");
+                    tracing::debug!(%error, "capture pipeline attempt failed");
                     last_error = Some(error);
                 }
             }
@@ -549,62 +654,95 @@ impl VideoSource {
         // Set properties on the element directly. Passing fd/path through
         // gst_parse_launch failed state setup on the camera; the gtk4
         // paintable example sets fd and path as properties.
-        let source = "pipewiresrc name=src do-timestamp=true";
+        let inputs = camera_inputs(settings);
+        let last_input = inputs.len() - 1;
         let mut last_error = None;
-        for properties in targets {
-            let callback = on_frame.clone();
-            let callback = move |frame| {
-                if let Ok(mut callback) = callback.lock() {
-                    callback(frame);
-                }
-            };
-            let properties_for_log = properties.clone();
-            let configure = move |pipeline: &gst::Pipeline| -> Result<()> {
-                let element = pipeline
-                    .by_name("src")
-                    .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
-                if use_fd {
-                    element.set_property("fd", fd);
-                }
-                for (property, value) in &properties {
-                    match property {
-                        PipeWireProperty::Path => element.set_property("path", value),
-                        PipeWireProperty::TargetObject => {
-                            element.set_property("target-object", value)
+        // A format the camera lacks is refused at once; one that starts but
+        // stays silent costs a wait. After two of those the camera is taken
+        // as it comes, so a camera that is not delivering cannot hold the
+        // start up for long.
+        let mut silent = 0;
+        for (index, input) in inputs.iter().enumerate() {
+            if silent >= 2 && index < last_input {
+                continue;
+            }
+            let source = format!("pipewiresrc name=src do-timestamp=true ! {input}");
+            for properties in &targets {
+                let properties = properties.clone();
+                let callback = on_frame.clone();
+                let callback = move |frame| {
+                    if let Ok(mut callback) = callback.lock() {
+                        callback(frame);
+                    }
+                };
+                let properties_for_log = properties.clone();
+                let configure = move |pipeline: &gst::Pipeline| -> Result<()> {
+                    let element = pipeline
+                        .by_name("src")
+                        .ok_or_else(|| Error::Message("pipewiresrc element missing".into()))?;
+                    if use_fd {
+                        element.set_property("fd", fd);
+                    }
+                    for (property, value) in &properties {
+                        match property {
+                            PipeWireProperty::Path => element.set_property("path", value),
+                            PipeWireProperty::TargetObject => {
+                                element.set_property("target-object", value)
+                            }
                         }
                     }
-                }
-                Ok(())
-            };
-            let descriptions = encoder_descriptions(settings, |hardware| {
-                pipeline_description(source, settings, hardware)
-            });
-            match Self::start_with_fallback(
-                descriptions,
-                1000 / settings.fps.max(1),
-                callback,
-                configure,
-            ) {
-                Ok(video_source) => {
-                    tracing::info!(
-                        ?properties_for_log,
-                        node_id,
-                        fd,
-                        use_fd,
-                        "pipewire capture source selected"
-                    );
-                    return Ok(video_source);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?properties_for_log,
-                        node_id,
-                        fd,
-                        use_fd,
-                        %error,
-                        "pipewire capture variant failed"
-                    );
-                    last_error = Some(error);
+                    Ok(())
+                };
+                let descriptions = encoder_descriptions(settings, |hardware| {
+                    camera_description(&source, settings, hardware)
+                });
+                let started = Self::start_with_fallback(
+                    descriptions,
+                    1000 / settings.fps.max(1),
+                    callback,
+                    configure,
+                )
+                .map_err(StartFailure::Refused)
+                .and_then(|video_source| {
+                    // The last resort is taken as it comes; the others must
+                    // show they deliver before they are kept.
+                    if index < last_input {
+                        video_source.wait_for_first_frame(CAMERA_FORMAT_WAIT)?;
+                    }
+                    Ok(video_source)
+                });
+                let started = match started {
+                    Ok(video_source) => Ok(video_source),
+                    Err(StartFailure::Refused(error)) => Err(error),
+                    Err(StartFailure::Silent) => {
+                        // The other ways of naming the node would be just as
+                        // silent with this format.
+                        silent += 1;
+                        tracing::debug!(node_id, input, "camera format produced no frame in time");
+                        last_error = Some(Error::Message("no frame in time".into()));
+                        break;
+                    }
+                };
+                match started {
+                    Ok(video_source) => {
+                        tracing::info!(
+                            ?properties_for_log,
+                            node_id,
+                            input,
+                            "pipewire capture source selected"
+                        );
+                        return Ok(video_source);
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            ?properties_for_log,
+                            node_id,
+                            input,
+                            %error,
+                            "pipewire capture variant failed"
+                        );
+                        last_error = Some(error);
+                    }
                 }
             }
         }
@@ -741,6 +879,26 @@ impl Drop for VideoDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_formats_are_tried_best_first() {
+        let mut settings = VideoSettings::default();
+        let auto = camera_inputs(&settings);
+        assert!(auto[0].contains("image/jpeg,width=1280,height=720,framerate=30/1"));
+        assert_eq!(auto.last().unwrap(), "capsfilter caps=video/x-raw");
+        settings.camera_format = CameraFormat::Mjpeg;
+        assert!(
+            camera_inputs(&settings)
+                .iter()
+                .all(|input| input.contains("image/jpeg"))
+        );
+        settings.camera_format = CameraFormat::Raw;
+        assert!(
+            camera_inputs(&settings)
+                .iter()
+                .all(|input| input.contains("video/x-raw"))
+        );
+    }
 
     #[test]
     fn a_frame_tap_can_be_redirected_while_running() {

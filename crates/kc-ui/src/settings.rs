@@ -1,7 +1,7 @@
 //! Persisted capture-quality preferences.
 
 use kc_core::paths::{config_dir, ensure_dir};
-use kc_media::video::{EncoderPreference, VideoSettings};
+use kc_media::video::{CameraFormat, EncoderPreference, VideoSettings};
 use serde::{Deserialize, Serialize};
 
 pub const RESOLUTIONS: [(u32, u32, &str); 4] = [
@@ -69,7 +69,13 @@ pub struct CapturePreferences {
     pub send_typing: bool,
     /// Height of the call above a DM's chat, in pixels.
     pub call_height: i32,
+    /// Camera capture format: 0 automatic, 1 MJPEG, 2 raw.
+    pub camera_format: u32,
+    /// Show your own camera and stream in the call.
+    pub self_preview: bool,
 }
+
+pub const CAMERA_FORMATS: [&str; 3] = ["Automatic", "MJPEG (compressed)", "Raw (uncompressed)"];
 
 /// Default and least height of the call area above a DM's chat.
 pub const CALL_HEIGHT: i32 = 320;
@@ -106,6 +112,8 @@ impl Default for CapturePreferences {
             captcha_in_app: true,
             send_typing: true,
             call_height: CALL_HEIGHT,
+            camera_format: 0,
+            self_preview: true,
         }
     }
 }
@@ -128,6 +136,11 @@ impl CapturePreferences {
                 EncoderPreference::Cpu
             } else {
                 EncoderPreference::Auto
+            },
+            camera_format: match self.camera_format {
+                1 => CameraFormat::Mjpeg,
+                2 => CameraFormat::Raw,
+                _ => CameraFormat::Auto,
             },
         }
     }
@@ -175,6 +188,7 @@ impl CapturePreferences {
         self.retransmit_ms = defaults.retransmit_ms;
         self.stream_delay_ms = defaults.stream_delay_ms;
         self.cpu_encoder = defaults.cpu_encoder;
+        self.camera_format = defaults.camera_format;
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -219,6 +233,9 @@ impl CapturePreferences {
             if !volume.is_finite() || !(0.0..=2.0).contains(volume) {
                 *volume = 1.0;
             }
+        }
+        if self.camera_format > 2 {
+            self.camera_format = 0;
         }
         if self.share_source > 2 {
             self.share_source = 0;

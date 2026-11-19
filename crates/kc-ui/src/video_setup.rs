@@ -21,8 +21,8 @@ use kc_media::video::{
 use crate::live::LiveVideo;
 use crate::session::{AccountId, CameraPurpose, Command};
 use crate::settings::{
-    BITRATES, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS, RESOLUTIONS,
-    RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
+    BITRATES, CAMERA_FORMATS, CapturePreferences, DROP_AFTER_MS, FRAMERATES, KEYFRAME_INTERVALS,
+    RESOLUTIONS, RETRANSMIT_WINDOWS_MS, SHARE_SOURCES, STREAM_DELAYS,
 };
 use crate::shell::AppState;
 
@@ -282,6 +282,7 @@ pub(crate) fn quality_controls(
     let bitrate = string_dropdown(&bitrate_names);
     let delay = gtk::DropDown::from_strings(&["None", "0.5 s", "1 s", "2 s", "3 s"]);
     let cpu_encoder = gtk::Switch::new();
+    let camera_format = gtk::DropDown::from_strings(&CAMERA_FORMATS);
 
     let keyframe_names: Vec<String> = KEYFRAME_INTERVALS
         .iter()
@@ -327,6 +328,7 @@ pub(crate) fn quality_controls(
         let bitrate = bitrate.clone();
         let delay = delay.clone();
         let cpu_encoder = cpu_encoder.clone();
+        let camera_format = camera_format.clone();
         let keyframe = keyframe.clone();
         let retransmit = retransmit.clone();
         let drop_late = drop_late.clone();
@@ -348,6 +350,7 @@ pub(crate) fn quality_controls(
             );
             delay.set_selected(position(&STREAM_DELAYS, &prefs.stream_delay_ms, 0));
             cpu_encoder.set_active(prefs.cpu_encoder);
+            camera_format.set_selected(prefs.camera_format.min(2));
             keyframe.set_selected(position(&KEYFRAME_INTERVALS, &prefs.keyframe_secs, 0));
             retransmit.set_selected(position(&RETRANSMIT_WINDOWS_MS, &prefs.retransmit_ms, 2));
             drop_late.set_selected(position(&DROP_AFTER_MS, &prefs.drop_frames_after_ms, 2));
@@ -394,6 +397,11 @@ pub(crate) fn quality_controls(
         target(&move |prefs| prefs.cpu_encoder = active);
     });
     let target = apply.clone();
+    camera_format.connect_selected_notify(move |dropdown| {
+        let format = dropdown.selected();
+        target(&move |prefs| prefs.camera_format = format);
+    });
+    let target = apply.clone();
     keyframe.connect_selected_notify(move |dropdown| {
         if let Some(seconds) = KEYFRAME_INTERVALS
             .get(dropdown.selected() as usize)
@@ -435,6 +443,11 @@ pub(crate) fn quality_controls(
     encoder_row.set_subtitle("Hardware encoding is used when available otherwise");
     encoder_row.set_activatable_widget(Some(&cpu_encoder));
     rows.push(encoder_row);
+    let format_row = setting_row("Camera Format", &camera_format);
+    format_row.set_subtitle(
+        "MJPEG keeps a webcam at full framerate at large sizes. Automatic tries it first, then raw.",
+    );
+    rows.push(format_row);
 
     let drop_row = setting_row("Drop Late Frames After", &drop_late);
     drop_row.set_subtitle("Applies beyond the Go Live delay");

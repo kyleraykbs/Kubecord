@@ -923,7 +923,7 @@ fn spawn_account(
                                     let share_audio = voice.stream_audio;
                                     if let Some(connection) = &mut voice.stream_connection {
                                         tracing::info!("stream source ready");
-                                        connection.source = Some(source);
+                                        connection.source = Some(*source);
                                         if connection.audio.is_none() && share_audio {
                                             match ScreenAudio::start(
                                                 connection.handle.clone(),
@@ -1111,7 +1111,7 @@ enum VoiceControl {
     },
     StreamSource {
         generation: u64,
-        result: Result<VideoSource, String>,
+        result: Result<Box<VideoSource>, String>,
     },
     ForceKeyframe {
         generation: u64,
@@ -1588,7 +1588,10 @@ async fn maybe_start_stream(
                     }
                     result
                 };
-                let _ = source_control.send(VoiceControl::StreamSource { generation, result });
+                let _ = source_control.send(VoiceControl::StreamSource {
+                    generation,
+                    result: result.map(Box::new),
+                });
             });
         }
         Err(error) => {
@@ -1801,9 +1804,15 @@ async fn start_camera(
     debug!(camera = %camera.name, "starting camera");
     let handle = connection.handle.clone();
     handle.set_retransmit_window(Duration::from_millis(settings.retransmit_ms as u64));
-    let source = VideoSource::camera_portal(camera, settings, move |frame| {
-        handle.send_video(frame.data, frame.duration_ms);
+    // Opening a camera can take a few seconds while formats are tried; keep
+    // it off the account loop.
+    let source = tokio::task::spawn_blocking(move || {
+        VideoSource::camera_portal(camera, settings, move |frame| {
+            handle.send_video(frame.data, frame.duration_ms);
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     connection.camera = Some(source);
     connection.handle.set_video(true);

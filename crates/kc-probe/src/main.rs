@@ -204,6 +204,96 @@ async fn main() -> Result<()> {
                 Err(error) => println!("camera pipeline failed: {error}"),
             }
         }
+        "camera-timing" => {
+            // Runs a camera through the real encode pipeline and reports how
+            // evenly frames come out: `camera-timing [seconds] [name part]
+            // [cpu|auto] [kbit/s]`. Local only.
+            let seconds: u64 = filtered.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let wanted = filtered.get(2).map(|name| name.to_lowercase());
+            let Some(access) = kc_media::portal::request_cameras().await? else {
+                bail!("no camera from portal");
+            };
+            for camera in &access.cameras {
+                println!("camera: {} (node {})", camera.name, camera.node_id);
+            }
+            let camera = access
+                .cameras
+                .iter()
+                .find(|camera| {
+                    wanted
+                        .as_ref()
+                        .is_some_and(|wanted| camera.name.to_lowercase().contains(wanted))
+                })
+                .and_then(|camera| access.select(camera.node_id))
+                .or_else(|| access.preferred())
+                .context("no camera")?;
+            println!("using: {}", camera.name);
+            let mut settings = kc_media::video::VideoSettings::default();
+            if filtered.get(3).is_some_and(|flag| flag == "cpu") {
+                settings.encoder = kc_media::video::EncoderPreference::Cpu;
+            }
+            if let Some(kbps) = filtered.get(4).and_then(|kbps| kbps.parse().ok()) {
+                settings.bitrate_kbps = kbps;
+            }
+            println!(
+                "settings: {}x{} {} fps, {} kbit/s, {:?}",
+                settings.width,
+                settings.height,
+                settings.fps,
+                settings.bitrate_kbps,
+                settings.encoder
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            let source =
+                kc_media::video::VideoSource::camera_portal(camera, settings, move |frame| {
+                    let key = kc_media::video::is_keyframe(&frame.data);
+                    let _ = tx.send((std::time::Instant::now(), frame.data.len(), key));
+                })?;
+            let start = std::time::Instant::now();
+            let mut last: Option<std::time::Instant> = None;
+            let mut per_second = vec![0u32; seconds as usize + 1];
+            let mut bytes_per_second = vec![0usize; seconds as usize + 1];
+            let (mut frames, mut keys, mut max_key, mut max_gap) = (0u32, 0u32, 0usize, 0u128);
+            while start.elapsed().as_secs() < seconds {
+                let Ok((at, size, key)) = rx.recv_timeout(std::time::Duration::from_millis(200))
+                else {
+                    continue;
+                };
+                frames += 1;
+                let second = at.duration_since(start).as_secs() as usize;
+                if let Some(slot) = per_second.get_mut(second) {
+                    *slot += 1;
+                    bytes_per_second[second] += size;
+                }
+                if key {
+                    keys += 1;
+                    max_key = max_key.max(size);
+                }
+                if let Some(last) = last {
+                    let gap = at.duration_since(last).as_millis();
+                    max_gap = max_gap.max(gap);
+                    if gap > 70 {
+                        println!(
+                            "gap {gap} ms at {:.2}s (frame {size} B, key {key})",
+                            at.duration_since(start).as_secs_f64()
+                        );
+                    }
+                }
+                last = Some(at);
+            }
+            drop(source);
+            println!(
+                "frames {frames}, keyframes {keys}, largest keyframe {max_key} B, max gap {max_gap} ms"
+            );
+            println!("fps per second: {per_second:?}");
+            println!(
+                "kbit per second: {:?}",
+                bytes_per_second
+                    .iter()
+                    .map(|bytes| bytes * 8 / 1000)
+                    .collect::<Vec<_>>()
+            );
+        }
         "monitor" => {
             let (tx, rx) = std::sync::mpsc::channel();
             let _capture = kc_media::audio::Capture::start_monitor(move |frame| {
