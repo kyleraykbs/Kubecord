@@ -1231,6 +1231,14 @@ async fn handle_voice_control(
                 source.network_report(sent, lost, remb_kbps);
             }
             let (target_kbps, fps) = source.map(VideoSource::adapted).unwrap_or_default();
+            // The capture said it failed, or has simply gone quiet.
+            let stopped = stream
+                && source.is_some_and(|source| {
+                    source.failed().is_some()
+                        || source
+                            .quiet_for()
+                            .is_some_and(|quiet| quiet >= CAPTURE_STOPPED_AFTER)
+                });
             let _ = ui.try_send(UiEvent::VideoUpload {
                 account,
                 stream,
@@ -1241,6 +1249,18 @@ async fn handle_voice_control(
                     fps,
                 },
             });
+            if stopped {
+                // Viewers would sit on a loading screen for ever.
+                tracing::warn!("the stream's capture stopped producing frames; ending the stream");
+                let _ = ui
+                    .send(UiEvent::StreamError {
+                        account,
+                        message: "The screen capture stopped, so the stream was ended. Go Live again to restart it."
+                            .to_owned(),
+                    })
+                    .await;
+                stop_stream(voice, account, ui, true).await;
+            }
         }
         VoiceControl::ForceCameraKeyframe { generation } => {
             if generation == voice.generation
@@ -2559,6 +2579,10 @@ async fn stop_watching(
 /// answers in well under a second; without a limit, an unanswered one
 /// would block every later Go Live.
 const STREAM_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A stream whose capture has produced nothing for this long is taken to
+/// have lost it. A healthy capture resends a still screen every second.
+const CAPTURE_STOPPED_AFTER: Duration = Duration::from_secs(10);
 
 /// What a screen-picker result reads as when the picker was closed.
 const PICKER_CANCELLED: &str = "screen picker cancelled";

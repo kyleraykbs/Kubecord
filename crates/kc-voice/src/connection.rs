@@ -895,7 +895,9 @@ async fn run(
                     std::mem::take(&mut state.net_sent),
                     std::mem::take(&mut state.net_lost),
                 );
-                if sent > 0 {
+                // Also while nothing is going out though video is on: that is
+                // how a capture that has stopped gets noticed.
+                if sent > 0 || state.video_enabled {
                     let _ = state.events.send(VoiceEvent::VideoNetwork {
                         sent,
                         lost,

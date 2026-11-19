@@ -78,6 +78,13 @@ pub struct VideoSource {
     adaptation: Mutex<Option<Adaptation>>,
     /// The time each frame stands for, which follows the framerate.
     frame_ms: Arc<AtomicU32>,
+    /// Renegotiation is being kept from the source (see
+    /// `hold_source_format`).
+    source_held: AtomicBool,
+    /// When the capture began, and how long after that its latest frame
+    /// came (in milliseconds; zero before the first).
+    started: Instant,
+    last_frame_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The least time between forced keyframes. Viewers repeat their requests
@@ -549,7 +556,7 @@ fn pipeline_downstream(settings: &VideoSettings, hardware: bool) -> String {
         // itself fails its output-format setup (-22); videoconvert performs
         // the chroma conversion before the encoder.
         "capsfilter caps=video/x-raw ! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0{leaky} \
-         ! videoconvert ! videoscale ! videorate skip-to-first=true \
+         ! videoconvert ! videoscale ! videorate name=pace skip-to-first=true \
          ! capsfilter name=rate caps=video/x-raw,format={format},width={width},height={height},framerate={fps}/1,colorimetry={colorimetry} \
          ! {encoder} \
          ! h264parse config-interval=-1 \
@@ -657,7 +664,7 @@ fn pipeline_description(source: &str, settings: &VideoSettings, hardware: bool) 
 fn screen_description(settings: &VideoSettings, hardware: bool) -> String {
     format!(
         "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true \
-         ! videorate skip-to-first=true \
+         ! videorate name=pace skip-to-first=true \
          ! capsfilter name=rate caps=video/x-raw,framerate={fps}/1 \
          ! queue max-size-buffers=8{leaky} \
          ! videoconvert \
@@ -809,6 +816,8 @@ impl VideoSource {
         let thread_pipeline = pipeline.downgrade();
         let frame_ms = Arc::new(AtomicU32::new(frame_ms));
         let thread_frame_ms = frame_ms.clone();
+        let last_frame_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let thread_last_frame = last_frame_ms.clone();
         let thread = std::thread::spawn(move || {
             let mut last_arrival: Option<Instant> = None;
             // When a keyframe last came out of the encoder, or was last
@@ -865,6 +874,10 @@ impl VideoSource {
                 if !map.as_slice().is_empty() {
                     let now = Instant::now();
                     let frame_ms = thread_frame_ms.load(Ordering::Relaxed);
+                    thread_last_frame.store(
+                        (now.duration_since(started).as_millis() as u64).max(1),
+                        Ordering::Relaxed,
+                    );
                     if let Some(last) = last_arrival {
                         let gap = now.saturating_duration_since(last);
                         if gap > Duration::from_millis(frame_ms as u64 * 2) {
@@ -915,6 +928,9 @@ impl VideoSource {
             keyframe_gap_ms,
             adaptation: Mutex::new(None),
             frame_ms,
+            source_held: AtomicBool::new(false),
+            started,
+            last_frame_ms,
         })
     }
 
@@ -1072,6 +1088,52 @@ impl VideoSource {
         }
     }
 
+    /// The error the capture pipeline reported, if it has failed.
+    pub fn failed(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|failure| failure.clone())
+    }
+
+    /// How long since the capture last produced a frame, once it has
+    /// produced one. A healthy capture is never quiet for long: a still
+    /// screen is resent every second.
+    pub fn quiet_for(&self) -> Option<Duration> {
+        match self.last_frame_ms.load(Ordering::Relaxed) {
+            0 => None,
+            millis => Some(
+                self.started
+                    .elapsed()
+                    .saturating_sub(Duration::from_millis(millis)),
+            ),
+        }
+    }
+
+    /// Keeps a change of framerate from reaching the capture's source. New
+    /// caps make GStreamer ask everything upstream to renegotiate, and a
+    /// PipeWire source answers by dropping its stream and connecting again,
+    /// which ends a screencast for good (the compositor sees the capture
+    /// stop). The frame-rate limiter takes any rate coming in, so nothing
+    /// before it has to change: the request is dropped at its input.
+    fn hold_source_format(&self) {
+        if self.source_held.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(pad) = self
+            .pipeline
+            .by_name("pace")
+            .and_then(|pace| pace.static_pad("sink"))
+        else {
+            return;
+        };
+        pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_, info| {
+            match info.event() {
+                Some(event) if event.type_() == gst::EventType::Reconfigure => {
+                    gst::PadProbeReturn::Drop
+                }
+                _ => gst::PadProbeReturn::Ok,
+            }
+        });
+    }
+
     /// Changes the framerate while the capture runs: the frame-rate limit
     /// ahead of the encoder is renegotiated, which makes the encoder start
     /// afresh with a keyframe.
@@ -1079,6 +1141,7 @@ impl VideoSource {
         let Some(limit) = self.pipeline.by_name("rate") else {
             return false;
         };
+        self.hold_source_format();
         let mut caps = limit.property::<gst::Caps>("caps");
         for structure in caps.make_mut().iter_mut() {
             structure.set("framerate", gst::Fraction::new(fps as i32, 1));
@@ -1720,6 +1783,112 @@ mod tests {
             "expected about 24 fps, got {low} (hardware: {hardware})"
         );
         assert_eq!(low_ms, 41);
+    }
+
+    /// A real PipeWire capture (of a throwaway test source, never a screen
+    /// or camera) keeps running through a change of framerate. Needs a
+    /// PipeWire session, so it only runs when asked for:
+    /// `cargo test -p kc-media pipewire_capture -- --ignored`.
+    #[test]
+    #[ignore]
+    fn pipewire_capture_survives_a_framerate_change() {
+        gst::init().unwrap();
+        // The test source, as a child process stopped by its own handle.
+        let mut provider = std::process::Command::new("gst-launch-1.0")
+            .args([
+                "-q",
+                "videotestsrc",
+                "is-live=true",
+                "!",
+                "video/x-raw,format=BGRx,width=640,height=360,framerate=30/1",
+                "!",
+                "pipewiresink",
+                "mode=provide",
+                "stream-properties=props,node.name=kylecord-test-video,media.class=Video/Source",
+            ])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let dump = std::process::Command::new("pw-dump").output().unwrap();
+        let graph: serde_json::Value = serde_json::from_slice(&dump.stdout).unwrap();
+        let node = graph
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|object| object["info"]["props"]["node.name"] == "kylecord-test-video")
+            .and_then(|object| object["id"].as_u64());
+        let outcome = node.map(|node| {
+            let settings = VideoSettings {
+                encoder: EncoderPreference::Cpu,
+                width: 640,
+                height: 360,
+                fps: 30,
+                fps_floor: 10,
+                adaptive_bitrate: false,
+                ..VideoSettings::default()
+            };
+            let description = screen_description(&settings, false).replace(
+                "pipewiresrc name=src",
+                &format!("pipewiresrc name=src path={node}"),
+            );
+            let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = frames.clone();
+            let source = VideoSource::start_pipeline_with(
+                &description,
+                33,
+                move |_: EncodedFrame| {
+                    seen.fetch_add(1, Ordering::Relaxed);
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+            source.adapt(&settings);
+            std::thread::sleep(Duration::from_secs(2));
+            let before = frames.swap(0, Ordering::Relaxed);
+            source.network_report(1000, 100, 0);
+            std::thread::sleep(Duration::from_millis(1000));
+            frames.store(0, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(2));
+            let after = frames.load(Ordering::Relaxed);
+            let failure = source.failure.lock().unwrap().clone();
+            drop(source);
+            (before, after, failure)
+        });
+        let _ = provider.kill();
+        let _ = provider.wait();
+        let (before, after, failure) = outcome.expect("the test source did not appear");
+        println!("frames in 2 s before the change: {before}, after: {after}, error: {failure:?}");
+        assert!(before > 40, "capture never ran: {before}");
+        assert!(
+            after > 30,
+            "capture died at the change: {after} frames, {failure:?}"
+        );
+    }
+
+    /// A capture that stops producing frames can be told from one that
+    /// has not started and one that is running.
+    #[test]
+    fn a_capture_gone_quiet_is_noticed() {
+        gst::init().unwrap();
+        let settings = VideoSettings {
+            encoder: EncoderPreference::Cpu,
+            ..VideoSettings::default()
+        };
+        // Thirty frames, then nothing more.
+        let description = screen_description(&settings, false).replace(
+            "pipewiresrc name=src do-timestamp=true keepalive-time=1000 resend-last=true",
+            "videotestsrc is-live=true num-buffers=30 name=src",
+        );
+        let source =
+            VideoSource::start_pipeline_with(&description, 33, |_: EncodedFrame| {}, |_| Ok(()))
+                .unwrap();
+        assert_eq!(source.quiet_for(), None);
+        std::thread::sleep(Duration::from_millis(600));
+        let running = source.quiet_for().expect("frames by now");
+        assert!(running < Duration::from_millis(300), "{running:?}");
+        std::thread::sleep(Duration::from_millis(2000));
+        let stopped = source.quiet_for().expect("frames by now");
+        assert!(stopped > Duration::from_millis(1200), "{stopped:?}");
     }
 
     /// The encoder's bitrate can be changed while it runs.
