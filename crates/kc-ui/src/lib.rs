@@ -8,6 +8,7 @@ mod content;
 mod friends;
 mod images;
 mod live;
+pub mod logging;
 mod markdown;
 mod members;
 mod menu;

@@ -79,6 +79,10 @@ pub struct CapturePreferences {
     pub camera_format: u32,
     /// Show your own camera and stream in the call.
     pub self_preview: bool,
+    /// Write the log file (see [`crate::logging`]).
+    pub log_to_file: bool,
+    /// Also log every media and voice event; far larger.
+    pub log_detailed: bool,
 }
 
 pub const CAMERA_FORMATS: [&str; 3] = ["Automatic", "MJPEG (compressed)", "Raw (uncompressed)"];
@@ -105,7 +109,7 @@ impl Default for CapturePreferences {
             drop_frames_after_ms: 250,
             leaky_queue: true,
             retransmit_ms: 2000,
-            stream_delay_ms: 0,
+            stream_delay_ms: 1000,
             cpu_encoder: false,
             input_device: String::new(),
             output_device: String::new(),
@@ -120,6 +124,8 @@ impl Default for CapturePreferences {
             call_height: CALL_HEIGHT,
             camera_format: 0,
             self_preview: true,
+            log_to_file: true,
+            log_detailed: false,
         }
     }
 }
@@ -172,6 +178,7 @@ impl CapturePreferences {
             (!self.output_device.is_empty()).then(|| self.output_device.clone()),
         );
         crate::session::set_self_preview(self.self_preview);
+        crate::logging::configure(self.log_to_file, self.log_detailed);
         kc_media::devices::set_input_gain(self.input_volume);
         kc_media::devices::set_output_gain(self.output_volume);
         kc_media::portal::set_share_sources(match self.share_source {
@@ -225,7 +232,7 @@ impl CapturePreferences {
             self.bitrate_kbps = None;
         }
         if !STREAM_DELAYS.contains(&self.stream_delay_ms) {
-            self.stream_delay_ms = 0;
+            self.stream_delay_ms = 1000;
         }
         if !KEYFRAME_INTERVALS.contains(&self.keyframe_secs) {
             self.keyframe_secs = 0;
@@ -290,6 +297,20 @@ mod tests {
         assert_eq!(settings.bitrate_kbps, 6000);
         assert_eq!(settings.drop_frames_after_ms, 500);
         assert!(!settings.leaky_queue);
+    }
+
+    #[test]
+    fn defaults_are_the_recommended_settings() {
+        let prefs = CapturePreferences::default();
+        assert_eq!((prefs.width, prefs.height, prefs.fps), (1280, 720, 30));
+        assert_eq!(prefs.bitrate_kbps, None);
+        assert_eq!(prefs.stream_delay_ms, 1000);
+        assert_eq!(prefs.keyframe_secs, 0);
+        assert!(prefs.log_to_file && !prefs.log_detailed);
+        // Automatic bitrate stays within what Discord carries for a stream.
+        assert_eq!(VideoSettings::automatic_bitrate_kbps(1280, 720, 30), 1935);
+        assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 30), 4354);
+        assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 60), 6000);
     }
 
     #[test]

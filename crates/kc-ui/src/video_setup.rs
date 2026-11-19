@@ -434,35 +434,73 @@ pub(crate) fn quality_controls(
         target(&move |prefs| prefs.leaky_queue = active);
     });
 
+    // Each row says what the setting trades, and which way to move it.
+    let guided = |title: &str, widget: &gtk::DropDown, guide: &str| {
+        let row = setting_row(title, widget);
+        row.set_subtitle(guide);
+        row.set_subtitle_lines(0);
+        row
+    };
     let mut rows = vec![
-        setting_row("Resolution", &resolution),
-        setting_row("Framerate", &framerate),
-        setting_row("Bitrate", &bitrate),
+        guided(
+            "Resolution",
+            &resolution,
+            "1280 × 720 is the dependable choice. 1920 × 1080 is sharper but needs about twice the upload, and lost packets show more.",
+        ),
+        guided(
+            "Framerate",
+            &framerate,
+            "30 fps suits calls and most screens. 60 fps is for games and fast motion; it doubles the upload and the encoding work.",
+        ),
+        guided(
+            "Bitrate",
+            &bitrate,
+            "Automatic picks about 2 Mbit/s for 720p30 and 4.4 for 1080p30. Lower it if viewers see freezes; raise it if the picture is blocky. Discord carries about 4 Mbit/s per stream.",
+        ),
     ];
     if stream {
-        rows.push(setting_row("Go Live Delay", &delay));
+        rows.push(guided(
+            "Go Live Delay",
+            &delay,
+            "Holds your stream back so frames leave at an even pace, which smooths uneven capture. Recovering from lost packets takes this much longer. 1 s is a good balance; None if you need viewers in step with you.",
+        ));
     }
     let encoder_row = setting_row("Use Software Encoder (x264)", &cpu_encoder);
-    encoder_row.set_subtitle("Hardware encoding is used when available otherwise");
+    encoder_row.set_subtitle(
+        "Off uses your graphics card when it can, which saves processor time. Turn on if the picture is corrupted or the stream will not start.",
+    );
+    encoder_row.set_subtitle_lines(0);
     encoder_row.set_activatable_widget(Some(&cpu_encoder));
     rows.push(encoder_row);
     let format_row = setting_row("Camera Format", &camera_format);
     format_row.set_subtitle(
-        "MJPEG keeps a webcam at full framerate at large sizes. Automatic tries it first, then raw.",
+        "Leave on Automatic. MJPEG keeps a webcam at full framerate at large sizes (raw 720p is often only 10 fps); Automatic tries it first, then raw.",
     );
+    format_row.set_subtitle_lines(0);
     rows.push(format_row);
 
-    let drop_row = setting_row("Drop Late Frames After", &drop_late);
-    drop_row.set_subtitle("Applies beyond the Go Live delay");
+    let drop_row = guided(
+        "Drop Late Frames After",
+        &drop_late,
+        "A frame that waits this long past the Go Live delay is skipped instead of sent late, so the stream stays current. 250 ms is a good default; Never sends everything, however late.",
+    );
     let leaky_row = setting_row("Drop Old Frames in the Capture Queue", &leaky);
+    leaky_row.set_subtitle(
+        "When encoding falls behind, skip to the newest picture instead of building up delay. Leave on.",
+    );
+    leaky_row.set_subtitle_lines(0);
     leaky_row.set_activatable_widget(Some(&leaky));
     let advanced = vec![
-        {
-            let row = setting_row("Scheduled Keyframes", &keyframe);
-            row.set_subtitle("Scheduled full frames for Go Live; they can make viewers hitch");
-            row
-        },
-        setting_row("Dropout Recovery Window", &retransmit),
+        guided(
+            "Scheduled Keyframes",
+            &keyframe,
+            "Leave on Only when needed: a full frame is sent when a viewer asks or packets are lost. Scheduled ones made viewers hitch.",
+        ),
+        guided(
+            "Dropout Recovery Window",
+            &retransmit,
+            "How long sent audio and video is kept so it can be sent again after a network dropout. 2 s covers most; Off never resends.",
+        ),
         drop_row,
         leaky_row,
     ];

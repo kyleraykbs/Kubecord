@@ -159,8 +159,11 @@ pub enum CameraFormat {
 impl VideoSettings {
     /// Rough H.264 budget at 0.12 bits per pixel per frame, capped at 8 Mbps.
     pub fn automatic_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
-        let kbps = (width as f64 * height as f64 * fps as f64 * 0.12 / 1000.0) as u32;
-        kbps.clamp(800, 8000)
+        // About 2 Mbit/s for 720p30 and 4.4 for 1080p30. Discord's server
+        // has estimated 4.2 Mbit/s of room for a stream; aiming above what
+        // it will carry only gets packets dropped.
+        let kbps = (width as f64 * height as f64 * fps as f64 * 0.07 / 1000.0) as u32;
+        kbps.clamp(800, 6000)
     }
 }
 
@@ -171,7 +174,7 @@ impl Default for VideoSettings {
             height: 720,
             fps: 30,
             bitrate_kbps: Self::automatic_bitrate_kbps(1280, 720, 30),
-            keyframe_secs: 2,
+            keyframe_secs: 0,
             drop_frames_after_ms: 250,
             leaky_queue: true,
             retransmit_ms: 2000,

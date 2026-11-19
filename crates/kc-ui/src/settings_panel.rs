@@ -107,6 +107,7 @@ impl AppState {
         );
         pages.add_named(&page_scroll(&self.features_page()), Some("features"));
         pages.add_named(&page_scroll(&self.compatibility_page()), Some("compat"));
+        pages.add_named(&page_scroll(&self.debug_page()), Some("debug"));
 
         let content_view = adw::ToolbarView::new();
         content_view.add_top_bar(&adw::HeaderBar::new());
@@ -116,7 +117,7 @@ impl AppState {
         // Categories, under Discord's two headings.
         let categories = gtk::ListBox::new();
         categories.add_css_class("navigation-sidebar");
-        let entries: [(&str, &str, &str); 4] = [
+        let entries: [(&str, &str, &str); 5] = [
             ("account", "My Account", "avatar-default-symbolic"),
             ("voice", "Voice & Video", "audio-input-microphone-symbolic"),
             ("features", "Features", "view-reveal-symbolic"),
@@ -125,6 +126,7 @@ impl AppState {
                 "Compatibility",
                 "network-transmit-receive-symbolic",
             ),
+            ("debug", "Debug", "utilities-terminal-symbolic"),
         ];
         for (_, title, icon) in entries {
             let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -236,6 +238,92 @@ impl AppState {
         show.connect_active_notify(move |row| app.set_send_typing(row.is_active()));
         typing.add(&show);
         page.append(&typing);
+        page
+    }
+
+    // -- debug ---------------------------------------------------------------
+
+    /// What kylecord records about itself, and how much.
+    fn debug_page(self: &Rc<Self>) -> gtk::Box {
+        let page = page_box();
+        page.append(&section_title("Debug"));
+        let intro = gtk::Label::new(Some(
+            "The log helps work out what went wrong in a call. It stays on this computer.",
+        ));
+        intro.set_xalign(0.0);
+        intro.set_wrap(true);
+        intro.add_css_class("dim-label");
+        page.append(&intro);
+
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Log File");
+        let path = crate::logging::path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unavailable".to_owned());
+        group.set_description(Some(&format!(
+            "{path}\nEach launch starts a new log and keeps the one before. It never holds tokens or message text.",
+        )));
+
+        let to_file = adw::SwitchRow::new();
+        to_file.set_title("Write a Log File");
+        to_file.set_subtitle(
+            "Small: about 200 KB for an hour of calls with video. Off writes nothing.",
+        );
+        to_file.set_subtitle_lines(0);
+        to_file.set_active(self.capture.borrow().log_to_file);
+        let app = self.clone();
+        to_file.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.log_to_file = active);
+        });
+        group.add(&to_file);
+
+        let detailed = adw::SwitchRow::new();
+        detailed.set_title("Detailed Media Logging");
+        detailed.set_subtitle(&format!(
+            "Also records every frame and packet event in calls. Large: tens of megabytes an hour. Only while chasing a problem. The file stops growing at {} MB either way.",
+            crate::logging::MAX_BYTES / (1024 * 1024)
+        ));
+        detailed.set_subtitle_lines(0);
+        detailed.set_active(self.capture.borrow().log_detailed);
+        let app = self.clone();
+        detailed.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.log_detailed = active);
+        });
+        group.add(&detailed);
+
+        let size = adw::ActionRow::builder().title("This Run's Log").build();
+        let show_size = {
+            let size = size.clone();
+            move || {
+                let bytes = crate::logging::written();
+                size.set_subtitle(&if bytes < 1024 * 1024 {
+                    format!("{} KB so far", bytes.div_ceil(1024))
+                } else {
+                    format!("{:.1} MB so far", bytes as f64 / (1024.0 * 1024.0))
+                });
+            }
+        };
+        show_size();
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.add_css_class("flat");
+        refresh.set_valign(gtk::Align::Center);
+        refresh.set_tooltip_text(Some("Refresh"));
+        refresh.connect_clicked(move |_| show_size());
+        size.add_suffix(&refresh);
+        let open = gtk::Button::with_label("Open Folder");
+        open.set_valign(gtk::Align::Center);
+        let window = self.window.clone();
+        open.connect_clicked(move |_| {
+            if let Some(path) = crate::logging::path() {
+                gtk::FileLauncher::new(Some(&gtk::gio::File::for_path(path)))
+                    .open_containing_folder(Some(&window), None::<&gtk::gio::Cancellable>, |_| {});
+            }
+        });
+        size.add_suffix(&open);
+        group.add(&size);
+        page.append(&group);
         page
     }
 
@@ -619,7 +707,7 @@ impl AppState {
         let quality = adw::PreferencesGroup::new();
         quality.set_title("Stream Quality");
         quality.set_description(Some(
-            "Used for your camera and Go Live. Automatic bitrate follows resolution and framerate. Changes apply the next time you start a camera or stream.",
+            "Used for your camera and Go Live, from the next time you start one. The defaults are a good place to stay: change one thing at a time, and Reset Video Settings below puts them back.",
         ));
         for row in &controls.rows {
             quality.add(row);
