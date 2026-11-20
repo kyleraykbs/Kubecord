@@ -12,6 +12,7 @@ use kc_state::{ChannelType, MemberListItem};
 
 use crate::session;
 use crate::shell::AppState;
+use crate::video_setup::spawn_local;
 use crate::widgets::{avatar_with_status, clear_box, hex_color, label, status_dot, status_label};
 
 /// Rows drawn before the list is cut off; the server sends 200 at a time.
@@ -447,53 +448,142 @@ impl AppState {
         }
     }
 
-    /// Edits the account's own profile: display name, pronouns and bio.
+    /// Edits the account's own profile. A view switcher offers the user
+    /// (global) profile — display name, pronouns, bio and avatar — and a
+    /// per-server profile — nickname, bio, pronouns and avatar for a chosen
+    /// server the user belongs to.
     pub(crate) fn edit_profile_dialog(self: &Rc<Self>) {
         let Some((_, http, store)) = self.active() else {
             return;
         };
-        let (my_id, current_name) = store.read(|state| {
+        let (my_id, current_name, current_avatar) = store.read(|state| {
             let user = state.me.clone();
             (
                 user.as_ref().map(|user| user.id),
-                user.map(|user| user.display_name().to_owned())
+                user.as_ref()
+                    .map(|user| user.display_name().to_owned())
                     .unwrap_or_default(),
+                user.as_ref()
+                    .map(|user| cdn::user_avatar(user.id, user.avatar.as_deref(), 160)),
             )
         });
         let Some(my_id) = my_id else {
             return;
         };
 
+        // Servers the user is a member of, to choose from on the server tab.
+        // The currently selected guild comes first so it is the default.
+        let selected_guild = self
+            .with_session(|session| session.selected_guild)
+            .flatten();
+        let mut guilds: Vec<(Snowflake, String, Option<String>)> = store.read(|state| {
+            state
+                .guilds
+                .values()
+                .filter_map(|guild| {
+                    let member = state.member(guild.id, my_id)?;
+                    (!guild.unavailable)
+                        .then(|| (guild.id, guild.name.clone(), member.nick.clone()))
+                })
+                .collect()
+        });
+        guilds.sort_by_key(|guild| guild.1.to_lowercase());
+        if let Some(index) = selected_guild.and_then(|id| guilds.iter().position(|g| g.0 == id)) {
+            guilds.swap(0, index);
+        }
+
         let dialog = adw::Dialog::new();
         dialog.set_title("Edit Profile");
-        dialog.set_content_width(380);
+        dialog.set_content_width(420);
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        content.set_margin_top(12);
-        content.set_margin_bottom(12);
-        content.set_margin_start(12);
-        content.set_margin_end(12);
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        outer.set_margin_top(12);
+        outer.set_margin_bottom(12);
+        outer.set_margin_start(12);
+        outer.set_margin_end(12);
 
-        content.append(&label("DISPLAY NAME", &["kc-category"]));
+        let stack = adw::ViewStack::new();
+        let switcher = adw::InlineViewSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_halign(gtk::Align::Center);
+        outer.append(&switcher);
+        outer.append(&stack);
+
+        // -- User (global) profile -------------------------------------
+        let user_page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let user_avatar = self.avatar_field(current_avatar.as_deref(), &current_name);
+        user_page.append(&user_avatar.row);
+
+        user_page.append(&label("DISPLAY NAME", &["kc-category"]));
         let name = gtk::Entry::new();
         name.set_text(&current_name);
-        content.append(&name);
+        user_page.append(&name);
 
-        content.append(&label("PRONOUNS", &["kc-category"]));
+        user_page.append(&label("PRONOUNS", &["kc-category"]));
         let pronouns = gtk::Entry::new();
         pronouns.set_placeholder_text(Some("e.g. they/them"));
-        content.append(&pronouns);
+        user_page.append(&pronouns);
 
-        content.append(&label("ABOUT ME", &["kc-category"]));
-        let bio_view = gtk::TextView::new();
-        bio_view.set_wrap_mode(gtk::WrapMode::WordChar);
-        bio_view.set_size_request(-1, 90);
-        bio_view.add_css_class("kc-bio-edit");
-        let bio_scroll = gtk::ScrolledWindow::new();
-        bio_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        bio_scroll.set_child(Some(&bio_view));
-        content.append(&bio_scroll);
+        user_page.append(&label("ABOUT ME", &["kc-category"]));
+        let (bio_view, bio_scroll) = bio_editor();
+        user_page.append(&bio_scroll);
+        stack.add_titled(&user_page, Some("user"), "User Profile");
 
+        // -- Server profile --------------------------------------------
+        let server_page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let server_avatar = self.avatar_field(None, &current_name);
+        // Prefilled per-server fields, by guild index in `guilds`.
+        let server_bio = gtk::Entry::new();
+        let server_pronouns = gtk::Entry::new();
+        let server_nick = gtk::Entry::new();
+        // The index into `guilds` the picker is on (0 when there is one).
+        let chosen = Rc::new(std::cell::Cell::new(0usize));
+        if guilds.is_empty() {
+            let hint = label("Join a server to edit a server profile.", &["dim-label"]);
+            hint.set_margin_top(12);
+            server_page.append(&hint);
+        } else {
+            server_page.append(&label("SERVER", &["kc-category"]));
+            let picker = gtk::DropDown::from_strings(
+                &guilds
+                    .iter()
+                    .map(|guild| guild.1.as_str())
+                    .collect::<Vec<_>>(),
+            );
+            server_page.append(&picker);
+
+            server_page.append(&server_avatar.row);
+
+            server_page.append(&label("NICKNAME", &["kc-category"]));
+            server_nick.set_placeholder_text(Some(&current_name));
+            server_page.append(&server_nick);
+
+            server_page.append(&label("PRONOUNS", &["kc-category"]));
+            server_pronouns.set_placeholder_text(Some("e.g. they/them"));
+            server_page.append(&server_pronouns);
+
+            server_page.append(&label("ABOUT ME", &["kc-category"]));
+            server_bio.set_placeholder_text(Some("A bio just for this server"));
+            server_page.append(&server_bio);
+
+            // Keep the chosen index and the shown nickname in step with the
+            // picker; the live bio/pronouns of other servers are not
+            // prefetched (only the first server's are, below).
+            let guilds_meta = guilds.clone();
+            let nick_ref = server_nick.clone();
+            let chosen_ref = chosen.clone();
+            let update = move |index: usize| {
+                chosen_ref.set(index);
+                if let Some((_, _, nick)) = guilds_meta.get(index) {
+                    nick_ref.set_text(nick.as_deref().unwrap_or(""));
+                }
+            };
+            update(picker.selected() as usize);
+            picker.connect_selected_notify(move |picker| update(picker.selected() as usize));
+        }
+        stack.add_titled(&server_page, Some("server"), "Server Profile");
+
+        // -- Shared buttons --------------------------------------------
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         buttons.set_halign(gtk::Align::End);
         buttons.set_margin_top(8);
@@ -506,65 +596,311 @@ impl AppState {
         save.add_css_class("suggested-action");
         buttons.append(&cancel);
         buttons.append(&save);
-        content.append(&buttons);
+        outer.append(&buttons);
 
-        dialog.set_child(Some(&content));
+        dialog.set_child(Some(&outer));
         dialog.present(Some(&self.window));
 
-        // Prefill pronouns and bio from the live profile.
+        // Prefill the user profile's pronouns and bio from the live profile.
         let pronouns_ref = glib::SendWeakRef::from(pronouns.downgrade());
         let bio_ref = glib::SendWeakRef::from(bio_view.downgrade());
+        let http_prefill = http.clone();
         self.spawn(
-            async move { http.user_profile(my_id, None).await },
+            async move { http_prefill.user_profile(my_id, None).await },
             move |_, result| {
                 let Ok(profile) = result else {
                     return;
                 };
                 if let Some(entry) = pronouns_ref.upgrade() {
-                    let value = profile
-                        .pointer("/user_profile/pronouns")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    entry.set_text(value);
+                    entry.set_text(
+                        profile
+                            .pointer("/user_profile/pronouns")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(""),
+                    );
                 }
                 if let Some(view) = bio_ref.upgrade() {
-                    let value = profile
-                        .pointer("/user_profile/bio")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("");
-                    view.buffer().set_text(value);
+                    view.buffer().set_text(
+                        profile
+                            .pointer("/user_profile/bio")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(""),
+                    );
                 }
             },
         );
 
-        let app = self.clone();
-        save.connect_clicked(move |_| {
-            let new_name = name.text().trim().to_string();
-            let new_pronouns = pronouns.text().trim().to_string();
-            let buffer = bio_view.buffer();
-            let new_bio = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                .trim()
-                .to_string();
-            dialog.close();
-            let Some((_, http, _)) = app.active() else {
-                return;
-            };
-            let rename = (new_name != current_name && !new_name.is_empty()).then_some(new_name);
-            app.spawn(
-                async move {
-                    if let Some(name) = rename {
-                        http.set_global_name(&name).await?;
+        // Prefill the first server's live bio/pronouns (nick came from state).
+        if let Some(guild) = guilds.first().map(|guild| guild.0) {
+            let server_bio_ref = glib::SendWeakRef::from(server_bio.downgrade());
+            let server_pronouns_ref = glib::SendWeakRef::from(server_pronouns.downgrade());
+            let http_server = http.clone();
+            self.spawn(
+                async move { http_server.user_profile(my_id, Some(guild)).await },
+                move |_, result| {
+                    let Ok(profile) = result else {
+                        return;
+                    };
+                    if let Some(entry) = server_bio_ref.upgrade() {
+                        entry.set_text(
+                            profile
+                                .pointer("/guild_member_profile/bio")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(""),
+                        );
                     }
-                    http.set_profile(&new_bio, &new_pronouns).await
-                },
-                |app, result| match result {
-                    Ok(()) => app.set_status("Profile updated"),
-                    Err(error) => app.set_status(&format!("Could not update profile: {error}")),
+                    if let Some(entry) = server_pronouns_ref.upgrade() {
+                        entry.set_text(
+                            profile
+                                .pointer("/guild_member_profile/pronouns")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or(""),
+                        );
+                    }
                 },
             );
+        }
+
+        let app = self.clone();
+        let guilds_meta = guilds;
+        let user_avatar_state = user_avatar.pending.clone();
+        let server_avatar_state = server_avatar.pending.clone();
+        save.connect_clicked(move |_| {
+            let on_server = stack.visible_child_name().as_deref() == Some("server");
+            if on_server {
+                let index = chosen.get();
+                let Some((guild, _, old_nick)) = guilds_meta.get(index).cloned() else {
+                    dialog.close();
+                    return;
+                };
+                app.save_server_profile(
+                    &dialog,
+                    ServerProfileInput {
+                        guild,
+                        old_nick: old_nick.unwrap_or_default(),
+                        nick: server_nick.text().trim().to_string(),
+                        bio: server_bio.text().trim().to_string(),
+                        pronouns: server_pronouns.text().trim().to_string(),
+                        avatar: server_avatar_state.borrow().clone(),
+                    },
+                );
+            } else {
+                app.save_user_profile(
+                    &dialog,
+                    &current_name,
+                    &name,
+                    &pronouns,
+                    &bio_view,
+                    user_avatar_state.borrow().clone(),
+                );
+            }
         });
     }
+
+    /// Saves the user (global) profile: display name, pronouns, bio, avatar.
+    fn save_user_profile(
+        self: &Rc<Self>,
+        dialog: &adw::Dialog,
+        current_name: &str,
+        name: &gtk::Entry,
+        pronouns: &gtk::Entry,
+        bio_view: &gtk::TextView,
+        avatar: kc_http::AvatarEdit,
+    ) {
+        let new_name = name.text().trim().to_string();
+        let new_pronouns = pronouns.text().trim().to_string();
+        let buffer = bio_view.buffer();
+        let new_bio = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .trim()
+            .to_string();
+        dialog.close();
+        let Some((_, http, _)) = self.active() else {
+            return;
+        };
+        let rename = (new_name != current_name && !new_name.is_empty()).then_some(new_name.clone());
+        self.spawn(
+            async move {
+                if let Some(name) = rename {
+                    http.set_global_name(&name).await?;
+                }
+                http.set_profile(&new_bio, &new_pronouns).await?;
+                match avatar {
+                    kc_http::AvatarEdit::Keep => Ok(()),
+                    kc_http::AvatarEdit::Remove => http.set_avatar(None).await,
+                    kc_http::AvatarEdit::Set(bytes) => http.set_avatar(Some(&bytes)).await,
+                }
+            },
+            |app, result| match result {
+                Ok(()) => app.set_status("Profile updated"),
+                Err(error) => app.set_status(&format!("Could not update profile: {error}")),
+            },
+        );
+    }
+
+    /// Saves the per-server profile for the chosen guild: nickname (member
+    /// route), plus bio, pronouns and avatar (`/guilds/{id}/profile/@me`).
+    fn save_server_profile(self: &Rc<Self>, dialog: &adw::Dialog, input: ServerProfileInput) {
+        dialog.close();
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        let Some(my_id) = store.read(|state| state.my_id()) else {
+            return;
+        };
+        let guild = input.guild;
+        let nick_changed = input.nick != input.old_nick;
+        let new_nick = input.nick;
+        let edit = kc_http::ServerProfileEdit {
+            bio: Some(input.bio),
+            pronouns: Some(input.pronouns),
+            avatar: input.avatar,
+            nick: None,
+        };
+        self.spawn(
+            async move {
+                if nick_changed {
+                    // The member route (`@me`) always lets the user set
+                    // their own nickname.
+                    http.set_nickname(guild, my_id, true, &new_nick).await?;
+                }
+                if !edit.is_empty() {
+                    http.set_server_profile(guild, &edit).await?;
+                }
+                Ok(())
+            },
+            |app, result: kc_http::Result<()>| match result {
+                Ok(()) => app.set_status("Server profile updated"),
+                Err(error) => app.set_status(&format!("Could not update server profile: {error}")),
+            },
+        );
+    }
+
+    /// An avatar preview with Change and Remove buttons. The pending edit is
+    /// read back from `AvatarField::pending` when the dialog is saved.
+    fn avatar_field(self: &Rc<Self>, url: Option<&str>, name: &str) -> AvatarField {
+        let pending = Rc::new(std::cell::RefCell::new(kc_http::AvatarEdit::Keep));
+        let preview = self.images.avatar(64, name, url);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_margin_bottom(4);
+        row.append(&preview);
+        let actions = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        actions.set_valign(gtk::Align::Center);
+        let change = gtk::Button::with_label("Change");
+        let remove = gtk::Button::with_label("Remove");
+        remove.add_css_class("kc-danger");
+        actions.append(&change);
+        actions.append(&remove);
+        row.append(&actions);
+
+        let app = self.clone();
+        let pending_pick = pending.clone();
+        let preview_pick = preview.clone();
+        let name_owned = name.to_owned();
+        change.connect_clicked(move |_| {
+            app.choose_avatar(&pending_pick, &preview_pick, &name_owned);
+        });
+        let pending_remove = pending.clone();
+        let preview_remove = preview.clone();
+        let name_remove = name.to_owned();
+        remove.connect_clicked(move |_| {
+            *pending_remove.borrow_mut() = kc_http::AvatarEdit::Remove;
+            // Show the initials again to signal the removal.
+            preview_remove.set_custom_image(gtk::gdk::Paintable::NONE);
+            preview_remove.set_text(Some(&name_remove));
+        });
+        AvatarField { row, pending }
+    }
+
+    /// Picks an image file, keeps it as the pending avatar and previews it.
+    fn choose_avatar(
+        self: &Rc<Self>,
+        pending: &Rc<std::cell::RefCell<kc_http::AvatarEdit>>,
+        preview: &adw::Avatar,
+        name: &str,
+    ) {
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Profile Picture");
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Images"));
+        for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            filter.add_mime_type(mime);
+        }
+        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        dialog.set_filters(Some(&filters));
+        let app = self.clone();
+        let pending = pending.clone();
+        let preview = preview.clone();
+        let name = name.to_owned();
+        dialog.open(
+            Some(&self.window),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                let Some(path) = result.ok().and_then(|file| file.path()) else {
+                    return;
+                };
+                spawn_local(
+                    &app,
+                    async move {
+                        let bytes = tokio::fs::read(&path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        // Discord caps avatars around 10 MB; refuse larger.
+                        if bytes.len() > 10 * 1024 * 1024 {
+                            return Err("the image is larger than 10 MB".to_owned());
+                        }
+                        Ok(bytes)
+                    },
+                    move |app, result| match result {
+                        Ok(bytes) => {
+                            if let Some(texture) = texture_from_bytes(&bytes) {
+                                preview.set_custom_image(Some(&texture));
+                            } else {
+                                preview.set_custom_image(gtk::gdk::Paintable::NONE);
+                                preview.set_text(Some(&name));
+                            }
+                            *pending.borrow_mut() = kc_http::AvatarEdit::Set(bytes);
+                        }
+                        Err(error) => app.set_status(&format!("Could not read the image: {error}")),
+                    },
+                );
+            },
+        );
+    }
+}
+
+/// An avatar preview row and the edit it will apply on save.
+struct AvatarField {
+    row: gtk::Box,
+    pending: Rc<std::cell::RefCell<kc_http::AvatarEdit>>,
+}
+
+/// The chosen server profile's values, read from the fields on save.
+struct ServerProfileInput {
+    guild: Snowflake,
+    old_nick: String,
+    nick: String,
+    bio: String,
+    pronouns: String,
+    avatar: kc_http::AvatarEdit,
+}
+
+/// A multi-line About Me editor: the view and its scroller.
+fn bio_editor() -> (gtk::TextView, gtk::ScrolledWindow) {
+    let view = gtk::TextView::new();
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_size_request(-1, 90);
+    view.add_css_class("kc-bio-edit");
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&view));
+    (view, scroll)
+}
+
+/// A paintable from image bytes for the avatar preview, if GDK can read it.
+fn texture_from_bytes(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
+    gtk::gdk::Texture::from_bytes(&glib::Bytes::from(bytes)).ok()
 }
 
 /// Formats a Unix-millisecond instant like `Nov 11, 2026`.

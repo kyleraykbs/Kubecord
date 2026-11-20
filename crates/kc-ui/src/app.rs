@@ -445,6 +445,27 @@ pub fn run() -> glib::ExitCode {
                             app_state.show_profile(friend, &anchor);
                         }
                     }
+                    // The Edit Profile dialog, on its User or Server tab.
+                    // Select the first server first so the server tab has a
+                    // guild to edit.
+                    "edit-profile" | "edit-profile-server" => {
+                        if let Some(guild) = store.read(|state| state.guilds.keys().next().copied())
+                        {
+                            app_state.select_guild(guild);
+                        }
+                        app_state.edit_profile_dialog();
+                        if popup == "edit-profile-server"
+                            && let Some(stack) = app_state
+                                .window
+                                .visible_dialog()
+                                .and_then(|dialog| dialog.child())
+                                .and_then(|outer| outer.first_child())
+                                .and_then(|switcher| switcher.next_sibling())
+                                .and_downcast::<adw::ViewStack>()
+                        {
+                            stack.set_visible_child_name("server");
+                        }
+                    }
                     _ => {
                         if let Some(me) = store.read(|state| state.my_id()) {
                             let anchor = app_state.window.clone().upcast::<gtk::Widget>();
