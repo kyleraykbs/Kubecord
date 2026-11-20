@@ -24,6 +24,9 @@
 //!   page without made-up data: the load fails) and `invite`.
 //! - `viewer`: the image viewer (a default avatar, the only download),
 //!   zoomed in; saved to `<screenshot>.viewer.png`.
+//! - `gif`: a message with a real animated-GIF attachment (the GIF tag and
+//!   layout render offline; the motion needs the network). `gif-viewer`
+//!   also opens it in the image viewer, saved to `<screenshot>.viewer.png`.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
 //!   and the open one; the notifications they would raise are printed
 //!   (`demo: notification …`, nothing reaches the desktop), then one is
@@ -290,6 +293,25 @@ fn message(id: u64, author: u64, content: &str) -> Value {
     })
 }
 
+/// A message carrying one `image/gif` attachment, for the GIF demo. The URL
+/// is a real public GIF so the layout (and the animation, when online) can be
+/// seen; offline the still placeholder and GIF tag still render.
+fn gif_message(id: u64, author: u64) -> Value {
+    let url = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+    let names = ["", "demo", "ada", "grace", "linus"];
+    json!({
+        "id": id.to_string(), "channel_id": GENERAL.to_string(), "guild_id": GUILD.to_string(),
+        "author": {"id": author.to_string(), "username": names[author as usize % names.len()]},
+        "content": "look at this gif", "timestamp": iso_of(id), "type": 0,
+        "attachments": [{
+            "id": "1", "filename": "creaking.gif", "size": 1_000_000,
+            "url": url, "proxy_url": url,
+            "content_type": "image/gif", "width": 400, "height": 400,
+        }],
+        "embeds": [], "mentions": []
+    })
+}
+
 impl AppState {
     pub(crate) fn show_demo(self: &Rc<Self>, mode: &str) {
         if let Some(what) = mode.strip_prefix("login") {
@@ -477,6 +499,39 @@ impl AppState {
                         }
                     }
                 });
+            }
+            "gif" | "gif-viewer" => {
+                // A message with a real animated-GIF attachment. The still
+                // placeholder, GIF tag and layout render offline; the motion
+                // itself needs the network (the CDN), so a screenshot shows a
+                // frame, not the animation.
+                let id = id_at(0, 41);
+                store.apply("MESSAGE_CREATE", &gif_message(id, ADA));
+                self.open_channel(general);
+                if mode == "gif-viewer" {
+                    // Open the GIF in the viewer (it animates there when
+                    // online); the still/first frame is what a screenshot
+                    // catches.
+                    let url = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+                    let app = self.clone();
+                    let url = url.to_owned();
+                    glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                        app.show_image(&url, &url);
+                        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                            let app = app.clone();
+                            let url = url.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                                if let Some(window) = app.window_of(&format!("image:{url}")) {
+                                    let path = format!("{path}.viewer.png");
+                                    let _ = crate::app::save_window_png(
+                                        &window,
+                                        std::path::Path::new(&path),
+                                    );
+                                }
+                            });
+                        }
+                    });
+                }
             }
             "viewer" => {
                 self.open_channel(general);

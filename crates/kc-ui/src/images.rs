@@ -216,6 +216,39 @@ impl ImageCache {
         });
     }
 
+    /// Fills `picture` with the image at `url`, animating it if the bytes are
+    /// an animated GIF (a `gtk::Picture` driven frame by frame; see
+    /// `animation`), otherwise showing a still texture. The player is owned by
+    /// the picture, so it stops and frees its frames when the picture is gone.
+    /// Use for media that may be a real animated GIF (attachments, picker
+    /// previews, the viewer); `set_picture` stays the still-only path.
+    pub(crate) fn set_animated_picture(&self, picture: &gtk::Picture, url: &str) {
+        let weak = picture.downgrade();
+        // Download to the disk cache under a `.gif` name (reuses dedup and the
+        // on-disk cache), then decode the bytes on the main thread.
+        self.file(url, "gif", move |path| {
+            let (Some(picture), Some(path)) = (weak.upgrade(), path) else {
+                return;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return;
+            };
+            if crate::animation::is_gif(&bytes)
+                && let Some(animation) = crate::animation::decode(&bytes)
+            {
+                // Multi-frame GIF: the player drives the picture and holds
+                // itself alive for the picture's lifetime (see `attach`). A
+                // single frame returns None, already painted as a still.
+                crate::animation::GifPlayer::attach(&picture, &animation);
+                return;
+            }
+            // Not an animated GIF: show it as a plain texture.
+            if let Some(texture) = decode_blocking(bytes) {
+                picture.set_paintable(Some(&texture));
+            }
+        });
+    }
+
     /// Fills `image` (icon-sized, e.g. an inline emoji) once available.
     pub fn set_image(&self, image: &gtk::Image, url: &str) {
         let weak = image.downgrade();

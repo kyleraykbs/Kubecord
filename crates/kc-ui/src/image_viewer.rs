@@ -18,6 +18,13 @@ pub(crate) const MAX_ZOOM: f64 = 8.0;
 /// One wheel notch or key press zooms by this factor.
 const STEP: f64 = 1.25;
 
+/// Whether a URL points at a GIF (its path, before any query string, ends
+/// in `.gif`), so the viewer should animate it.
+fn is_gif_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.to_lowercase().ends_with(".gif")
+}
+
 /// The scale that fits an image into a viewport without enlarging it.
 pub(crate) fn fit_scale(image: (f64, f64), viewport: (f64, f64)) -> f64 {
     if image.0 <= 0.0 || image.1 <= 0.0 || viewport.0 <= 0.0 || viewport.1 <= 0.0 {
@@ -198,7 +205,13 @@ impl AppState {
         picture.set_valign(gtk::Align::Center);
         // Show the preview already in memory while the original downloads.
         self.images.set_picture(&picture, preview_url);
-        self.images.set_picture(&picture, url);
+        if is_gif_url(url) {
+            // A real GIF animates in the viewer (zoom/pan still work on the
+            // animated frames); a still image keeps the plain texture path.
+            self.images.set_animated_picture(&picture, url);
+        } else {
+            self.images.set_picture(&picture, url);
+        }
 
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
@@ -437,6 +450,17 @@ mod tests {
 
     const IMAGE: (f64, f64) = (2000.0, 1000.0);
     const VIEW: (f64, f64) = (1000.0, 800.0);
+
+    #[test]
+    fn gif_urls_are_detected_ignoring_the_query() {
+        assert!(is_gif_url("https://media.discordapp.net/a/b.gif"));
+        assert!(is_gif_url(
+            "https://media.discordapp.net/a/b.gif?width=100&height=80"
+        ));
+        assert!(is_gif_url("HTTP://x/Y.GIF"));
+        assert!(!is_gif_url("https://media.discordapp.net/a/b.png"));
+        assert!(!is_gif_url("https://x/gif-thing.webp?x=1"));
+    }
 
     #[test]
     fn fitting_never_enlarges() {

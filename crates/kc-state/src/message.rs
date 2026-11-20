@@ -41,6 +41,12 @@ impl Attachment {
         self.content_type_is("image/") && self.width.is_some()
     }
 
+    /// An animated-image attachment (`image/gif`): shown as a looping GIF
+    /// rather than a still.
+    pub fn is_gif(&self) -> bool {
+        self.content_type_is("image/gif") || self.filename.to_lowercase().ends_with(".gif")
+    }
+
     pub fn is_video(&self) -> bool {
         self.content_type_is("video/")
     }

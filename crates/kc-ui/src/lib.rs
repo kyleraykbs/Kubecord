@@ -1,6 +1,7 @@
 //! GTK4/libadwaita interface for kylecord.
 
 mod account_notice;
+mod animation;
 pub mod app;
 mod captcha;
 mod channel_settings;

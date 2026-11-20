@@ -24,8 +24,12 @@ pub(crate) enum MediaKind {
     Image,
     /// A video with a poster frame; clicking opens it externally.
     Video,
-    /// A GIF delivered as a short video, played inline, muted and looping.
+    /// A GIF delivered as a short video (a `gifv` embed, Tenor/Giphy MP4),
+    /// played inline, muted and looping, through GStreamer.
     Gif { video_url: String },
+    /// A real animated `image/gif` attachment, animated frame by frame from
+    /// the GIF bytes; clicking opens it in the viewer.
+    AnimatedGif,
 }
 
 pub(crate) struct Media<'a> {
@@ -399,6 +403,8 @@ impl AppState {
                 height,
                 kind: if attachment.is_video() {
                     MediaKind::Video
+                } else if attachment.is_gif() {
+                    MediaKind::AnimatedGif
                 } else {
                     MediaKind::Image
                 },
@@ -467,7 +473,7 @@ impl AppState {
                 play.set_can_target(false);
                 overlay.add_overlay(&play);
             }
-            MediaKind::Gif { .. } => {
+            MediaKind::Gif { .. } | MediaKind::AnimatedGif => {
                 let tag = gtk::Label::new(Some("GIF"));
                 tag.add_css_class("kc-media-tag");
                 tag.set_halign(gtk::Align::Start);
@@ -485,12 +491,19 @@ impl AppState {
             MediaKind::Gif { video_url } => Some(video_url.clone()),
             _ => None,
         };
+        let animated = matches!(media.kind, MediaKind::AnimatedGif);
         let start = {
             let app = self.clone();
             let picture = picture.clone();
             let url = url.clone();
             move || {
-                app.images.set_picture(&picture, &url);
+                if animated {
+                    // A real animated GIF: driven frame by frame from its
+                    // bytes (falls back to a still if it has one frame).
+                    app.images.set_animated_picture(&picture, &url);
+                } else {
+                    app.images.set_picture(&picture, &url);
+                }
                 if let Some(video_url) = &gif_video {
                     app.play_gif(&picture, video_url);
                 }
@@ -521,16 +534,27 @@ impl AppState {
             start();
         }
 
+        // What a click does: `Some(true)` opens the target externally (a
+        // video's page), `Some(false)` opens it in the in-app viewer (images
+        // and real GIFs, which the viewer animates), `None` does nothing (a
+        // `gifv` is an MP4 the viewer cannot animate, so it keeps playing
+        // inline instead).
         let opens = match &media.kind {
-            MediaKind::Image => Some(false),
+            MediaKind::Image | MediaKind::AnimatedGif => Some(false),
             MediaKind::Video => Some(true),
-            // A GIF already shows everything there is to see.
             MediaKind::Gif { .. } => None,
+        };
+        // A real GIF opens animated in the viewer, so point the viewer at the
+        // GIF bytes (the proxy still URL) rather than a browser page.
+        let open_target = if matches!(media.kind, MediaKind::AnimatedGif) {
+            url.clone()
+        } else {
+            media.target.to_owned()
         };
         if let Some(external) = opens {
             let click = gtk::GestureClick::new();
             let app = self.clone();
-            let target = media.target.to_owned();
+            let target = open_target;
             let preview_url = url.clone();
             click.connect_released(move |_, _, _, _| {
                 if hidden.get() {
