@@ -730,3 +730,9 @@ Four read-only review agents went over the session's untested code. No high-seve
 - server_settings.rs: removed the dead `filling` guard (never set; the set-before-connect order already prevents spurious patches).
 
 Left (low / uncertain, noted for the user): login Cancel during an in-flight request can still add the account (edge case); SMS-send captcha not routed through the solve flow (rare); a late STREAM_DELETE after a gateway-session rejoin could tear down a re-created stream (timing-dependent).
+
+## Login edge fixes + LICENSE (2026-11-20)
+
+- Login Cancel/restart race: `LoginPage.generation` is bumped in `reset()`; each request captures it and a stale result (from a cancelled or superseded attempt) is dropped (`login_answered_if_current`, and the SMS-send callback checks it). So backing out of a login no longer signs you in when the in-flight request returns.
+- SMS-send captcha: `AuthClient::send_sms` now takes a captcha answer and returns `Error::Captcha` on a captcha response (via the same path as `/auth/login`); `sms_send_body` carries the captcha key. The UI's `send_login_sms` goes through `with_captcha`, so a captcha on "Text Me a Code" is solved in-app and retried instead of dead-ending. Test covers the captcha body.
+- Added an MIT `LICENSE` (copyright kyleraykbs, 2026) — swap for another license if wanted; version stays 0.1.0.

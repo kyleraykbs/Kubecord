@@ -180,8 +180,10 @@ pub fn mfa_body(
 }
 
 /// The body of `POST /auth/mfa/sms/send`.
-pub fn sms_send_body(ticket: &str) -> Zeroizing<Vec<u8>> {
-    to_bytes(json!({ "ticket": ticket }))
+pub fn sms_send_body(ticket: &str, captcha: Option<&CaptchaAnswer>) -> Zeroizing<Vec<u8>> {
+    let mut body = json!({ "ticket": ticket });
+    add_captcha(&mut body, captcha);
+    to_bytes(body)
 }
 
 fn add_captcha(body: &mut Value, captcha: Option<&CaptchaAnswer>) {
@@ -449,22 +451,36 @@ impl AuthClient {
     pub async fn send_sms(
         &self,
         ticket: &str,
+        captcha: Option<&CaptchaAnswer>,
     ) -> Result<std::result::Result<Option<String>, Rejection>> {
         let (status, retry_after, bytes) = self
-            .send("/auth/mfa/sms/send", sms_send_body(ticket), None)
+            .send(
+                "/auth/mfa/sms/send",
+                sms_send_body(ticket, captcha),
+                captcha,
+            )
             .await?;
         if status.is_success() {
             return Ok(Ok(parse_sms_sent(&bytes)));
         }
         match parse_response(status, retry_after, &bytes) {
+            // Surface a captcha as the error the caller's captcha-solve flow
+            // (`with_captcha`) understands, so it can be solved and retried.
+            AuthResponse::Captcha {
+                service,
+                sitekey,
+                rqdata,
+                rqtoken,
+            } => Err(Error::Captcha {
+                service,
+                sitekey,
+                rqdata,
+                rqtoken,
+            }),
             AuthResponse::Rejected(rejection) => Ok(Err(rejection)),
-            other => Ok(Err(Rejection::Other(format!(
-                "Discord could not send a text message ({}).",
-                match other {
-                    AuthResponse::Captcha { .. } => "it wants a captcha",
-                    _ => "unexpected answer",
-                }
-            )))),
+            _ => Ok(Err(Rejection::Other(
+                "Discord could not send a text message (unexpected answer).".to_owned(),
+            ))),
         }
     }
 
@@ -570,8 +586,19 @@ mod tests {
             json!({"code": "123456", "ticket": "ticket", "login_source": null,
                    "gift_code_sku_id": null})
         );
-        let value: Value = serde_json::from_slice(&sms_send_body("t")).unwrap();
+        let value: Value = serde_json::from_slice(&sms_send_body("t", None)).unwrap();
         assert_eq!(value, json!({"ticket": "t"}));
+        // With a captcha answer the key rides along in the body.
+        let answer = CaptchaAnswer {
+            key: "k".to_owned(),
+            rqtoken: Some("r".to_owned()),
+        };
+        let with_captcha: Value =
+            serde_json::from_slice(&sms_send_body("t", Some(&answer))).unwrap();
+        assert_eq!(
+            with_captcha,
+            json!({"ticket": "t", "captcha_key": "k", "captcha_rqtoken": "r"})
+        );
         assert_eq!(MfaMethod::Totp.path(), "/auth/mfa/totp");
         assert_eq!(MfaMethod::Backup.path(), "/auth/mfa/backup");
         assert_eq!(MfaMethod::Sms.path(), "/auth/mfa/sms");
@@ -917,7 +944,7 @@ mod tests {
         assert_eq!(client.fingerprint().await, None);
         *client.fingerprint.lock() = Some("fp".into());
         assert_eq!(
-            client.send_sms("tick").await.unwrap(),
+            client.send_sms("tick", None).await.unwrap(),
             Ok(Some("+*******1234".to_owned()))
         );
         let response = client

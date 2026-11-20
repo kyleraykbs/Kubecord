@@ -273,6 +273,10 @@ pub(crate) struct LoginPage {
     /// is kept for the code step).
     pub client: RefCell<Option<AuthClient>>,
     pub busy: Cell<bool>,
+    /// Bumped whenever the page is reset (Cancel, a new attempt), so a
+    /// request still in flight from a cancelled attempt is dropped instead of
+    /// signing the user in after they backed out.
+    pub generation: Cell<u64>,
 }
 
 fn field_error() -> gtk::Label {
@@ -460,6 +464,7 @@ impl LoginPage {
             step: RefCell::new(Step::Credentials),
             client: RefCell::new(None),
             busy: Cell::new(false),
+            generation: Cell::new(0),
         };
         login.render();
         login
@@ -549,6 +554,8 @@ impl LoginPage {
 
     /// Back to an empty first step: after signing in, or on Cancel.
     pub(crate) fn reset(&self) {
+        // Any request in flight from the attempt being reset is now stale.
+        self.generation.set(self.generation.get().wrapping_add(1));
         *self.step.borrow_mut() = Step::Credentials;
         self.client.replace(None);
         for row in [
@@ -685,6 +692,7 @@ impl AppState {
                 login.client.replace(Some(client.clone()));
                 login.show_feedback(&Feedback::default());
                 login.set_busy(true);
+                let generation = login.generation.get();
                 tracing::info!("signing in with a password");
                 self.with_captcha(
                     "Discord wants a captcha before it signs you in.",
@@ -693,7 +701,7 @@ impl AppState {
                             (client.clone(), name.clone(), password.clone());
                         async move { client.login(&name, &password, captcha.as_ref()).await }
                     },
-                    |app, result| app.login_answered(result),
+                    move |app, result| app.login_answered_if_current(generation, result),
                 );
             }
             Step::Code { challenge, sms } => {
@@ -716,6 +724,7 @@ impl AppState {
                 let ticket = challenge.ticket.clone();
                 login.show_feedback(&Feedback::default());
                 login.set_busy(true);
+                let generation = login.generation.get();
                 tracing::info!(?method, "sending a two-factor code");
                 self.with_captcha(
                     "Discord wants a captcha before it signs you in.",
@@ -727,7 +736,7 @@ impl AppState {
                                 .await
                         }
                     },
-                    |app, result| app.login_answered(result),
+                    move |app, result| app.login_answered_if_current(generation, result),
                 );
             }
         }
@@ -743,11 +752,19 @@ impl AppState {
         };
         login.show_feedback(&Feedback::default());
         login.set_busy(true);
+        let generation = login.generation.get();
         let ticket = challenge.ticket.clone();
-        crate::video_setup::spawn_local(
-            self,
-            async move { client.send_sms(&ticket).await },
+        self.with_captcha(
+            "Discord wants a captcha before it texts you a code.",
+            move |captcha| {
+                let (client, ticket) = (client.clone(), ticket.clone());
+                async move { client.send_sms(&ticket, captcha.as_ref()).await }
+            },
             move |app, result| {
+                // The user cancelled or started over while this was in flight.
+                if app.login.generation.get() != generation {
+                    return;
+                }
                 app.login.set_busy(false);
                 match result {
                     Ok(Ok(phone)) => {
@@ -765,6 +782,20 @@ impl AppState {
                 }
             },
         );
+    }
+
+    /// Calls [`Self::login_answered`] only if the attempt that produced
+    /// `result` has not been cancelled or superseded (its generation still
+    /// matches). A stale result is dropped so a cancelled attempt cannot sign
+    /// the user in.
+    fn login_answered_if_current(
+        self: &Rc<Self>,
+        generation: u64,
+        result: kc_http::Result<AuthResponse>,
+    ) {
+        if self.login.generation.get() == generation {
+            self.login_answered(result);
+        }
     }
 
     /// Discord answered the password or a code (after any captcha).
