@@ -442,6 +442,18 @@ impl AuthClient {
         ticket: &str,
         captcha: Option<&CaptchaAnswer>,
     ) -> Result<AuthResponse> {
+        // Diagnostics for a rejected code: the code's shape and the ticket's
+        // length, never their values, so a mangled/empty code or a missing
+        // ticket is visible without leaking the secret.
+        let digits = code.expose().chars().filter(char::is_ascii_digit).count();
+        tracing::info!(
+            ?method,
+            code_len = code.expose().chars().count(),
+            code_digits = digits,
+            ticket_len = ticket.len(),
+            has_captcha = captcha.is_some(),
+            "submitting a two-factor code"
+        );
         let body = mfa_body(code, ticket, captcha);
         self.post(method.path(), body, captcha).await
     }
@@ -539,6 +551,20 @@ impl AuthClient {
             .and_then(|value| value.parse::<f64>().ok());
         let bytes = Zeroizing::new(response.bytes().await?.to_vec());
         tracing::info!(path, %status, "login request answered");
+        // On a failure, log Discord's own error code and message (never the
+        // request, which holds the password/code). This is how Discord
+        // describes the problem, so a rejected login can be diagnosed.
+        if !status.is_success() {
+            let value = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+            let code = value.get("code").and_then(Value::as_i64);
+            let message = value.get("message").and_then(Value::as_str).unwrap_or("");
+            let fields: Vec<&str> = value
+                .get("errors")
+                .and_then(Value::as_object)
+                .map(|map| map.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(path, ?code, message, ?fields, "login request refused");
+        }
         Ok((status, retry_after, bytes))
     }
 }

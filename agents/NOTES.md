@@ -757,3 +757,8 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 
 - `account_name` (app.rs) no longer falls back to the redacted token for an account with no label and no live session yet; it shows "Signing in…" instead (the token is never shown in the list).
 - On `UiEvent::Ready`, if the account's label is empty/None it is set to the user's `display_name()` and saved (`model.accounts.upsert` + `save`). So a token-only account is named by its user once, permanently, and the filler is only ever seen during the brief first connect.
+
+## Diagnosing MFA code rejection (2026-11-20)
+
+- User: email+password login succeeds (`/auth/login` 200), but BOTH `/auth/mfa/totp` and `/auth/mfa/sms` return 400 ("invalid code"); `/auth/mfa/sms/send` succeeds (200). So it is not clock skew (SMS is not time-based) and not the ticket (sms/send used it fine) — it is specific to the code-submit request (`submit_code`/`mfa_body`).
+- Added safe diagnostics in kc-http `auth.rs` (no secrets): `send` logs Discord's error `code`/`message`/`fields` on any failure (`WARN login request refused`); `submit_code` logs the code's length + digit count + ticket length + method (`INFO submitting a two-factor code`), never the code or ticket value. Next: user retries, and these two lines say whether the code is mangled/empty (field-read bug) or clean (a request/API issue — then the error code/message names it).
