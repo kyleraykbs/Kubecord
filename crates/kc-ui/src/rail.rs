@@ -14,6 +14,7 @@ use crate::widgets::{badge, clear_box, first_icon, hex_color};
 const ICON: i32 = 48;
 
 /// What the rail needs to draw one guild.
+#[derive(Hash)]
 struct GuildItem {
     id: Snowflake,
     name: String,
@@ -22,6 +23,7 @@ struct GuildItem {
     mentions: u32,
 }
 
+#[derive(Hash)]
 enum RailEntry {
     Guild(GuildItem),
     Folder {
@@ -34,8 +36,6 @@ enum RailEntry {
 
 impl AppState {
     pub(crate) fn render_guilds(self: &Rc<Self>) {
-        clear_box(&self.guild_box);
-
         let snapshot = self.with_session(|session| {
             session.store.read(|state| {
                 let item = |id: Snowflake| -> Option<GuildItem> {
@@ -108,6 +108,34 @@ impl AppState {
                 )
             })
             .unwrap_or((None, true, Default::default()));
+
+        // The rail is a pure function of this snapshot and the selection, so
+        // a rebuild that would draw the same thing (a read-state or presence
+        // event that changed nothing visible here) is skipped. Recreating an
+        // avatar per server is what made a busy account's sidebar hitch.
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            entries.hash(&mut hasher);
+            for (channel, title, icon, count) in &unread_dms {
+                channel.id.hash(&mut hasher);
+                title.hash(&mut hasher);
+                icon.hash(&mut hasher);
+                count.hash(&mut hasher);
+            }
+            selected_guild.hash(&mut hasher);
+            dm_mode.hash(&mut hasher);
+            let mut folders: Vec<i64> = open_folders.iter().copied().collect();
+            folders.sort_unstable();
+            folders.hash(&mut hasher);
+            hasher.finish()
+        };
+        if self.rail_fingerprint.get() == Some(fingerprint) {
+            return;
+        }
+        self.rail_fingerprint.set(Some(fingerprint));
+
+        clear_box(&self.guild_box);
 
         // Home.
         let home = gtk::Button::new();
