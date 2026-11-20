@@ -106,8 +106,35 @@ pub fn run() -> glib::ExitCode {
         let ui_state = state.clone();
         glib::MainContext::default().spawn_local(async move {
             while let Ok(event) = receiver.recv().await {
+                // Time each event's handling: anything that blocks the main
+                // thread this long freezes the whole UI (and a screencast's
+                // preview) and shows up as a hitch. The label is the event
+                // kind only, never its contents.
+                let label = event_label(&event);
+                let started = std::time::Instant::now();
                 ui_state.handle_event(event);
+                let elapsed = started.elapsed();
+                if elapsed >= Duration::from_millis(16) {
+                    tracing::warn!(
+                        event = label,
+                        millis = elapsed.as_millis() as u64,
+                        "a UI event blocked the main thread"
+                    );
+                }
             }
+        });
+        // A watchdog: if the main loop cannot service a 100 ms tick on time,
+        // something blocked it. Reports the stall length, so a hitch with no
+        // single slow event (many piling up) is still visible.
+        let mut last_tick = std::time::Instant::now();
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            let now = std::time::Instant::now();
+            let gap = now.duration_since(last_tick);
+            last_tick = now;
+            if gap >= Duration::from_millis(250) {
+                tracing::warn!(millis = gap.as_millis() as u64, "main thread stalled");
+            }
+            glib::ControlFlow::Continue
         });
 
         state.start_existing();
@@ -1813,5 +1840,68 @@ impl AppState {
                 .store
                 .read(|state| state.ordered_guilds().into_iter().cloned().collect());
         }
+    }
+}
+
+/// A short, data-free name for a UI event, for the main-thread timing log.
+fn event_label(event: &UiEvent) -> &'static str {
+    match event {
+        UiEvent::Run(_) => "run",
+        UiEvent::LoginSuccess { .. } => "login-success",
+        UiEvent::LoginFailed { .. } => "login-failed",
+        UiEvent::Connected { .. } => "connected",
+        UiEvent::Ready { .. } => "ready",
+        UiEvent::Resumed { .. } => "resumed",
+        UiEvent::StoreEvent { event, .. } => store_event_label(event),
+        UiEvent::GatewayClosed { .. } => "gateway-closed",
+        UiEvent::VideoUpload { .. } => "video-upload",
+        UiEvent::RequiredAction { .. } => "required-action",
+        UiEvent::VoiceJoined { .. } => "voice-joined",
+        UiEvent::VoiceLeft { .. } => "voice-left",
+        UiEvent::VoiceSpeaking { .. } => "voice-speaking",
+        UiEvent::VoiceError { .. } => "voice-error",
+        UiEvent::VoicePing { .. } => "voice-ping",
+        UiEvent::CallRinging { .. } => "call-ringing",
+        UiEvent::StreamStarted { .. } => "stream-started",
+        UiEvent::StreamStopped { .. } => "stream-stopped",
+        UiEvent::StreamError { .. } => "stream-error",
+        UiEvent::VideoStarted { .. } => "video-started",
+        UiEvent::VideoStopped { .. } => "video-stopped",
+        UiEvent::StreamWatch { .. } => "stream-watch",
+        UiEvent::CameraChoices { .. } => "camera-choices",
+        UiEvent::CameraUnavailable { .. } => "camera-unavailable",
+        UiEvent::CameraFailed { .. } => "camera-failed",
+        UiEvent::CameraStarted { .. } => "camera-started",
+        UiEvent::CameraStopped { .. } => "camera-stopped",
+        UiEvent::Error { .. } => "error",
+    }
+}
+
+/// A short, data-free name for a store event (the common hitch suspects).
+fn store_event_label(event: &StoreEvent) -> &'static str {
+    match event {
+        StoreEvent::Ready => "store:ready",
+        StoreEvent::GuildAdded(_) => "store:guild-added",
+        StoreEvent::GuildUpdated(_) => "store:guild-updated",
+        StoreEvent::GuildRemoved(_) => "store:guild-removed",
+        StoreEvent::ChannelAdded(_) => "store:channel-added",
+        StoreEvent::ChannelUpdated(_) => "store:channel-updated",
+        StoreEvent::ChannelRemoved(_) => "store:channel-removed",
+        StoreEvent::MessageAdded { .. } => "store:message-added",
+        StoreEvent::MessageUpdated { .. } => "store:message-updated",
+        StoreEvent::MessageDeleted { .. } => "store:message-deleted",
+        StoreEvent::Typing { .. } => "store:typing",
+        StoreEvent::PresenceUpdated { .. } => "store:presence",
+        StoreEvent::VoiceStateUpdated { .. } => "store:voice-state",
+        StoreEvent::VoiceServerUpdated { .. } => "store:voice-server",
+        StoreEvent::StreamUpdated(_) => "store:stream",
+        StoreEvent::RelationshipsUpdated => "store:relationships",
+        StoreEvent::GuildChannelsLoaded(_) => "store:guild-channels",
+        StoreEvent::GuildMembersUpdated(_) => "store:guild-members",
+        StoreEvent::HistoryLoaded(_) => "store:history",
+        StoreEvent::ReadStateUpdated(_) => "store:read-state",
+        StoreEvent::SettingsUpdated => "store:settings",
+        StoreEvent::MemberListUpdated(_) => "store:member-list",
+        StoreEvent::BansUpdated(_) => "store:bans",
     }
 }
