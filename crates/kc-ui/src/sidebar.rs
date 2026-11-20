@@ -50,16 +50,26 @@ struct DmRow {
 }
 
 impl AppState {
-    /// Redraws the sidebar on the next idle, however many events asked.
+    /// Redraws the sidebar shortly after, coalescing however many events
+    /// asked. A short delay (rather than the next idle) collapses the bursts
+    /// of presence/read-state events a busy account streams into one rebuild.
     pub(crate) fn queue_sidebar(self: &Rc<Self>) {
         if self.sidebar_redraw_queued.replace(true) {
             return;
         }
         let app = self.clone();
-        glib::idle_add_local_once(move || {
+        glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
             app.sidebar_redraw_queued.set(false);
+            let started = std::time::Instant::now();
             app.render_guilds();
             app.render_channels();
+            let elapsed = started.elapsed();
+            if elapsed >= std::time::Duration::from_millis(16) {
+                tracing::warn!(
+                    millis = elapsed.as_millis() as u64,
+                    "rebuilding the sidebar blocked the main thread"
+                );
+            }
         });
     }
 

@@ -256,6 +256,18 @@ impl AppState {
     /// Renders the member panel for the selected guild channel, or the
     /// recipients of a group DM.
     pub(crate) fn render_members(self: &Rc<Self>) {
+        let started = std::time::Instant::now();
+        self.render_members_inner();
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(16) {
+            tracing::warn!(
+                millis = elapsed.as_millis() as u64,
+                "rebuilding the member list blocked the main thread"
+            );
+        }
+    }
+
+    fn render_members_inner(self: &Rc<Self>) {
         clear_box(&self.members_box);
 
         let data = self.with_session(|session| {
