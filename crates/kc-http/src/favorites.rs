@@ -3,7 +3,7 @@
 //!
 //! `GET /users/@me/settings-proto/2` returns `{"settings": "<base64>"}` whose
 //! bytes are a `FrecencyUserSettings` message. The favourites live in its
-//! `favorite_gifs` field (number 1), a message whose `gifs` field (number 1)
+//! `favorite_gifs` field (number 2), a message whose `gifs` field (number 1)
 //! is a `map<string, FavoriteGif>`. A proto map is encoded as repeated
 //! entries, each a length-delimited message with the key at field 1 and the
 //! value at field 2. A `FavoriteGif` carries `format` (1, enum: 2 = IMAGE,
@@ -37,6 +37,11 @@ const VARINT: u64 = 0;
 const LEN: u64 = 2;
 const I64: u64 = 1;
 const I32: u64 = 5;
+
+/// `favorite_gifs` is field 2 of `FrecencyUserSettings` (field 1 is
+/// `versions`), confirmed against a live settings blob. Its inner `gifs` map
+/// is field 1 of the `FavoriteGifs` message.
+const FAVORITE_GIFS_FIELD: u64 = 2;
 
 /// Reads a base-128 varint at `*pos`, advancing it. Returns `None` on a
 /// truncated or overlong varint.
@@ -176,11 +181,11 @@ fn parse_favorite_gifs(bytes: &[u8]) -> Vec<FavoriteGif> {
 }
 
 /// Parses the user's favourite GIFs out of the decoded `FrecencyUserSettings`
-/// proto bytes (field 1 `favorite_gifs`), ordered by the saved order.
+/// proto bytes (field 2 `favorite_gifs`), ordered by the saved order.
 pub(crate) fn parse_settings_proto(bytes: &[u8]) -> Vec<FavoriteGif> {
     let mut gifs = Vec::new();
     walk(bytes, |field, wire, data, pos| {
-        if field == 1
+        if field == FAVORITE_GIFS_FIELD
             && wire == LEN
             && let Some(favorites) = read_len(data, pos)
         {
@@ -198,7 +203,7 @@ pub(crate) fn parse_settings_proto(bytes: &[u8]) -> Vec<FavoriteGif> {
 // stickers and all their frecency data, so the rewrite MUST preserve every
 // other field byte-for-byte. The approach: split the top-level message into
 // its fields as raw (tag, value) byte spans, in order; only the
-// `favorite_gifs` field (number 1) is parsed one level deeper (again keeping
+// `favorite_gifs` field (number 2) is parsed one level deeper (again keeping
 // its non-`gifs` fields raw) so just the `gifs` map is changed; then
 // everything is re-serialised in the original order. Unknown fields -- at
 // either level -- survive untouched.
@@ -442,7 +447,7 @@ fn apply_change(bytes: &[u8], change: &Change) -> Option<Vec<u8>> {
     let mut fields = split_fields(bytes)?;
     if let Some(favorite_gifs) = fields
         .iter_mut()
-        .find(|field| field.number == 1 && field.wire == LEN)
+        .find(|field| field.number == FAVORITE_GIFS_FIELD && field.wire == LEN)
     {
         favorite_gifs.value = rewrite_favorite_gifs(&favorite_gifs.value, change)?;
     } else if let Change::Add { .. } = change {
@@ -452,7 +457,7 @@ fn apply_change(bytes: &[u8], change: &Change) -> Option<Vec<u8>> {
         fields.insert(
             0,
             RawField {
-                number: 1,
+                number: FAVORITE_GIFS_FIELD,
                 wire: LEN,
                 value,
             },
@@ -556,10 +561,10 @@ mod tests {
             len_field(&mut favorites, 1, &map_entry(key, value));
         }
         varint_field(&mut favorites, 2, 1); // hide_tooltip = true
-        // FrecencyUserSettings: favorite_gifs at field 1, plus an unrelated
+        // FrecencyUserSettings: favorite_gifs at field 2, plus an unrelated
         // length-delimited field 7 to confirm skipping works.
         let mut settings = Vec::new();
-        len_field(&mut settings, 1, &favorites);
+        len_field(&mut settings, 2, &favorites);
         len_field(&mut settings, 7, b"ignored");
         base64::engine::general_purpose::STANDARD.encode(settings)
     }
@@ -657,7 +662,7 @@ mod tests {
     }
 
     /// Builds a FrecencyUserSettings-shaped blob with:
-    /// - `favorite_gifs` (field 1) holding two gifs AND an extra unknown field
+    /// - `favorite_gifs` (field 2) holding two gifs AND an extra unknown field
     ///   (a length-delimited field 9) inside it, to prove nested unknown fields
     ///   survive;
     /// - an unknown top-level varint field 5 and an unknown top-level
@@ -688,7 +693,7 @@ mod tests {
 
         let mut settings = Vec::new();
         varint_field(&mut settings, 5, 123_456); // unknown top-level varint
-        len_field(&mut settings, 1, &favorites); // favorite_gifs
+        len_field(&mut settings, 2, &favorites); // favorite_gifs (field 2)
         len_field(&mut settings, 7, b"favorite-stickers-ish"); // unrelated
         len_field(&mut settings, 9, &[0x00, 0xFF, 0x13, 0x37, 0x80]); // unknown LEN
         settings
@@ -706,7 +711,7 @@ mod tests {
             let fields = split_fields(&original).unwrap();
             fields
                 .into_iter()
-                .find(|f| f.number == 1 && f.wire == LEN)
+                .find(|f| f.number == FAVORITE_GIFS_FIELD && f.wire == LEN)
                 .unwrap()
                 .value
         };
@@ -745,7 +750,7 @@ mod tests {
             let fields = split_fields(&updated).unwrap();
             fields
                 .into_iter()
-                .find(|f| f.number == 1 && f.wire == LEN)
+                .find(|f| f.number == FAVORITE_GIFS_FIELD && f.wire == LEN)
                 .unwrap()
                 .value
         };
@@ -772,7 +777,7 @@ mod tests {
             let fields = split_fields(&reverted).unwrap();
             fields
                 .into_iter()
-                .find(|f| f.number == 1 && f.wire == LEN)
+                .find(|f| f.number == FAVORITE_GIFS_FIELD && f.wire == LEN)
                 .unwrap()
                 .value
         };
