@@ -788,3 +788,10 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 ## Ringing banner: vibrating phone icon (2026-11-20)
 
 - The outgoing-call "Ringing …" banner now shows a `call-start-symbolic` phone icon (class `kc-ringing-phone`, success-green) instead of a spinner. CSS `@keyframes kc-phone-vibrate` animates `-gtk-icon-transform: rotate()` in a shake burst then rest (1.3 s loop), like a vibrating phone. `-gtk-icon-transform` is the GTK4 way to transform an icon and is animatable; verified the CSS parses with no theme error.
+
+## GIF picker: Favorited / Search tabs (2026-11-20)
+
+- Replaced the Favorites-then-Trending sections with two tabs (linked ToggleButtons, `GIF_TAB`): **Favorited** (default) and **Search**. Opening the picker lands on Favorited.
+- Favorited tab: favourites are fetched once per opening and cached (`GIF_FAVORITES`, cleared on each `connect_show`); typing filters the cache by the Tenor URL slug (favourites carry no title). Placeholder "Search your favorites".
+- Search tab: empty shows Trending; a query runs `gif_search` over all of Tenor. Placeholder "Search Tenor".
+- One shared flow (`gif_flow`/`fill_gif_flow`, `show_gifs`) replaces the multi-section layout; switching tab re-runs the current search against that tab's source. Verified with `KYLECORD_DEMO=gif-picker` (tabs + favourite tiles render).

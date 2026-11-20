@@ -881,25 +881,63 @@ impl AppState {
         content.set_margin_start(8);
         content.set_margin_end(8);
 
+        // Two tabs: your favourites (the default) and a Tenor search.
+        let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        tabs.add_css_class("linked");
+        tabs.set_halign(gtk::Align::Center);
+        let favorited = gtk::ToggleButton::with_label("Favorited");
+        let searched = gtk::ToggleButton::with_label("Search");
+        searched.set_group(Some(&favorited));
+        favorited.set_active(true);
+        tabs.append(&favorited);
+        tabs.append(&searched);
+        content.append(&tabs);
+
         let search = gtk::SearchEntry::new();
-        search.set_placeholder_text(Some("Search Tenor"));
+        search.set_placeholder_text(Some("Search your favorites"));
         content.append(&search);
 
-        // A vertical stack of labelled sections (Favorites, then Trending or
-        // Results), like the emoji picker's categories.
-        let sections = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let flow = gif_flow();
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_min_content_height(360);
         scroll.set_min_content_width(380);
-        scroll.set_child(Some(&sections));
+        scroll.set_child(Some(&flow));
         content.append(&scroll);
         popover.set_child(Some(&content));
 
+        // Switching tab re-runs the current search against that tab's source
+        // and updates the placeholder.
         let app = self.clone();
+        let entry = search.clone();
+        favorited.connect_toggled(move |tab| {
+            if !tab.is_active() {
+                return;
+            }
+            GIF_TAB.with(|t| t.set(true));
+            entry.set_placeholder_text(Some("Search your favorites"));
+            app.load_gifs(entry.text().trim().to_owned());
+        });
+        let app = self.clone();
+        let entry = search.clone();
+        searched.connect_toggled(move |tab| {
+            if !tab.is_active() {
+                return;
+            }
+            GIF_TAB.with(|t| t.set(false));
+            entry.set_placeholder_text(Some("Search Tenor"));
+            app.load_gifs(entry.text().trim().to_owned());
+        });
+
+        let app = self.clone();
+        let fav_tab = favorited.clone();
         let entry = search.clone();
         popover.connect_show(move |_| {
             entry.set_text("");
+            fav_tab.set_active(true); // open on the Favorited tab
+            GIF_TAB.with(|t| t.set(true));
+            // Refetch favourites each opening (they may have changed).
+            GIF_FAVORITES.with_borrow_mut(|cache| *cache = None);
             app.load_gifs(String::new());
         });
         let app = self.clone();
@@ -907,7 +945,7 @@ impl AppState {
             app.load_gifs(entry.text().trim().to_owned());
         });
         self.gif_button.set_popover(Some(&popover));
-        GIF_SECTIONS.with_borrow_mut(|slot| *slot = Some(sections));
+        GIF_SECTIONS.with_borrow_mut(|slot| *slot = Some(flow));
     }
 
     fn load_gifs(self: &Rc<Self>, query: String) {
@@ -916,21 +954,47 @@ impl AppState {
         };
         let asked = query.clone();
         GIF_QUERY.with_borrow_mut(|current| *current = query.clone());
-        if query.is_empty() {
-            // The default view: the user's favourites first, then trending.
-            // Favourites are fetched in parallel and fail soft (empty list).
+        let favorited = GIF_TAB.with(|t| t.get());
+        if favorited {
+            // The favourites are fetched once per picker opening and cached, so
+            // typing filters them without re-fetching. They have no title, but
+            // a Tenor URL carries a descriptive slug, so match on that.
             self.spawn(
                 async move {
-                    let favorites = http.favorite_gifs().await.unwrap_or_default();
-                    let trending = http.gif_trending().await;
-                    (favorites, trending)
+                    if GIF_FAVORITES.with_borrow(|cache| cache.is_none()) {
+                        let favorites = http.favorite_gifs().await.unwrap_or_default();
+                        GIF_FAVORITES.with_borrow_mut(|cache| *cache = Some(favorites));
+                    }
                 },
-                move |app, (favorites, trending)| {
+                move |app, ()| {
                     if GIF_QUERY.with_borrow(|current| *current != asked) {
                         return;
                     }
-                    match trending {
-                        Ok(trending) => app.show_gif_sections(favorites, trending),
+                    let needle = asked.to_lowercase();
+                    let matches = GIF_FAVORITES.with_borrow(|cache| {
+                        cache
+                            .iter()
+                            .flatten()
+                            .filter(|gif| {
+                                needle.is_empty()
+                                    || gif.url.to_lowercase().contains(&needle)
+                                    || gif.src.to_lowercase().contains(&needle)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    });
+                    app.show_gifs(matches);
+                },
+            );
+        } else if query.is_empty() {
+            self.spawn(
+                async move { http.gif_trending().await },
+                move |app, result| {
+                    if GIF_QUERY.with_borrow(|current| *current != asked) {
+                        return;
+                    }
+                    match result {
+                        Ok(gifs) => app.show_gifs(gifs),
                         Err(error) => app.set_status(&format!("Could not load GIFs: {error}")),
                     }
                 },
@@ -944,7 +1008,7 @@ impl AppState {
                         return;
                     }
                     match result {
-                        Ok(gifs) => app.show_gif_sections(Vec::new(), gifs),
+                        Ok(gifs) => app.show_gifs(gifs),
                         Err(error) => app.set_status(&format!("Could not load GIFs: {error}")),
                     }
                 },
@@ -952,51 +1016,26 @@ impl AppState {
         }
     }
 
-    /// Fills the picker with an optional Favorites section followed by the
-    /// main results (Trending for the default view, matches for a search).
-    fn show_gif_sections(
-        self: &Rc<Self>,
-        favorites: Vec<kc_http::Gif>,
-        results: Vec<kc_http::Gif>,
-    ) {
-        let Some(sections) = GIF_SECTIONS.with_borrow(Clone::clone) else {
+    /// Fills the picker's single flow with the current tab's GIFs.
+    fn show_gifs(self: &Rc<Self>, gifs: Vec<kc_http::Gif>) {
+        let Some(flow) = GIF_SECTIONS.with_borrow(Clone::clone) else {
             return;
         };
-        clear_box(&sections);
-        // Animated-tile budget shared across both sections, so favourites plus
-        // trending together do not run more than GIF_PICKER_ANIMATED timers.
         let mut budget = GIF_PICKER_ANIMATED;
-        if !favorites.is_empty() {
-            self.fill_gif_section(&sections, "Favorites", favorites, &mut budget);
-        }
-        let heading = if GIF_QUERY.with_borrow(String::is_empty) {
-            "Trending"
-        } else {
-            "Results"
-        };
-        self.fill_gif_section(&sections, heading, results, &mut budget);
+        self.fill_gif_flow(&flow, gifs, &mut budget);
     }
 
-    /// Appends one labelled section of GIF tiles to the picker. `budget` caps
-    /// how many tiles animate (the rest show a still), shared across sections.
-    fn fill_gif_section(
+    /// Replaces the picker's tiles. `budget` caps how many animate (the rest
+    /// show a still).
+    fn fill_gif_flow(
         self: &Rc<Self>,
-        sections: &gtk::Box,
-        heading: &str,
+        flow: &gtk::FlowBox,
         gifs: Vec<kc_http::Gif>,
         budget: &mut usize,
     ) {
-        if gifs.is_empty() {
-            return;
+        while let Some(child) = flow.first_child() {
+            flow.remove(&child);
         }
-        sections.append(&label(&heading.to_uppercase(), &["kc-category"]));
-        let flow = gtk::FlowBox::new();
-        flow.set_selection_mode(gtk::SelectionMode::None);
-        flow.set_max_children_per_line(2);
-        flow.set_min_children_per_line(2);
-        flow.set_column_spacing(6);
-        flow.set_row_spacing(6);
-        flow.set_valign(gtk::Align::Start);
         for gif in gifs.into_iter().take(40) {
             let picture = gtk::Picture::new();
             picture.set_can_shrink(true);
@@ -1038,7 +1077,6 @@ impl AppState {
             });
             flow.insert(&button, -1);
         }
-        sections.append(&flow);
     }
 
     /// Development aid: opens the GIF picker and fills it with made-up
@@ -1064,10 +1102,13 @@ impl AppState {
         };
         let popover = self.gif_button.popover();
         self.gif_button.popup();
-        // Pretend the search box is empty so the section headings read
-        // "Favorites" and "Trending".
+        // `popup` runs the show handler, which clears the cache and kicks off a
+        // (dead) favourites fetch. Seed the cache so that pending fetch shows
+        // these made-up favourites instead of nothing, on the Favorited tab.
         GIF_QUERY.with_borrow_mut(|current| current.clear());
-        self.show_gif_sections(make(2), make(4));
+        GIF_TAB.with(|t| t.set(true));
+        GIF_FAVORITES.with_borrow_mut(|cache| *cache = Some(make(6)));
+        self.show_gifs(make(6));
         popover
     }
 
@@ -1298,8 +1339,25 @@ impl AppState {
 }
 
 thread_local! {
-    static GIF_SECTIONS: std::cell::RefCell<Option<gtk::Box>> = const { std::cell::RefCell::new(None) };
+    static GIF_SECTIONS: std::cell::RefCell<Option<gtk::FlowBox>> = const { std::cell::RefCell::new(None) };
     static GIF_QUERY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// Which tab is showing: true = Favorited, false = Search.
+    static GIF_TAB: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// The favourites fetched for this picker opening, cached so typing filters
+    /// them without re-fetching. Cleared when the picker opens.
+    static GIF_FAVORITES: std::cell::RefCell<Option<Vec<kc_http::Gif>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A fresh GIF-tile flow (two columns), configured as the picker wants it.
+fn gif_flow() -> gtk::FlowBox {
+    let flow = gtk::FlowBox::new();
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_max_children_per_line(2);
+    flow.set_min_children_per_line(2);
+    flow.set_column_spacing(6);
+    flow.set_row_spacing(6);
+    flow.set_valign(gtk::Align::Start);
+    flow
 }
 
 fn remember_token(display: String, raw: String) {
