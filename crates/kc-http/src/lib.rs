@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cdn;
 pub mod client;
 pub mod error;
+mod favorites;
 mod rate_limit;
 
 pub use client::{

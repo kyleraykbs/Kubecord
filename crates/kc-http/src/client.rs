@@ -71,6 +71,11 @@ pub struct Gif {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+    /// Set for a favourite GIF whose saved format is a video (an MP4 gifv),
+    /// so the picker plays it like a `gifv` rather than animating it as a GIF.
+    /// Trending/search results leave this `false`.
+    #[serde(default)]
+    pub video: bool,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -1138,6 +1143,52 @@ impl HttpClient {
             ))
             .await?;
         Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    /// The GIFs the user has favourited (on any client). Read-only: fetches
+    /// the `FrecencyUserSettings` protobuf from `GET
+    /// /users/@me/settings-proto/2`, base64-decodes it and reads the
+    /// `favorite_gifs` field. Ordered by the saved order. Favourites whose
+    /// format is a video are flagged so the picker plays them as a gifv.
+    ///
+    /// Fails soft: a settings blob that cannot be fetched, decoded or parsed
+    /// yields an empty list (logged), never an error the picker shows.
+    pub async fn favorite_gifs(&self) -> Result<Vec<Gif>> {
+        let value = match self.get("/users/@me/settings-proto/2").await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(%error, "could not fetch favourite gifs");
+                return Ok(Vec::new());
+            }
+        };
+        let Some(encoded) = value["settings"].as_str() else {
+            return Ok(Vec::new());
+        };
+        use base64::Engine;
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "favourite gifs settings were not valid base64");
+                return Ok(Vec::new());
+            }
+        };
+        let favorites = crate::favorites::parse_settings_proto(&bytes);
+        Ok(favorites
+            .into_iter()
+            .filter(|gif| !gif.src.is_empty())
+            .map(|gif| Gif {
+                id: String::new(),
+                // Sent as the message when picked, and shown in the tile.
+                url: gif.src.clone(),
+                src: gif.src.clone(),
+                gif_src: gif.src.clone(),
+                preview: gif.src.clone(),
+                width: gif.width,
+                height: gif.height,
+                // Discord's FavoriteGif format: 3 is a video (gifv/MP4).
+                video: gif.format == 3,
+            })
+            .collect())
     }
 
     /// Users who reacted with an emoji (first 25).
