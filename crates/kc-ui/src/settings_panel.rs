@@ -26,6 +26,36 @@ const DEVICE_LABEL_CHARS: usize = 40;
 /// Segments in the mic test's level meter.
 const METER_BLOCKS: f64 = 40.0;
 
+/// The pages, in order: name, title, icon. Each one is a tab in the list
+/// on the left.
+const PAGES: [(&str, &str, &str); 5] = [
+    ("account", "My Account", "avatar-default-symbolic"),
+    ("voice", "Voice", "audio-input-microphone-symbolic"),
+    ("video", "Video", "camera-web-symbolic"),
+    ("chat", "Chat", "chat-message-new-symbolic"),
+    ("advanced", "Advanced", "utilities-terminal-symbolic"),
+];
+
+/// The heading above a page's row, where a group of pages starts.
+fn page_heading(name: &str) -> Option<&'static str> {
+    match name {
+        "account" => Some("User Settings"),
+        "voice" => Some("App Settings"),
+        "advanced" => Some("Other"),
+        _ => None,
+    }
+}
+
+/// Page names from before the pages were split up, so dev aids and old
+/// callers still land on the right page.
+fn page_alias(name: &str) -> &str {
+    match name {
+        "features" | "appearance" | "text" => "chat",
+        "compat" | "compatibility" | "debug" => "advanced",
+        other => other,
+    }
+}
+
 /// What the panel keeps running while it is open.
 struct Panel {
     mic_test: RefCell<Option<MicTest>>,
@@ -71,7 +101,8 @@ impl AppState {
         self.show_settings_page("account");
     }
 
-    /// Opens the panel on `page`: "account" or "voice".
+    /// Opens the panel on `page`, one of the names in [`PAGES`] (older
+    /// names such as "features" or "debug" still work).
     pub(crate) fn show_settings_page(self: &Rc<Self>, page: &str) {
         let dialog = adw::Dialog::new();
         dialog.set_title("Settings");
@@ -99,20 +130,17 @@ impl AppState {
 
         let pages = gtk::Stack::new();
         pages.set_transition_type(gtk::StackTransitionType::Crossfade);
-        pages.add_named(&page_scroll(&self.account_page(&dialog)), Some("account"));
         let camera_dropdown = gtk::DropDown::from_strings(&["Ask Every Time"]);
-        pages.add_named(
-            &page_scroll(&self.voice_video_page(
-                &panel,
-                &camera_frame,
-                &screen_frame,
-                &camera_dropdown,
-            )),
-            Some("voice"),
-        );
-        pages.add_named(&page_scroll(&self.features_page()), Some("features"));
-        pages.add_named(&page_scroll(&self.compatibility_page()), Some("compat"));
-        pages.add_named(&page_scroll(&self.debug_page()), Some("debug"));
+        for (name, _, _) in PAGES {
+            let content = match name {
+                "account" => self.account_page(&dialog),
+                "voice" => self.voice_page(&panel),
+                "video" => self.video_page(&panel, &camera_frame, &screen_frame, &camera_dropdown),
+                "chat" => self.chat_page(),
+                _ => self.advanced_page(),
+            };
+            pages.add_named(&page_scroll(&content), Some(name));
+        }
 
         let content_view = adw::ToolbarView::new();
         content_view.add_top_bar(&adw::HeaderBar::new());
@@ -122,18 +150,7 @@ impl AppState {
         // Categories, under Discord's two headings.
         let categories = gtk::ListBox::new();
         categories.add_css_class("navigation-sidebar");
-        let entries: [(&str, &str, &str); 5] = [
-            ("account", "My Account", "avatar-default-symbolic"),
-            ("voice", "Voice & Video", "audio-input-microphone-symbolic"),
-            ("features", "Features", "view-reveal-symbolic"),
-            (
-                "compat",
-                "Compatibility",
-                "network-transmit-receive-symbolic",
-            ),
-            ("debug", "Debug", "utilities-terminal-symbolic"),
-        ];
-        for (_, title, icon) in entries {
+        for (_, title, icon) in PAGES {
             let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
             row_box.set_margin_top(6);
             row_box.set_margin_bottom(6);
@@ -145,13 +162,12 @@ impl AppState {
             categories.append(&row_box);
         }
         categories.set_header_func(|row, _| {
-            let heading = match row.index() {
-                0 => "User Settings",
-                1 => "App Settings",
-                _ => {
-                    row.set_header(None::<&gtk::Widget>);
-                    return;
-                }
+            let Some(heading) = PAGES
+                .get(row.index() as usize)
+                .and_then(|(name, _, _)| page_heading(name))
+            else {
+                row.set_header(None::<&gtk::Widget>);
+                return;
             };
             let header = gtk::Label::new(Some(heading));
             header.set_xalign(0.0);
@@ -182,17 +198,18 @@ impl AppState {
             let Some(row) = row else {
                 return;
             };
-            let Some((name, title, _)) = entries.get(row.index() as usize) else {
+            let Some((name, title, _)) = PAGES.get(row.index() as usize) else {
                 return;
             };
             pages.set_visible_child_name(name);
             content_page.set_title(title);
             target_split.set_show_content(true);
-            if *name == "voice" && !opened.cameras_requested.replace(true) {
+            if *name == "video" && !opened.cameras_requested.replace(true) {
                 app.load_cameras(&opened, &dropdown);
             }
         });
-        let initial = entries
+        let page = page_alias(page);
+        let initial = PAGES
             .iter()
             .position(|(name, _, _)| *name == page)
             .unwrap_or(0);
@@ -219,17 +236,12 @@ impl AppState {
 
     // -- my account ----------------------------------------------------------
 
-    // -- features ------------------------------------------------------------
+    // -- chat ----------------------------------------------------------------
 
-    /// Client behaviour you can switch, some of it unlike Discord's app.
-    fn features_page(self: &Rc<Self>) -> gtk::Box {
+    /// How messages look and what others see of your typing.
+    fn chat_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
-        page.append(&section_title("Features"));
-        let intro = gtk::Label::new(Some("Things kylecord can do your way."));
-        intro.set_xalign(0.0);
-        intro.set_wrap(true);
-        intro.add_css_class("dim-label");
-        page.append(&intro);
+        page.append(&section_title("Chat"));
 
         let typing = adw::PreferencesGroup::new();
         typing.set_title("Typing");
@@ -238,6 +250,7 @@ impl AppState {
         show.set_subtitle(
             "Let others see that you're typing. Turn it off to type unseen. The eye button in the message box switches this too.",
         );
+        show.set_subtitle_lines(0);
         show.set_active(self.capture.borrow().send_typing);
         let app = self.clone();
         show.connect_active_notify(move |row| app.set_send_typing(row.is_active()));
@@ -257,9 +270,11 @@ impl AppState {
         });
         time.add(&clock);
         page.append(&time);
+        page
+    }
 
-        let voice = adw::PreferencesGroup::new();
-        voice.set_title("Voice");
+    /// How far the User Volume slider in a person's menu goes.
+    fn volume_boost_row(self: &Rc<Self>) -> adw::ComboRow {
         let names: Vec<String> = crate::settings::VOLUME_BOOST_CAPS
             .iter()
             .map(|times| format!("{times}×"))
@@ -288,25 +303,54 @@ impl AppState {
                 app.update_prefs(|prefs| prefs.volume_boost_cap = times);
             }
         });
-        voice.add(&boost);
-        page.append(&voice);
-        page
+        boost
     }
 
-    // -- debug ---------------------------------------------------------------
+    // -- advanced ------------------------------------------------------------
 
-    /// What kylecord records about itself, and how much.
-    fn debug_page(self: &Rc<Self>) -> gtk::Box {
+    /// Discord's checks for the official app, and what kylecord logs.
+    fn advanced_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
-        page.append(&section_title("Debug"));
-        let intro = gtk::Label::new(Some(
-            "The log helps work out what went wrong in a call. It stays on this computer.",
-        ));
-        intro.set_xalign(0.0);
-        intro.set_wrap(true);
-        intro.add_css_class("dim-label");
-        page.append(&intro);
+        page.append(&section_title("Advanced"));
 
+        // Compatibility: how kylecord handles the checks Discord makes for
+        // the official app.
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Captchas");
+        group.set_description(Some(
+            "Discord sometimes asks for a captcha, for example before it sends a friend request.",
+        ));
+        let in_app = adw::SwitchRow::new();
+        in_app.set_title("Solve Captchas in kylecord");
+        in_app.set_subtitle(if crate::captcha::AVAILABLE {
+            "Show the captcha here and send the request again once it is solved. When this is off, or the captcha fails, you can finish in your browser instead."
+        } else {
+            "This build of kylecord was made without the captcha view, so captchas are finished in your browser."
+        });
+        in_app.set_active(crate::captcha::AVAILABLE && self.capture.borrow().captcha_in_app);
+        in_app.set_sensitive(crate::captcha::AVAILABLE);
+        let app = self.clone();
+        in_app.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.captcha_in_app = active);
+        });
+        group.add(&in_app);
+
+        let test_row = adw::ActionRow::builder()
+            .title("Test the Captcha View")
+            .subtitle("Opens a test captcha that always passes. Nothing is sent to Discord.")
+            .build();
+        let test = gtk::Button::with_label("Test");
+        test.set_valign(gtk::Align::Center);
+        test.set_sensitive(crate::captcha::AVAILABLE);
+        let app = self.clone();
+        test.connect_clicked(move |_| app.test_captcha());
+        test_row.add_suffix(&test);
+        group.add(&test_row);
+        page.append(&group);
+
+        // Debug: the log helps work out what went wrong in a call. It stays
+        // on this computer.
         let group = adw::PreferencesGroup::new();
         group.set_title("Log File");
         let path = crate::logging::path()
@@ -375,56 +419,6 @@ impl AppState {
         });
         size.add_suffix(&open);
         group.add(&size);
-        page.append(&group);
-        page
-    }
-
-    // -- compatibility -------------------------------------------------------
-
-    /// How kylecord handles Discord's checks that expect the official app.
-    fn compatibility_page(self: &Rc<Self>) -> gtk::Box {
-        let page = page_box();
-        page.append(&section_title("Compatibility"));
-        let intro = gtk::Label::new(Some(
-            "How kylecord handles the checks Discord makes for the official app.",
-        ));
-        intro.set_xalign(0.0);
-        intro.set_wrap(true);
-        intro.add_css_class("dim-label");
-        page.append(&intro);
-
-        let group = adw::PreferencesGroup::new();
-        group.set_title("Captchas");
-        group.set_description(Some(
-            "Discord sometimes asks for a captcha, for example before it sends a friend request.",
-        ));
-        let in_app = adw::SwitchRow::new();
-        in_app.set_title("Solve Captchas in kylecord");
-        in_app.set_subtitle(if crate::captcha::AVAILABLE {
-            "Show the captcha here and send the request again once it is solved. When this is off, or the captcha fails, you can finish in your browser instead."
-        } else {
-            "This build of kylecord was made without the captcha view, so captchas are finished in your browser."
-        });
-        in_app.set_active(crate::captcha::AVAILABLE && self.capture.borrow().captcha_in_app);
-        in_app.set_sensitive(crate::captcha::AVAILABLE);
-        let app = self.clone();
-        in_app.connect_active_notify(move |row| {
-            let active = row.is_active();
-            app.update_prefs(|prefs| prefs.captcha_in_app = active);
-        });
-        group.add(&in_app);
-
-        let test_row = adw::ActionRow::builder()
-            .title("Test the Captcha View")
-            .subtitle("Opens a test captcha that always passes. Nothing is sent to Discord.")
-            .build();
-        let test = gtk::Button::with_label("Test");
-        test.set_valign(gtk::Align::Center);
-        test.set_sensitive(crate::captcha::AVAILABLE);
-        let app = self.clone();
-        test.connect_clicked(move |_| app.test_captcha());
-        test_row.add_suffix(&test);
-        group.add(&test_row);
         page.append(&group);
         page
     }
@@ -536,13 +530,7 @@ impl AppState {
 
     // -- voice & video -------------------------------------------------------
 
-    fn voice_video_page(
-        self: &Rc<Self>,
-        panel: &Rc<Panel>,
-        camera_frame: &gtk::Overlay,
-        screen_frame: &gtk::Overlay,
-        camera_dropdown: &gtk::DropDown,
-    ) -> gtk::Box {
+    fn voice_page(self: &Rc<Self>, panel: &Rc<Panel>) -> gtk::Box {
         let page = page_box();
         let current = self.capture.borrow().clone();
 
@@ -660,10 +648,25 @@ impl AppState {
             start_mic_test(&app, &state, button, &meter);
         });
 
-        page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let people = adw::PreferencesGroup::new();
+        people.set_title("Other People");
+        people.add(&self.volume_boost_row());
+        page.append(&people);
+        page
+    }
 
-        // Video: the two test boxes, a source choice under each, then the
-        // stream quality settings.
+    fn video_page(
+        self: &Rc<Self>,
+        panel: &Rc<Panel>,
+        camera_frame: &gtk::Overlay,
+        screen_frame: &gtk::Overlay,
+        camera_dropdown: &gtk::DropDown,
+    ) -> gtk::Box {
+        let page = page_box();
+        let current = self.capture.borrow().clone();
+
+        // The two test boxes, a source choice under each, then the stream
+        // quality settings.
         page.append(&section_title("Video Settings"));
         let share_dd = gtk::DropDown::from_strings(&SHARE_SOURCES);
         share_dd.set_selected(current.share_source.min(2));
@@ -1062,6 +1065,16 @@ mod tests {
         assert_eq!(mask_email("kyle@example.com"), "****@example.com");
         assert_eq!(mask_phone("+15551239091"), "********9091");
         assert_eq!(mask_phone("12"), "12");
+    }
+
+    #[test]
+    fn old_page_names_still_open_a_page() {
+        for name in ["features", "compat", "debug", "voice", "account", "video"] {
+            let page = page_alias(name);
+            assert!(PAGES.iter().any(|(known, _, _)| *known == page), "{name}");
+        }
+        // Every page group starts with a heading.
+        assert_eq!(page_heading(PAGES[0].0), Some("User Settings"));
     }
 
     #[test]
