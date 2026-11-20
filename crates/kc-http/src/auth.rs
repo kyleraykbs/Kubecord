@@ -378,6 +378,12 @@ impl AuthClient {
         let http = reqwest::Client::builder()
             .user_agent(kc_core::super_properties::USER_AGENT)
             .https_only(!loopback)
+            // Keep the device cookies Discord sets on the first request
+            // (`__dcfduid` / `__sdcfduid`, tied to the fingerprint) and send
+            // them on the rest of the sign-in. Without them Discord issues the
+            // two-factor ticket but rejects the code ("invalid"), the same as
+            // a browser with cookies blocked.
+            .cookie_store(true)
             .build()
             .expect("reqwest client");
         Self {
