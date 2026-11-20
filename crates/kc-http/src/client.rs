@@ -892,6 +892,28 @@ impl HttpClient {
         Ok(())
     }
 
+    /// Sets (`Some`) or removes (`None`) the account's avatar. The bytes are
+    /// sent as a `data:` URI; `None` sends a null to clear it.
+    pub async fn set_avatar(&self, image: Option<&[u8]>) -> Result<()> {
+        self.patch("/users/@me", avatar_body(image)).await?;
+        Ok(())
+    }
+
+    /// Edits the per-server profile: nickname, bio, pronouns and avatar.
+    /// Each `None` field is left untouched; `Some(None)`-style clears
+    /// (empty text, null avatar) are encoded by the callers through
+    /// [`ServerProfileEdit`]. The nickname rides the member route so it is
+    /// shown to everyone, matching [`Self::set_nickname`].
+    pub async fn set_server_profile(
+        &self,
+        guild_id: Snowflake,
+        edit: &ServerProfileEdit,
+    ) -> Result<()> {
+        self.patch(&format!("/guilds/{guild_id}/profile/@me"), edit.body())
+            .await?;
+        Ok(())
+    }
+
     /// Persists the account's status (`online`, `idle`, `dnd`, `invisible`)
     /// so other sessions and the next login use it.
     pub async fn set_status(&self, status: &str) -> Result<()> {
@@ -1440,6 +1462,77 @@ impl MemberEdit {
     }
 }
 
+/// One change to an avatar field (`/users/@me` or a server profile).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum AvatarEdit {
+    /// Leave the avatar as it is (field omitted).
+    #[default]
+    Keep,
+    /// Remove the avatar (field sent as `null`).
+    Remove,
+    /// Replace the avatar with these image bytes (sent as a `data:` URI).
+    Set(Vec<u8>),
+}
+
+impl AvatarEdit {
+    /// The field value, if the edit changes it: `Some(Value::Null)` to
+    /// clear, `Some(data uri)` to set, `None` to leave it out.
+    fn value(&self) -> Option<Value> {
+        match self {
+            Self::Keep => None,
+            Self::Remove => Some(Value::Null),
+            Self::Set(bytes) => Some(json!(image_data_uri(bytes))),
+        }
+    }
+}
+
+/// Fields to set on the per-server profile
+/// (`PATCH /guilds/{guild}/profile/@me`). `None`/`Keep` leaves a field
+/// untouched; empty `nick`/`bio`/`pronouns` strings clear those fields.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerProfileEdit {
+    pub nick: Option<String>,
+    pub bio: Option<String>,
+    pub pronouns: Option<String>,
+    pub avatar: AvatarEdit,
+}
+
+impl ServerProfileEdit {
+    pub fn body(&self) -> Value {
+        let mut body = serde_json::Map::new();
+        if let Some(nick) = &self.nick {
+            body.insert("nick".into(), json!(nick));
+        }
+        if let Some(bio) = &self.bio {
+            body.insert("bio".into(), json!(bio));
+        }
+        if let Some(pronouns) = &self.pronouns {
+            body.insert("pronouns".into(), json!(pronouns));
+        }
+        if let Some(avatar) = self.avatar.value() {
+            body.insert("avatar".into(), avatar);
+        }
+        Value::Object(body)
+    }
+
+    /// Whether anything would actually be sent.
+    pub fn is_empty(&self) -> bool {
+        self.nick.is_none()
+            && self.bio.is_none()
+            && self.pronouns.is_none()
+            && self.avatar == AvatarEdit::Keep
+    }
+}
+
+/// The `PATCH /users/@me` body for an avatar change: the image as a `data:`
+/// URI, or `null` to remove it.
+fn avatar_body(image: Option<&[u8]>) -> Value {
+    match image {
+        Some(bytes) => json!({ "avatar": image_data_uri(bytes) }),
+        None => json!({ "avatar": null }),
+    }
+}
+
 /// Fields to set on a role; `None` leaves a field alone.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoleEdit {
@@ -1914,6 +2007,63 @@ mod tests {
     fn image_uploads_are_data_uris_with_their_type() {
         assert!(image_data_uri(&[0x89, b'P', b'N', b'G', 1]).starts_with("data:image/png;base64,"));
         assert!(image_data_uri(&[0xFF, 0xD8, 0xFF]).starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn avatar_bodies_set_or_null_the_field() {
+        // Removing sends an explicit null, not an omitted field.
+        assert_eq!(avatar_body(None), json!({ "avatar": null }));
+        // Setting sends a data URI of the image's detected type.
+        let body = avatar_body(Some(&[0x89, b'P', b'N', b'G', 1]));
+        let uri = body["avatar"].as_str().unwrap();
+        assert!(uri.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn server_profile_edits_build_discords_payload() {
+        // Keep everything: nothing is sent.
+        let empty = ServerProfileEdit::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.body(), json!({}));
+
+        // A nickname change only.
+        let nick_only = ServerProfileEdit {
+            nick: Some("Night Owl".into()),
+            ..ServerProfileEdit::default()
+        };
+        assert!(!nick_only.is_empty());
+        assert_eq!(nick_only.body(), json!({ "nick": "Night Owl" }));
+
+        // Clearing text fields sends empty strings; removing the avatar
+        // sends null.
+        let clear = ServerProfileEdit {
+            nick: Some(String::new()),
+            bio: Some(String::new()),
+            pronouns: Some(String::new()),
+            avatar: AvatarEdit::Remove,
+        };
+        assert_eq!(
+            clear.body(),
+            json!({ "nick": "", "bio": "", "pronouns": "", "avatar": null })
+        );
+
+        // Setting an avatar yields a data URI; untouched text fields are
+        // omitted.
+        let set = ServerProfileEdit {
+            bio: Some("per-server bio".into()),
+            avatar: AvatarEdit::Set(vec![0x89, b'P', b'N', b'G', 1]),
+            ..ServerProfileEdit::default()
+        };
+        let body = set.body();
+        assert_eq!(body["bio"], json!("per-server bio"));
+        assert!(body.get("nick").is_none());
+        assert!(body.get("pronouns").is_none());
+        assert!(
+            body["avatar"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]

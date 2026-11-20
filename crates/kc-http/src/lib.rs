@@ -7,8 +7,8 @@ pub mod error;
 mod rate_limit;
 
 pub use client::{
-    Ban, CaptchaAnswer, ChannelEdit, Gif, GifCategory, HttpClient, Invite, InviteChannel,
-    MemberEdit, Outgoing, RoleEdit, SearchPage, image_data_uri,
+    AvatarEdit, Ban, CaptchaAnswer, ChannelEdit, Gif, GifCategory, HttpClient, Invite,
+    InviteChannel, MemberEdit, Outgoing, RoleEdit, SearchPage, ServerProfileEdit, image_data_uri,
 };
 pub use error::{ApiError, Error, Result};
 
