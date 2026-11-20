@@ -27,6 +27,8 @@
 //! - `gif`: a message with a real animated-GIF attachment (the GIF tag and
 //!   layout render offline; the motion needs the network). `gif-viewer`
 //!   also opens it in the image viewer, saved to `<screenshot>.viewer.png`.
+//!   `gif-picker` fills the GIF picker with made-up animated results (the
+//!   demo REST cannot reach Tenor), saved to `<screenshot>.menu.png`.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
 //!   and the open one; the notifications they would raise are printed
 //!   (`demo: notification …`, nothing reaches the desktop), then one is
@@ -532,6 +534,26 @@ impl AppState {
                         }
                     });
                 }
+            }
+            "gif-picker" => {
+                // The GIF picker filled with made-up animated results (the
+                // demo REST points nowhere, so real trending/search cannot
+                // load). The popover is a separate surface, so it is saved to
+                // `<screenshot>.menu.png`.
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                    let popover = app.demo_gif_picker();
+                    if let (Ok(path), Some(popover)) =
+                        (std::env::var("KYLECORD_SCREENSHOT"), popover)
+                    {
+                        glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                            let path = format!("{path}.menu.png");
+                            let _ =
+                                crate::app::save_window_png(&popover, std::path::Path::new(&path));
+                        });
+                    }
+                });
             }
             "viewer" => {
                 self.open_channel(general);

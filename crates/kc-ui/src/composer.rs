@@ -21,6 +21,9 @@ const MIB: usize = 1024 * 1024;
 const COMPLETIONS: usize = 8;
 /// Custom emoji drawn in the picker before the search has to narrow it.
 const PICKER_EMOJI: usize = 400;
+/// How many GIF-picker tiles animate at once. The rest show a still preview,
+/// so a wall of results does not run dozens of frame timers.
+const GIF_PICKER_ANIMATED: usize = 16;
 
 /// A guild name and its `(id, name, animated)` emoji, for the picker.
 type EmojiGroup = (String, Vec<(Snowflake, String, bool)>);
@@ -945,19 +948,35 @@ impl AppState {
         while let Some(child) = flow.first_child() {
             flow.remove(&child);
         }
-        for gif in gifs.into_iter().take(40) {
+        for (index, gif) in gifs.into_iter().take(40).enumerate() {
             let picture = gtk::Picture::new();
             picture.set_can_shrink(true);
             picture.set_content_fit(gtk::ContentFit::Cover);
             picture.set_size_request(180, 110);
             picture.add_css_class("kc-media");
             picture.set_overflow(gtk::Overflow::Hidden);
+            // Animate the tile from the GIF itself (the picker asks for
+            // `media_format=tinygif`, so `src`/`gif_src` are animated GIFs).
+            // Cap the number of animated tiles: a wall of gifs is a lot of
+            // timers, so the rest fall back to their still preview. (The
+            // animated ones still pause when the popover closes, via the
+            // unmap handling in `set_animated_picture`.)
+            let animate = index < GIF_PICKER_ANIMATED;
+            let animated = if gif.gif_src.is_empty() {
+                &gif.src
+            } else {
+                &gif.gif_src
+            };
             let preview = if gif.preview.is_empty() {
                 &gif.src
             } else {
                 &gif.preview
             };
-            self.images.set_picture(&picture, preview);
+            if animate && !animated.is_empty() {
+                self.images.set_animated_picture(&picture, animated);
+            } else {
+                self.images.set_picture(&picture, preview);
+            }
 
             let button = gtk::Button::new();
             button.add_css_class("flat");
@@ -970,6 +989,30 @@ impl AppState {
             });
             flow.insert(&button, -1);
         }
+    }
+
+    /// Development aid: opens the GIF picker and fills it with made-up
+    /// animated results (the demo REST points nowhere, so trending/search
+    /// cannot load). Returns the picker popover so the demo can save it.
+    #[cfg(debug_assertions)]
+    pub(crate) fn demo_gif_picker(self: &Rc<Self>) -> Option<gtk::Popover> {
+        let url =
+            "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+        let gifs = (0..6)
+            .map(|index| kc_http::Gif {
+                id: index.to_string(),
+                url: url.to_owned(),
+                src: url.to_owned(),
+                gif_src: url.to_owned(),
+                preview: url.to_owned(),
+                width: 400,
+                height: 400,
+            })
+            .collect();
+        let popover = self.gif_button.popover();
+        self.gif_button.popup();
+        self.show_gifs(gifs);
+        popover
     }
 
     /// Sends a message that did not come from the composer (a picked GIF).
