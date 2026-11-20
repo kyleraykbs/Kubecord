@@ -164,11 +164,25 @@ impl AppState {
         separator.set_margin_end(20);
         self.guild_box.append(&separator);
 
+        // Forget cached tiles for servers no longer present, so the cache
+        // does not grow without bound.
+        let present: std::collections::HashSet<Snowflake> = entries
+            .iter()
+            .flat_map(|entry| match entry {
+                RailEntry::Guild(guild) => vec![guild.id],
+                RailEntry::Folder { guilds, .. } => guilds.iter().map(|g| g.id).collect(),
+            })
+            .collect();
+        self.guild_slots
+            .borrow_mut()
+            .retain(|id, _| present.contains(id));
+
         for entry in entries {
             match entry {
                 RailEntry::Guild(guild) => {
                     let selected = !dm_mode && selected_guild == Some(guild.id);
-                    self.guild_box.append(&self.guild_slot(&guild, selected));
+                    self.guild_box
+                        .append(&self.cached_guild_slot(&guild, selected));
                 }
                 RailEntry::Folder {
                     id,
@@ -230,7 +244,7 @@ impl AppState {
                         group.append(&rail_slot(&folder, false, false, 0));
                         for guild in &guilds {
                             let selected = !dm_mode && selected_guild == Some(guild.id);
-                            group.append(&self.guild_slot(guild, selected));
+                            group.append(&self.cached_guild_slot(guild, selected));
                         }
                         self.guild_box.append(&group);
                     } else {
@@ -244,6 +258,31 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// A guild tile, reused from the cache when its drawn state is unchanged
+    /// so a rail rebuild does not recreate every server's avatar. `clear_box`
+    /// has already unparented the cached tiles, so a reused one re-appends
+    /// cleanly.
+    fn cached_guild_slot(self: &Rc<Self>, guild: &GuildItem, selected: bool) -> gtk::Overlay {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        guild.name.hash(&mut hasher);
+        guild.icon.hash(&mut hasher);
+        guild.unread.hash(&mut hasher);
+        guild.mentions.hash(&mut hasher);
+        selected.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some((cached_key, overlay)) = self.guild_slots.borrow().get(&guild.id)
+            && *cached_key == key
+        {
+            return overlay.clone();
+        }
+        let overlay = self.guild_slot(guild, selected);
+        self.guild_slots
+            .borrow_mut()
+            .insert(guild.id, (key, overlay.clone()));
+        overlay
     }
 
     fn guild_slot(self: &Rc<Self>, guild: &GuildItem, selected: bool) -> gtk::Overlay {

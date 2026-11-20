@@ -77,13 +77,16 @@ impl AppState {
         let app = self.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
             app.sidebar_redraw_queued.set(false);
-            let started = std::time::Instant::now();
+            let t0 = std::time::Instant::now();
             app.render_guilds();
+            let rail = t0.elapsed();
+            let t1 = std::time::Instant::now();
             app.render_channels();
-            let elapsed = started.elapsed();
-            if elapsed >= std::time::Duration::from_millis(16) {
+            let channels = t1.elapsed();
+            if (rail + channels) >= std::time::Duration::from_millis(16) {
                 tracing::warn!(
-                    millis = elapsed.as_millis() as u64,
+                    rail_ms = rail.as_millis() as u64,
+                    channels_ms = channels.as_millis() as u64,
                     "rebuilding the sidebar blocked the main thread"
                 );
             }

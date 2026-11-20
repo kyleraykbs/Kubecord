@@ -155,7 +155,7 @@ fn ready() -> Value {
         users.push(json!({"id": id, "username": name.to_lowercase(), "global_name": name}));
         relationships.push(json!({"id": id, "type": 1, "user_id": id}));
     }
-    json!({
+    let mut ready = json!({
         "user": {"id": ME.to_string(), "username": "demo", "global_name": "Demo User"},
         "users": users,
         "guilds": [{
@@ -187,7 +187,27 @@ fn ready() -> Value {
         "read_state": {"entries": []},
         "user_guild_settings": {"entries": []},
         "user_settings": {"status": "online", "guild_folders": []}
-    })
+    });
+    // Dev aid: `KYLECORD_DEMO_GUILDS=N` adds N extra servers (each with an
+    // icon, so the rail loads an avatar per server) to measure the rail
+    // rebuild at a busy account's scale.
+    if let Some(extra) = std::env::var("KYLECORD_DEMO_GUILDS")
+        .ok()
+        .and_then(|n| n.parse::<u64>().ok())
+    {
+        let guilds = ready["guilds"].as_array_mut().unwrap();
+        for index in 0..extra {
+            let id = (700_000 + index).to_string();
+            guilds.push(json!({
+                "id": id, "name": format!("Server {index}"), "owner_id": OWNER.to_string(),
+                "icon": "0000000000000000000000000000000a",
+                "joined_at": "2024-01-01T00:00:00+00:00",
+                "roles": [{"id": id, "name": "@everyone", "permissions": "0", "position": 0}],
+                "channels": [{"id": id, "type": 0, "name": "general", "position": 0}]
+            }));
+        }
+    }
+    ready
 }
 
 thread_local! {

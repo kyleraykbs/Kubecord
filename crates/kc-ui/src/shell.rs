@@ -178,6 +178,10 @@ pub(crate) struct AppState {
     pub rail_fingerprint: Cell<Option<u64>>,
     /// Hash of what the channel list last drew, for the same reason.
     pub channels_fingerprint: Cell<Option<u64>>,
+    /// Cached guild tiles by id, with a hash of their drawn state, so a rail
+    /// rebuild reuses the tiles (and their loaded avatars) that did not
+    /// change instead of recreating one per server.
+    pub guild_slots: RefCell<HashMap<Snowflake, (u64, gtk::Overlay)>>,
     /// Inline GIF players and the widgets showing them.
     pub players: RefCell<Vec<(glib::WeakRef<gtk::Widget>, std::rc::Weak<LoopingVideo>)>>,
     pub players_update_queued: Cell<bool>,
@@ -842,6 +846,7 @@ impl AppState {
             sidebar_shown: Cell::new(None),
             rail_fingerprint: Cell::new(None),
             channels_fingerprint: Cell::new(None),
+            guild_slots: RefCell::new(HashMap::new()),
             players: RefCell::new(Vec::new()),
             players_update_queued: Cell::new(false),
         })

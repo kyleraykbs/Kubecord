@@ -59,7 +59,10 @@ pub fn run() -> glib::ExitCode {
                 let gap = now.duration_since(last);
                 last = now;
                 if gap >= Duration::from_millis(250) {
-                    tracing::warn!(millis = gap.as_millis() as u64, "off-thread watchdog stalled");
+                    tracing::warn!(
+                        millis = gap.as_millis() as u64,
+                        "off-thread watchdog stalled"
+                    );
                 }
             }
         })
