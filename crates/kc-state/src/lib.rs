@@ -26,5 +26,5 @@ pub use message::{
 };
 pub use queries::ChannelSection;
 pub use settings::{CustomStatus, GuildEntry, GuildFolder, GuildSettings, ReadState};
-pub use state::{MessageBuffer, State, Store, StoreEvent};
+pub use state::{MessageBuffer, State, Store, StoreEvent, set_unload_distant};
 pub use user::User;

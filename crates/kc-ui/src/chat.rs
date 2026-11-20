@@ -113,11 +113,14 @@ impl AppState {
             let at_bottom = distance < 48.0;
             let was = app.chat.borrow().at_bottom;
             app.chat.borrow_mut().at_bottom = at_bottom;
-            if at_bottom && !was {
-                let channel = app.chat.borrow().channel;
-                if let Some(channel) = channel {
-                    app.ack_channel(channel);
+            if at_bottom != was {
+                if at_bottom {
+                    let channel = app.chat.borrow().channel;
+                    if let Some(channel) = channel {
+                        app.ack_channel(channel);
+                    }
                 }
+                app.update_present();
             }
             if adjustment.value() < 400.0 {
                 app.queue_load_older();
@@ -127,19 +130,31 @@ impl AppState {
             }
         });
 
-        let present = gtk::Button::new();
-        let content = adw::ButtonContent::new();
-        content.set_icon_name("go-bottom-symbolic");
-        content.set_label("Jump to Present");
-        present.set_child(Some(&content));
-        present.add_css_class("pill");
+        // A round "jump to the latest" button, shown whenever the view is
+        // scrolled up. It scrolls to the bottom, or reloads the newest page
+        // when the window has slid away from the present.
+        let present = gtk::Button::from_icon_name("go-bottom-symbolic");
+        present.set_tooltip_text(Some("Jump to the latest messages"));
+        present.add_css_class("circular");
         present.add_css_class("suggested-action");
-        present.set_halign(gtk::Align::Center);
+        present.set_halign(gtk::Align::End);
         present.set_valign(gtk::Align::End);
         present.set_margin_bottom(12);
+        present.set_margin_end(16);
         present.set_visible(false);
         let app = self.clone();
-        present.connect_clicked(move |_| app.jump_to_present());
+        present.connect_clicked(move |_| {
+            let detached = app
+                .chat
+                .borrow()
+                .channel
+                .is_some_and(|channel| app.detached(channel));
+            if detached {
+                app.jump_to_present();
+            } else {
+                app.scroll_to_bottom();
+            }
+        });
         self.message_overlay.add_overlay(&present);
         self.chat.borrow_mut().present = Some(present);
 
@@ -322,8 +337,13 @@ impl AppState {
     }
 
     fn update_present(&self) {
-        let channel = self.chat.borrow().channel;
-        let show = channel.is_some_and(|channel| self.detached(channel));
+        let (channel, at_bottom) = {
+            let chat = self.chat.borrow();
+            (chat.channel, chat.at_bottom)
+        };
+        // Shown whenever scrolled up at all, or when the window has slid away
+        // from the present (so the latest is one click away either way).
+        let show = channel.is_some_and(|channel| !at_bottom || self.detached(channel));
         if let Some(button) = &self.chat.borrow().present {
             button.set_visible(show);
         }
@@ -594,6 +614,12 @@ impl AppState {
         if older.is_empty() {
             return;
         }
+        // Scrolling far back may have unloaded the distant (newest) messages
+        // from the store; drop the matching rows first (they are below the
+        // viewport, so this frees memory without moving the view) and before
+        // anchoring, so the scroll-restore below only accounts for the rows
+        // added at the top.
+        self.trim_to_store(channel_id);
         let adjustment = self.messages_scroll.vadjustment();
         self.chat.borrow_mut().restore = Some((adjustment.upper(), adjustment.value()));
         for (offset, entry) in older.iter().enumerate() {
@@ -603,6 +629,38 @@ impl AppState {
         self.chat.borrow_mut().rows.splice(0..0, older);
         // The previously first row now has a predecessor.
         self.refresh_grouping(channel_id, count);
+        self.update_present();
+    }
+
+    /// Removes rows newer than the store keeps, after a slide unloaded the
+    /// distant end. A no-op while the window still reaches the present.
+    fn trim_to_store(self: &Rc<Self>, channel_id: Snowflake) {
+        if self.chat.borrow().channel != Some(channel_id) {
+            return;
+        }
+        let Some((_, _, store)) = self.active() else {
+            return;
+        };
+        let newest = store.read(|state| {
+            state
+                .messages
+                .get(&channel_id)
+                .and_then(|buffer| buffer.messages().last().map(|message| message.id))
+        });
+        let Some(newest) = newest else {
+            return;
+        };
+        while self
+            .chat
+            .borrow()
+            .rows
+            .last()
+            .is_some_and(|row| row.id > newest)
+        {
+            if let Some(entry) = self.chat.borrow_mut().rows.pop() {
+                self.messages_list.remove(&entry.row);
+            }
+        }
     }
 
     /// Fetches the page of messages before the oldest one shown.

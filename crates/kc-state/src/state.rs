@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kc_core::Snowflake;
 use parking_lot::RwLock;
@@ -14,7 +15,23 @@ use crate::message::{Message, Reaction, SendState};
 use crate::settings::{CustomStatus, GuildFolder, GuildSettings, ReadState};
 use crate::user::User;
 
-const MESSAGE_WINDOW: usize = 300;
+/// How many messages a channel keeps loaded when [`UNLOAD_DISTANT`] is on. The
+/// window slides as you scroll: older pages load in, the distant ones at the
+/// far end are dropped (and reloaded if you scroll back to them).
+const MESSAGE_WINDOW: usize = 2000;
+
+/// Whether to drop distant messages to cap memory (the default), or keep every
+/// message scrolled into view. Set from the user's settings.
+static UNLOAD_DISTANT: AtomicBool = AtomicBool::new(true);
+
+/// Turns distant-message unloading on or off.
+pub fn set_unload_distant(on: bool) {
+    UNLOAD_DISTANT.store(on, Ordering::Relaxed);
+}
+
+fn unload_distant() -> bool {
+    UNLOAD_DISTANT.load(Ordering::Relaxed)
+}
 
 /// A nonce as a plain string, whether Discord echoed it as a string or a
 /// number, for matching an optimistic message to its confirmation.
@@ -79,6 +96,28 @@ impl MessageBuffer {
     pub fn extend_newer(&mut self, messages: Vec<Message>, full_page: bool) {
         self.detached = full_page;
         self.extend(messages);
+        // Newer messages came in at the bottom; the distant ones to drop are
+        // the oldest, at the top.
+        self.cap_oldest();
+    }
+
+    /// Caps the window by dropping the oldest messages (the top). Used when
+    /// the bottom grows — a new live message or a newer page.
+    fn cap_oldest(&mut self) {
+        if unload_distant() && self.messages.len() > self.limit {
+            let excess = self.messages.len() - self.limit;
+            self.messages.drain(..excess);
+        }
+    }
+
+    /// Caps the window by dropping the newest messages (the bottom), which
+    /// detaches it from the present. Used when scrolling far back: older pages
+    /// grow the top, so the distant ones to drop are the newest.
+    fn cap_newest(&mut self) {
+        if unload_distant() && self.messages.len() > self.limit {
+            self.messages.truncate(self.limit);
+            self.detached = true;
+        }
     }
 
     pub fn get(&self, id: Snowflake) -> Option<&Message> {
@@ -88,7 +127,8 @@ impl MessageBuffer {
             .map(|index| &self.messages[index])
     }
 
-    /// Inserts or replaces a message, keeping the window bounded.
+    /// Inserts or replaces a message. A new live message arrives at the
+    /// bottom, so the window is kept bounded by dropping the oldest.
     pub fn insert(&mut self, message: Message) {
         match self
             .messages
@@ -97,10 +137,7 @@ impl MessageBuffer {
             Ok(index) => self.messages[index] = message,
             Err(index) => self.messages.insert(index, message),
         }
-        if self.messages.len() > self.limit {
-            let excess = self.messages.len() - self.limit;
-            self.messages.drain(..excess);
-        }
+        self.cap_oldest();
     }
 
     /// Adds a message shown before Discord confirms it. Its synthetic id
@@ -129,7 +166,8 @@ impl MessageBuffer {
         Some(message.id)
     }
 
-    /// Merges a page of history, deduplicating by id.
+    /// Merges a page of messages, deduplicating by id. Does not cap; the
+    /// caller caps the correct end for its direction.
     pub fn extend(&mut self, messages: impl IntoIterator<Item = Message>) {
         for message in messages {
             match self
@@ -139,10 +177,6 @@ impl MessageBuffer {
                 Ok(index) => self.messages[index] = message,
                 Err(index) => self.messages.insert(index, message),
             }
-        }
-        if self.messages.len() > self.limit {
-            let excess = self.messages.len() - self.limit;
-            self.messages.drain(..excess);
         }
     }
 
@@ -1171,10 +1205,12 @@ impl State {
 
     pub fn load_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
         self.note_authors(&messages);
-        self.messages
-            .entry(channel_id)
-            .or_default()
-            .extend(messages);
+        let buffer = self.messages.entry(channel_id).or_default();
+        buffer.extend(messages);
+        // A history page is older-or-equal (scroll-back or the first page), so
+        // the distant end to drop is the newest. This never fires on the first
+        // page or after a jump (the window is small then).
+        buffer.cap_newest();
     }
 
     /// Replaces a channel's window with the page around an older message.
@@ -1607,6 +1643,42 @@ mod tests {
 
     fn parsed(id: u64, channel: u64) -> Message {
         serde_json::from_value(message(id, channel, "old")).unwrap()
+    }
+
+    #[test]
+    fn the_window_caps_the_correct_end_and_can_be_turned_off() {
+        let over: Vec<Message> = (1..=(MESSAGE_WINDOW as u64 + 100))
+            .map(|id| parsed(id, 10))
+            .collect();
+
+        set_unload_distant(true);
+        // Scrolling back (older pages grow the top) drops the newest and
+        // detaches from the present, keeping the oldest.
+        let mut back = MessageBuffer::default();
+        back.extend(over.clone());
+        back.cap_newest();
+        assert_eq!(back.messages().len(), MESSAGE_WINDOW);
+        assert_eq!(back.messages().first().unwrap().id, Snowflake(1));
+        assert!(back.is_detached());
+
+        // Live/newer growth drops the oldest, keeping the newest.
+        let mut live = MessageBuffer::default();
+        live.extend(over.clone());
+        live.cap_oldest();
+        assert_eq!(live.messages().len(), MESSAGE_WINDOW);
+        assert_eq!(
+            live.messages().last().unwrap().id,
+            Snowflake(MESSAGE_WINDOW as u64 + 100)
+        );
+
+        // Turned off, nothing is dropped.
+        set_unload_distant(false);
+        let mut keep = MessageBuffer::default();
+        keep.extend(over);
+        keep.cap_newest();
+        keep.cap_oldest();
+        assert_eq!(keep.messages().len(), MESSAGE_WINDOW + 100);
+        set_unload_distant(true);
     }
 
     #[test]

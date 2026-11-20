@@ -543,6 +543,22 @@ impl AppState {
         });
         time.add(&clock);
         page.append(&time);
+
+        let history = adw::PreferencesGroup::new();
+        history.set_title("History");
+        let unload = adw::SwitchRow::new();
+        unload.set_title("Unload Distant Messages");
+        unload.set_subtitle(
+            "Free memory by dropping messages far from where you are reading; they reload when you scroll back. Turn off to keep every message you scroll into view.",
+        );
+        unload.set_subtitle_lines(0);
+        unload.set_active(self.capture.borrow().unload_distant_messages);
+        let app = self.clone();
+        unload.connect_active_notify(move |row| {
+            app.update_prefs(|prefs| prefs.unload_distant_messages = row.is_active());
+        });
+        history.add(&unload);
+        page.append(&history);
         page
     }
 

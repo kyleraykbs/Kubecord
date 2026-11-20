@@ -155,6 +155,11 @@ pub struct CapturePreferences {
     /// Show times on a 24-hour clock (`17:58`) instead of `5:58 PM`.
     #[serde(rename = "use_24_hour_time")]
     pub use_24_hour: bool,
+    /// Free memory by unloading messages far from where you are reading (they
+    /// reload when you scroll back). Off keeps every message you scroll into
+    /// view. On by default.
+    #[serde(default = "default_true")]
+    pub unload_distant_messages: bool,
     /// Noise suppression: 0 off, 1 standard (WebRTC), 2 strong (RNNoise).
     pub noise_suppression: u32,
     pub echo_cancellation: bool,
@@ -253,6 +258,7 @@ impl Default for CapturePreferences {
             log_detailed: false,
             log_diagnostics: false,
             use_24_hour: false,
+            unload_distant_messages: true,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,
@@ -416,6 +422,7 @@ impl CapturePreferences {
         );
         crate::session::set_self_preview(self.self_preview);
         crate::content::set_24_hour(self.use_24_hour);
+        kc_state::set_unload_distant(self.unload_distant_messages);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         crate::logging::set_diagnostics(self.log_diagnostics);
         kc_media::devices::set_input_gain(self.input_volume);
@@ -563,6 +570,12 @@ impl CapturePreferences {
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self.call_height = self.call_height.max(CALL_HEIGHT_MIN);
     }
+}
+
+/// serde default for a bool field that should be `true` when a saved settings
+/// file predates it.
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
