@@ -16,7 +16,7 @@ use crate::markdown::format_size;
 use crate::player::LoopingVideo;
 use crate::rich::{self, Piece};
 use crate::shell::AppState;
-use crate::widgets::{hex_color, label, max_width, open_uri};
+use crate::widgets::{first_icon, hex_color, icon_button, label, max_width, open_uri};
 
 /// What a media preview shows, and what clicking it does.
 pub(crate) enum MediaKind {
@@ -422,17 +422,95 @@ impl AppState {
             "text-x-generic-symbolic"
         });
         icon.set_pixel_size(28);
+        icon.set_valign(gtk::Align::Center);
         card.append(&icon);
+
+        // Filename and size, left-aligned, taking the slack so the download
+        // button is pushed to the right edge of the card.
         let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        text.set_halign(gtk::Align::Start);
+        text.set_valign(gtk::Align::Center);
+        text.set_hexpand(true);
         let name = gtk::LinkButton::with_label(&attachment.url, &attachment.filename);
         name.set_halign(gtk::Align::Start);
         name.add_css_class("flat");
+        if let Some(label) = name.child().and_downcast::<gtk::Label>() {
+            label.set_xalign(0.0);
+        }
         text.append(&name);
         let size = label(&format_size(attachment.size), &["caption", "dim-label"]);
+        size.set_halign(gtk::Align::Start);
+        size.set_xalign(0.0);
         size.set_margin_start(8);
         text.append(&size);
         card.append(&text);
+
+        // A Download button saves the file wherever the user chooses.
+        let download = icon_button(
+            first_icon(&["folder-download-symbolic", "document-save-symbolic"]),
+            "Download",
+        );
+        download.set_valign(gtk::Align::Center);
+        let app = self.clone();
+        let url = if attachment.url.is_empty() {
+            attachment.proxy_url.clone()
+        } else {
+            attachment.url.clone()
+        };
+        let filename = attachment.filename.clone();
+        download.connect_clicked(move |_| {
+            app.download_attachment(&url, &filename);
+        });
+        card.append(&download);
         card.upcast()
+    }
+
+    /// Opens a save dialog for an attachment and, once a destination is
+    /// chosen, downloads the file there (reusing the cache download helper),
+    /// reporting success or failure in the status line.
+    fn download_attachment(self: &Rc<Self>, url: &str, filename: &str) {
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Save Attachment");
+        dialog.set_initial_name(Some(filename));
+        let app = self.clone();
+        let url = url.to_owned();
+        let filename = filename.to_owned();
+        dialog.save(
+            Some(&self.window),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                let Ok(destination) = result else {
+                    // The user cancelled the dialog.
+                    return;
+                };
+                // The file extension lets the cache helper name its copy; it
+                // does not affect the saved file.
+                let extension = filename
+                    .rsplit_once('.')
+                    .map(|(_, ext)| ext.to_owned())
+                    .unwrap_or_else(|| "bin".to_owned());
+                let app = app.clone();
+                let name = filename.clone();
+                let images = app.images.clone();
+                images.file(&url, &extension, move |path| {
+                    let Some(path) = path else {
+                        app.set_status(&format!("Could not download {name}"));
+                        return;
+                    };
+                    // Copy the cached download to the chosen destination.
+                    let source = gtk::gio::File::for_path(&path);
+                    match source.copy(
+                        &destination,
+                        gtk::gio::FileCopyFlags::OVERWRITE,
+                        gtk::gio::Cancellable::NONE,
+                        None,
+                    ) {
+                        Ok(()) => app.set_status(&format!("Saved {name}")),
+                        Err(error) => app.set_status(&format!("Could not save {name}: {error}")),
+                    }
+                });
+            },
+        );
     }
 
     /// A preview of an image, video or GIF, sized to keep its aspect.

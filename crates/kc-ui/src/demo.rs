@@ -29,6 +29,8 @@
 //!   also opens it in the image viewer, saved to `<screenshot>.viewer.png`.
 //!   `gif-picker` fills the GIF picker with made-up animated results (the
 //!   demo REST cannot reach Tenor), saved to `<screenshot>.menu.png`.
+//! - `file`: a message with a non-image file attachment, so the file card
+//!   (left-aligned name and size, Download button on the right) can be seen.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
 //!   and the open one; the notifications they would raise are printed
 //!   (`demo: notification …`, nothing reaches the desktop), then one is
@@ -314,6 +316,24 @@ fn gif_message(id: u64, author: u64) -> Value {
     })
 }
 
+/// A message carrying one non-image file attachment, for the file-card demo
+/// (the Download button, left-aligned name/size). Nothing is downloaded until
+/// the button is clicked.
+fn file_message(id: u64, author: u64) -> Value {
+    let names = ["", "demo", "ada", "grace", "linus"];
+    json!({
+        "id": id.to_string(), "channel_id": GENERAL.to_string(), "guild_id": GUILD.to_string(),
+        "author": {"id": author.to_string(), "username": names[author as usize % names.len()]},
+        "content": "here is the model", "timestamp": iso_of(id), "type": 0,
+        "attachments": [{
+            "id": "1", "filename": "wumpus-figurine.stl", "size": 4_200_000,
+            "url": "https://example.invalid/wumpus-figurine.stl",
+            "content_type": "model/stl",
+        }],
+        "embeds": [], "mentions": []
+    })
+}
+
 impl AppState {
     pub(crate) fn show_demo(self: &Rc<Self>, mode: &str) {
         if let Some(what) = mode.strip_prefix("login") {
@@ -501,6 +521,14 @@ impl AppState {
                         }
                     }
                 });
+            }
+            "file" => {
+                // A message with a non-image file attachment, so the file
+                // card (left-aligned name/size, Download button on the right)
+                // can be seen.
+                let id = id_at(0, 42);
+                store.apply("MESSAGE_CREATE", &file_message(id, ADA));
+                self.open_channel(general);
             }
             "gif" | "gif-viewer" => {
                 // A message with a real animated-GIF attachment. The still
