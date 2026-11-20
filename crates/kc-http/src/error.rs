@@ -44,6 +44,11 @@ pub enum Error {
 
     #[error("download is larger than the client will buffer")]
     TooLarge,
+
+    /// A client-side failure that is not an HTTP error (e.g. a settings proto
+    /// that could not be decoded or rewritten safely).
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

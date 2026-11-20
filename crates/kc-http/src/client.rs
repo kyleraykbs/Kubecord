@@ -51,6 +51,12 @@ pub struct SearchPage {
     pub indexing: bool,
 }
 
+/// Discord's `FavoriteGif.format` for a real `image/gif` (animated from its
+/// own bytes).
+pub const FAVORITE_GIF_FORMAT_IMAGE: u32 = 2;
+/// Discord's `FavoriteGif.format` for a video (an MP4 `gifv`).
+pub const FAVORITE_GIF_FORMAT_VIDEO: u32 = 3;
+
 /// A GIF from Discord's picker endpoints.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct Gif {
@@ -1186,9 +1192,87 @@ impl HttpClient {
                 width: gif.width,
                 height: gif.height,
                 // Discord's FavoriteGif format: 3 is a video (gifv/MP4).
-                video: gif.format == 3,
+                video: gif.format == FAVORITE_GIF_FORMAT_VIDEO,
             })
             .collect())
+    }
+
+    /// Favourites (`favorite = true`) or unfavourites (`false`) the GIF at
+    /// `url`, syncing with the official client via the `FrecencyUserSettings`
+    /// proto.
+    ///
+    /// This GETs the current settings proto, applies the change to only the
+    /// `favorite_gifs` map (every other setting -- favourite emoji/stickers,
+    /// all frecency data, unknown fields -- is preserved byte-for-byte), then
+    /// `PATCH`es the whole proto back to `/users/@me/settings-proto/2`.
+    ///
+    /// `url` is the media URL used as the map key (and, for a favourite, as the
+    /// `src` if `src` is empty). `format` is Discord's `FavoriteGif.format`
+    /// (2 = image/real GIF, 3 = video/gifv); it is ignored when unfavouriting.
+    ///
+    /// Errors (rather than silently dropping settings) if the proto cannot be
+    /// fetched, decoded or safely rewritten.
+    pub async fn set_favorite_gif(
+        &self,
+        url: &str,
+        src: &str,
+        format: u32,
+        width: u32,
+        height: u32,
+        favorite: bool,
+    ) -> Result<()> {
+        use base64::Engine;
+        let value = self.get("/users/@me/settings-proto/2").await?;
+        // A missing/empty settings proto decodes to empty bytes: favouriting
+        // then creates a fresh favorite_gifs; unfavouriting is a no-op.
+        let encoded = value["settings"].as_str().unwrap_or_default();
+        let bytes = if encoded.is_empty() {
+            Vec::new()
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    Error::Other(format!("settings proto was not valid base64: {error}"))
+                })?
+        };
+
+        let src = if src.is_empty() { url } else { src };
+        let updated = if favorite {
+            crate::favorites::add_favorite(&bytes, url, src, format, width, height)
+        } else {
+            crate::favorites::remove_favorite(&bytes, url)
+        }
+        .ok_or_else(|| {
+            Error::Other(
+                "could not rewrite the favourites proto safely; not changing settings".to_owned(),
+            )
+        })?;
+
+        let settings = base64::engine::general_purpose::STANDARD.encode(updated);
+        self.patch(
+            "/users/@me/settings-proto/2",
+            json!({ "settings": settings }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Convenience for favouriting a GIF (see [`Self::set_favorite_gif`]).
+    pub async fn favorite_gif(
+        &self,
+        url: &str,
+        src: &str,
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        self.set_favorite_gif(url, src, format, width, height, true)
+            .await
+    }
+
+    /// Convenience for unfavouriting a GIF (see [`Self::set_favorite_gif`]).
+    pub async fn unfavorite_gif(&self, url: &str) -> Result<()> {
+        self.set_favorite_gif(url, "", 0, 0, 0, false).await
     }
 
     /// Users who reacted with an emoji (first 25).

@@ -8,8 +8,9 @@ mod favorites;
 mod rate_limit;
 
 pub use client::{
-    AvatarEdit, Ban, CaptchaAnswer, ChannelEdit, Gif, GifCategory, HttpClient, Invite,
-    InviteChannel, MemberEdit, Outgoing, RoleEdit, SearchPage, ServerProfileEdit, image_data_uri,
+    AvatarEdit, Ban, CaptchaAnswer, ChannelEdit, FAVORITE_GIF_FORMAT_IMAGE,
+    FAVORITE_GIF_FORMAT_VIDEO, Gif, GifCategory, HttpClient, Invite, InviteChannel, MemberEdit,
+    Outgoing, RoleEdit, SearchPage, ServerProfileEdit, image_data_uri,
 };
 pub use error::{ApiError, Error, Result};
 
