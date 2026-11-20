@@ -342,6 +342,19 @@ const CSS: &str = r#"
     color: @error_color;
 }
 
+/* A friend picked in the group DM picker. */
+button.kc-chip {
+    padding: 2px 8px;
+    min-height: 0;
+}
+
+button.kc-dm-create {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 0;
+    margin-right: 4px;
+}
+
 .kc-menu-sep {
     margin: 4px 6px;
     opacity: 0.5;

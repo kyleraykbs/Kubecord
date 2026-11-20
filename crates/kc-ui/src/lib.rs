@@ -9,6 +9,7 @@ mod composer;
 mod content;
 mod demo;
 mod friends;
+mod group_dm;
 mod image_viewer;
 mod images;
 mod live;

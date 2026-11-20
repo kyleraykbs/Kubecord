@@ -34,6 +34,11 @@
 //!   `channel-edit` (a voice channel), `channel-text` (a text channel),
 //!   `channel-perms`.
 //! - `login-<state>`: the login page offline (see `show_login_demo`).
+//! - `group-create`, `group-picked` (three friends ticked), `group-search`,
+//!   `group-full` (nine ticked), `group-add` (adding to the group DM),
+//!   `group-menu` (its right-click menu, saved like the user menu),
+//!   `group-members` (the open group with its member list), `group-rename`,
+//!   `group-leave`.
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -47,6 +52,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gtk::prelude::*;
+use libadwaita as adw;
 use serde_json::{Value, json};
 
 use kc_core::{Account, Snowflake, Token};
@@ -67,6 +73,12 @@ const GRACE: u64 = 3;
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 /// A DM with Ada.
 const DM: u64 = 950;
+/// A group DM you own with Ada and Grace.
+const GROUP: u64 = 951;
+/// Friends besides Ada, for the group DM picker.
+const FRIEND_NAMES: [&str; 10] = [
+    "Alan", "Barbara", "Claude", "Dennis", "Edsger", "Frances", "Guido", "Hedy", "Ivan", "Jean",
+];
 
 /// A snowflake minted `ago` milliseconds before now, so the times read as
 /// today's.
@@ -126,14 +138,21 @@ fn ready() -> Value {
         | MOVE_MEMBERS
         | MUTE_MEMBERS
         | DEAFEN_MEMBERS;
+    let mut users = vec![
+        json!({"id": "2", "username": "ada", "global_name": "Ada"}),
+        json!({"id": "3", "username": "grace", "global_name": "Grace"}),
+        json!({"id": "4", "username": "linus", "global_name": "Linus"}),
+        json!({"id": OWNER.to_string(), "username": "owner", "global_name": "Server Owner"}),
+    ];
+    let mut relationships = vec![json!({"id": "2", "type": 1, "user_id": "2"})];
+    for (index, name) in FRIEND_NAMES.iter().enumerate() {
+        let id = (20 + index).to_string();
+        users.push(json!({"id": id, "username": name.to_lowercase(), "global_name": name}));
+        relationships.push(json!({"id": id, "type": 1, "user_id": id}));
+    }
     json!({
         "user": {"id": ME.to_string(), "username": "demo", "global_name": "Demo User"},
-        "users": [
-            {"id": "2", "username": "ada", "global_name": "Ada"},
-            {"id": "3", "username": "grace", "global_name": "Grace"},
-            {"id": "4", "username": "linus", "global_name": "Linus"},
-            {"id": OWNER.to_string(), "username": "owner", "global_name": "Server Owner"}
-        ],
+        "users": users,
         "guilds": [{
             "id": GUILD.to_string(), "name": "Demo Server", "owner_id": OWNER.to_string(),
             "joined_at": "2024-01-01T00:00:00+00:00",
@@ -155,8 +174,11 @@ fn ready() -> Value {
             {"user_id": "4", "roles": ["103", "104"]},
             {"user_id": OWNER.to_string(), "roles": []}
         ]],
-        "private_channels": [{"id": DM.to_string(), "type": 1, "recipient_ids": ["2"]}],
-        "relationships": [{"id": "2", "type": 1, "user_id": "2"}],
+        "private_channels": [
+            {"id": DM.to_string(), "type": 1, "recipient_ids": ["2"]},
+            {"id": GROUP.to_string(), "type": 3, "recipient_ids": ["2", "3"], "owner_id": ME.to_string()}
+        ],
+        "relationships": relationships,
         "read_state": {"entries": []},
         "user_guild_settings": {"entries": []},
         "user_settings": {"status": "online", "guild_folders": []}
@@ -276,7 +298,7 @@ impl AppState {
         }
         session.user = store.read(|state| state.me.clone());
         // Nothing to fetch or subscribe to: there is no gateway.
-        for channel in [GENERAL, LOUNGE, EMPTY_VOICE] {
+        for channel in [GENERAL, LOUNGE, EMPTY_VOICE, GROUP] {
             session.fetched.insert(Snowflake::new(channel));
             session.subscribed.insert(Snowflake::new(channel));
         }
@@ -409,6 +431,23 @@ impl AppState {
                 let mode = mode.to_owned();
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     app.demo_channels(&mode);
+                });
+            }
+            mode if mode.starts_with("group-") => {
+                match mode {
+                    "group-create" | "group-picked" | "group-search" | "group-full" => {
+                        self.open_home()
+                    }
+                    _ => {
+                        if let Some(group) = channel(GROUP) {
+                            self.open_channel(group);
+                        }
+                    }
+                }
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    app.demo_group(&mode);
                 });
             }
             mode if mode.starts_with("mod-") => {
@@ -675,6 +714,63 @@ impl AppState {
         }
     }
 
+    fn demo_group(self: &Rc<Self>, mode: &str) {
+        let group = Snowflake::new(GROUP);
+        match mode {
+            "group-create" | "group-picked" | "group-search" | "group-full" => {
+                self.group_dm_dialog(None);
+                let ticks = match mode {
+                    "group-picked" => 3,
+                    "group-full" => 9,
+                    _ => 0,
+                };
+                let Some(dialog) = descendants::<adw::Dialog>(&self.window.clone().upcast()).pop()
+                else {
+                    return;
+                };
+                let dialog = dialog.upcast::<gtk::Widget>();
+                let checks = descendants::<gtk::CheckButton>(&dialog);
+                eprintln!("demo: group picker rows={}", checks.len());
+                for check in checks.iter().take(ticks) {
+                    check.set_active(true);
+                }
+                if mode == "group-search" {
+                    for entry in descendants::<gtk::SearchEntry>(&dialog) {
+                        entry.set_text("ed");
+                    }
+                }
+                if mode == "group-full" {
+                    // A tenth tick is refused.
+                    if let Some(check) = checks.get(9) {
+                        check.set_active(true);
+                        eprintln!("demo: tenth tick kept={}", check.is_active());
+                    }
+                }
+            }
+            "group-add" => self.group_dm_dialog(Some(group)),
+            "group-rename" => self.rename_group_dialog(group),
+            "group-leave" => self.confirm_leave_group(group),
+            "group-members" => {
+                self.show_members.set(true);
+                self.render_members();
+            }
+            "group-menu" => {
+                let popover = self.show_group_menu(group, &self.window, 120.0, 200.0);
+                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        let path = format!("{path}.menu.png");
+                        if let Err(error) =
+                            crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                        {
+                            eprintln!("demo: could not save the menu: {error}");
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn demo_moderation(self: &Rc<Self>, mode: &str) {
         let guild = Snowflake::new(GUILD);
         let ada = Snowflake::new(ADA);
@@ -847,4 +943,18 @@ impl AppState {
             });
         });
     }
+}
+
+/// Every widget of type `T` under `root`, depth first.
+fn descendants<T: IsA<gtk::Widget>>(root: &gtk::Widget) -> Vec<T> {
+    let mut found = Vec::new();
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if let Some(hit) = widget.downcast_ref::<T>() {
+            found.push(hit.clone());
+        }
+        found.extend(descendants::<T>(&widget));
+        child = widget.next_sibling();
+    }
+    found
 }

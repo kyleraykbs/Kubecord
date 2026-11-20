@@ -337,9 +337,52 @@ impl HttpClient {
             .request_json_in(
                 Method::POST,
                 "/users/@me/channels",
-                Some(&json!({ "recipients": [recipient.to_string()] })),
+                Some(&recipients_body(&[recipient])),
                 Some(&json!({})),
             )
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// Starts a group DM with `recipients` (the account is added itself).
+    /// Discord allows ten people in a group, the account included.
+    pub async fn create_group_dm(&self, recipients: &[Snowflake]) -> Result<Channel> {
+        let value = self
+            .request_json_in(
+                Method::POST,
+                "/users/@me/channels",
+                Some(&recipients_body(recipients)),
+                Some(&json!({})),
+            )
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// Adds a friend to a group DM.
+    pub async fn add_group_recipient(
+        &self,
+        channel_id: Snowflake,
+        user_id: Snowflake,
+    ) -> Result<()> {
+        self.put_empty(&format!("/channels/{channel_id}/recipients/{user_id}"))
+            .await
+    }
+
+    /// Removes someone from a group DM; only its owner may.
+    pub async fn remove_group_recipient(
+        &self,
+        channel_id: Snowflake,
+        user_id: Snowflake,
+    ) -> Result<()> {
+        self.delete(&format!("/channels/{channel_id}/recipients/{user_id}"))
+            .await?;
+        Ok(())
+    }
+
+    /// Renames a group DM; an empty name goes back to the members' names.
+    pub async fn rename_group_dm(&self, channel_id: Snowflake, name: &str) -> Result<Channel> {
+        let value = self
+            .patch(&format!("/channels/{channel_id}"), group_name_body(name))
             .await?;
         Self::parse(value, StatusCode::OK)
     }
@@ -1507,6 +1550,17 @@ pub struct InviteChannel {
     pub name: Option<String>,
 }
 
+/// The body that opens a DM (one recipient) or a group DM (several).
+fn recipients_body(recipients: &[Snowflake]) -> Value {
+    let ids: Vec<String> = recipients.iter().map(ToString::to_string).collect();
+    json!({ "recipients": ids })
+}
+
+fn group_name_body(name: &str) -> Value {
+    let name = name.trim();
+    json!({ "name": (!name.is_empty()).then_some(name) })
+}
+
 fn invite_body(max_age: u32, max_uses: u32) -> Value {
     json!({ "max_age": max_age, "max_uses": max_uses, "temporary": false, "unique": true })
 }
@@ -1837,6 +1891,23 @@ mod tests {
             invite_body(0, 10),
             json!({"max_age": 0, "max_uses": 10, "temporary": false, "unique": true})
         );
+    }
+
+    #[test]
+    fn private_channel_payloads() {
+        assert_eq!(
+            recipients_body(&[Snowflake::new(5)]),
+            json!({"recipients": ["5"]})
+        );
+        assert_eq!(
+            recipients_body(&[Snowflake::new(5), Snowflake::new(80000000000000001)]),
+            json!({"recipients": ["5", "80000000000000001"]})
+        );
+        assert_eq!(
+            group_name_body(" Night Crew "),
+            json!({"name": "Night Crew"})
+        );
+        assert_eq!(group_name_body("  "), json!({"name": null}));
     }
 
     #[test]

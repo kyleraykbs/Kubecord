@@ -631,3 +631,10 @@ dispatch; contains account data).
 - A "Jump to Present" pill shows over the list while detached. It, and sending a message from a detached view (`follow_sent_message`), drop the window at once (so messages arriving meanwhile are kept), fetch the newest page and rebuild.
 - Before, `jump_or_fetch` replaced the window with an old page and then appended live messages after it, leaving a silent gap and no way back down.
 - Unverified on screen: the demo has no REST, so the fetches were not exercised; reducers are unit-tested.
+
+## Group DMs (group_dm.rs)
+- DM list header has a `+` (Create DM) → `group_dm_dialog(None)`: an `adw::Dialog` with search (name and username), a checklist of friends (`relationships_of(FRIEND)`), removable chips for the picks, "You can add N more friends." and a Create button. One friend → `open_dm_with` (reuses an existing DM); several → `POST /users/@me/channels {"recipients": [...]}` (`create_group_dm`), the response applied as CHANNEL_CREATE (the gateway's copy then just updates the same entry) and opened.
+- Cap: 10 people including you (`MAX_GROUP_SIZE`); when full, unticked rows go insensitive and `toggle_pick` refuses more. Adding to a group counts its recipients + you.
+- Group DM row right-click (and the member panel's "Add Friends to Group" button): add friends (`PUT /channels/{id}/recipients/{user}` each, applied locally as CHANNEL_RECIPIENT_ADD), rename (`PATCH /channels/{id} {"name"}`, empty → null = members' names), leave (`DELETE /channels/{id}` after an AlertDialog; applied as CHANNEL_DELETE, goes to Friends if open). The member menu shows "Remove From Group" (`DELETE /channels/{id}/recipients/{user}`) in a group you own.
+- CHANNEL_RECIPIENT_ADD/REMOVE were already handled by the reducer (replace-by-id, so local + gateway copies don't duplicate).
+- None of these endpoints has been exercised against Discord (no live writes); bodies are unit-tested. `KYLECORD_DEMO=group-create|group-picked|group-search|group-full|group-add|group-menu|group-members|group-rename|group-leave` shows the UI offline (the demo now has ten more friends and a group DM you own).

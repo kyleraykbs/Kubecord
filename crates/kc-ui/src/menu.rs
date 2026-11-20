@@ -300,6 +300,19 @@ impl AppState {
             self.add_moderation_items(&menu, &popover, guild, user_id, ctx.is_me);
         }
 
+        // -- the open group DM, when the account owns it ------------------
+        if !ctx.is_me
+            && let Some(group) = self.owned_group_with(user_id)
+        {
+            separator();
+            add(
+                "Remove From Group",
+                true,
+                Box::new(move |app| app.remove_from_group(group, user_id)),
+                self,
+            );
+        }
+
         // -- relationships -----------------------------------------------
         if !ctx.is_me && !ctx.bot {
             separator();

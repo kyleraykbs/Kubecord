@@ -350,6 +350,29 @@ impl AppState {
             None => self.members_count_label.set_visible(false),
         }
 
+        let group = self
+            .with_session(|session| {
+                let id = session.selected_channel?;
+                session.store.read(|state| {
+                    state
+                        .channels
+                        .get(&id)
+                        .filter(|channel| channel.kind == ChannelType::GroupDm)
+                        .map(|_| id)
+                })
+            })
+            .flatten();
+        if let Some(group) = group {
+            let add = gtk::Button::with_label("Add Friends to Group");
+            add.add_css_class("pill");
+            add.set_margin_top(8);
+            add.set_margin_start(6);
+            add.set_margin_end(6);
+            let app = self.clone();
+            add.connect_clicked(move |_| app.group_dm_dialog(Some(group)));
+            self.members_box.append(&add);
+        }
+
         for row in rows {
             match row {
                 MemberRow::Header(text) => {

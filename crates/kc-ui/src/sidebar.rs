@@ -208,11 +208,24 @@ impl AppState {
         friends.connect_clicked(move |_| app.open_home());
         self.channel_box.append(&friends);
 
+        let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        heading_row.set_margin_top(12);
+        heading_row.set_margin_bottom(4);
         let heading = label("DIRECT MESSAGES", &["kc-category"]);
-        heading.set_margin_top(12);
         heading.set_margin_start(6);
-        heading.set_margin_bottom(4);
-        self.channel_box.append(&heading);
+        heading.set_hexpand(true);
+        heading_row.append(&heading);
+        let create = gtk::Button::from_icon_name("list-add-symbolic");
+        create.set_focus_on_click(false);
+        create.add_css_class("flat");
+        create.add_css_class("circular");
+        create.add_css_class("kc-dm-create");
+        create.set_valign(gtk::Align::Center);
+        create.set_tooltip_text(Some("Create DM"));
+        let app = self.clone();
+        create.connect_clicked(move |_| app.group_dm_dialog(None));
+        heading_row.append(&create);
+        self.channel_box.append(&heading_row);
 
         for row in rows {
             let button = gtk::Button::new();
@@ -247,6 +260,8 @@ impl AppState {
             // Right-click a one-to-one DM for the usual user menu.
             if let Some(recipient) = row.channel.dm_recipient().map(|user| user.id) {
                 self.attach_user_menu(&button, recipient);
+            } else if row.channel.kind == ChannelType::GroupDm {
+                self.attach_group_menu(&button, row.channel.id);
             }
             self.channel_box.append(&button);
         }
@@ -542,6 +557,40 @@ impl AppState {
             popover.popup();
         });
         widget.add_controller(gesture);
+    }
+
+    /// Right-click on a group DM: add friends, rename, leave.
+    fn attach_group_menu(self: &Rc<Self>, widget: &gtk::Button, channel_id: Snowflake) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let app = self.clone();
+        let anchor = widget.downgrade();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(anchor) = anchor.upgrade() {
+                app.show_group_menu(channel_id, &anchor, x, y);
+            }
+        });
+        widget.add_controller(gesture);
+    }
+
+    /// Shows a group DM's menu at `(x, y)` of `anchor`, and returns it.
+    pub(crate) fn show_group_menu(
+        self: &Rc<Self>,
+        channel_id: Snowflake,
+        anchor: &impl IsA<gtk::Widget>,
+        x: f64,
+        y: f64,
+    ) -> gtk::Popover {
+        let popover = gtk::Popover::new();
+        self.anchor_popover(&popover, anchor, x, y);
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        items.add_css_class("kc-menu");
+        items.set_width_request(200);
+        self.add_group_items(&items, &popover, channel_id);
+        popover.set_child(Some(&items));
+        popover.popup();
+        popover
     }
 
     fn voice_user_row(self: &Rc<Self>, user: &VoiceUser) -> gtk::Box {
