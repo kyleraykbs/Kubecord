@@ -340,6 +340,13 @@ button.kc-link-button:hover {
     background-color: alpha(@window_fg_color, 0.1);
 }
 
+/* When a bar (reply/edit context or the upload tray) sits above the composer,
+   square the composer's top corners so the two join into one rounded box. */
+.kc-composer.kc-attached {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+}
+
 .kc-jumbo {
     font-size: 2.6em;
 }

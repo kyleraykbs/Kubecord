@@ -820,3 +820,11 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 
 - The favourites parser/writer put `favorite_gifs` at field 1 of `FrecencyUserSettings`, so it never found any (the tab was empty). Confirmed against the user's live settings-proto/2 (read-only dump of field structure, no values): field 1 is `versions` (4 bytes); `favorite_gifs` is **field 2** — its values are exactly `FavoriteGif` (format/src/width/height/order) keyed by URL (the account had 3). Other frecency maps: fields 6, 9, 13.
 - Fixed to `FAVORITE_GIFS_FIELD = 2` in `favorites.rs` reader (`parse_settings_proto`) and writer (`apply_change` find + create), and the round-trip tests' blob builders. The inner `gifs` map stays field 1 of `FavoriteGifs`. All kc-http tests pass.
+
+## GIF picker animation, jump icon, reply-bar corners (2026-11-20)
+
+- Picker tiles (search + trending) didn't animate: Discord's gif results give `src` = an animated `.gif` (media_format=tinygif) but `gif_src` = a provider alternate that Klipy serves as `.webp`, which the GIF animator can't decode. `fill_gif_flow` preferred `gif_src` → no animation. Now it animates from `src`. (Also confirmed live that `gif_search` works with `limit=50`; `limit` under ~20 is what Discord rejects as 50035, not our call.)
+- The GIF star is present on every picker tile (`gif_star` in `fill_gif_flow`, both tabs); it is hover-revealed (`kc-gif-star` opacity 0→1) and gold when favourited. "Missing in search" is a stale build / not-hovered, not a code gap.
+- Jump-to-latest button icon changed from `go-bottom-symbolic` (arrow + bar, reads as a dot) to `go-down-symbolic` (plain down arrow).
+- Reply/edit context bar: the composer below had all four corners rounded, leaving notches where the bar's square bottom met it. `update_composer_corners` adds `kc-attached` to the composer whenever the context bar or upload tray is shown, squaring the composer's top corners so bar + composer read as one rounded box.
+- Open/unverified: a specific Klipy `.mp4` gifv in chat not animating — depends on its embed `kind` (only `"gifv"` auto-plays); needs the message's embed data / log to pin down.

@@ -213,6 +213,19 @@ impl AppState {
             None => self.context_bar.set_visible(false),
         }
         self.render_upload_tray();
+        self.update_composer_corners();
+    }
+
+    /// Squares off the composer's top corners when a bar (reply/edit context or
+    /// the upload tray) sits directly above it, so the two read as one rounded
+    /// box instead of leaving rounded notches at the join.
+    fn update_composer_corners(&self) {
+        let attached = self.context_bar.is_visible() || self.upload_tray.is_visible();
+        if attached {
+            self.composer_box.add_css_class("kc-attached");
+        } else {
+            self.composer_box.remove_css_class("kc-attached");
+        }
     }
 
     fn on_composer_changed(self: &Rc<Self>) {
@@ -615,6 +628,7 @@ impl AppState {
             .with_session(|session| session.uploads.clone())
             .unwrap_or_default();
         self.upload_tray.set_visible(!uploads.is_empty());
+        self.update_composer_corners();
         for (index, upload) in uploads.iter().enumerate() {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             chip.add_css_class("card");
@@ -1052,16 +1066,18 @@ impl AppState {
             picture.set_size_request(180, 110);
             picture.add_css_class("kc-media");
             picture.set_overflow(gtk::Overflow::Hidden);
-            // Animate the tile from the GIF itself (the picker asks for
-            // `media_format=tinygif`, so `src`/`gif_src` are animated GIFs; a
-            // favourite's video format stays a still here — it plays as a
-            // gifv once sent). Cap how many animate so a wall of gifs does not
-            // run dozens of frame timers; the rest keep a still preview.
+            // Animate the tile from the GIF itself. The picker asks for
+            // `media_format=tinygif`, so `src` is an animated `.gif`; `gif_src`
+            // is a provider alternate that some (e.g. Klipy) serve as `.webp`,
+            // which the GIF animator can't play — so prefer `src`. A
+            // favourite's video format stays a still here (it plays as a gifv
+            // once sent). Cap how many animate so a wall of gifs does not run
+            // dozens of frame timers; the rest keep a still preview.
             let animate = *budget > 0 && !gif.video;
-            let animated = if gif.gif_src.is_empty() {
-                &gif.src
-            } else {
+            let animated = if gif.src.is_empty() {
                 &gif.gif_src
+            } else {
+                &gif.src
             };
             let preview = if gif.preview.is_empty() {
                 &gif.src

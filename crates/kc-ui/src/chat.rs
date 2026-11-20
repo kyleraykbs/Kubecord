@@ -134,7 +134,7 @@ impl AppState {
         // A round "jump to the latest" button, shown whenever the view is
         // scrolled up. It scrolls to the bottom, or reloads the newest page
         // when the window has slid away from the present.
-        let present = gtk::Button::from_icon_name("go-bottom-symbolic");
+        let present = gtk::Button::from_icon_name("go-down-symbolic");
         present.set_tooltip_text(Some("Jump to the latest messages"));
         present.add_css_class("circular");
         present.add_css_class("suggested-action");
