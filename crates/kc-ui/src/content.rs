@@ -42,6 +42,19 @@ pub(crate) struct Media<'a> {
     pub kind: MediaKind,
     pub spoiler: bool,
     pub description: Option<&'a str>,
+    /// Set for a GIF that can be favourited: its media URL (the key Discord
+    /// stores favourites under) and its `src`. `None` for plain images and
+    /// videos, which the official client does not favourite.
+    pub favorite: Option<FavoriteTarget<'a>>,
+}
+
+/// The identity of a GIF for favouriting: the URL used as Discord's map key
+/// (and `src`), with its dimensions. The format (image vs video) is taken from
+/// the `MediaKind`.
+pub(crate) struct FavoriteTarget<'a> {
+    pub url: &'a str,
+    pub width: u32,
+    pub height: u32,
 }
 
 const EMBED_MAX_WIDTH: i32 = 520;
@@ -410,6 +423,12 @@ impl AppState {
                 },
                 spoiler: attachment.is_spoiler(),
                 description: attachment.description.as_deref(),
+                // Only a real GIF attachment can be favourited.
+                favorite: attachment.is_gif().then_some(FavoriteTarget {
+                    url: &attachment.url,
+                    width,
+                    height,
+                }),
             });
         }
 
@@ -564,6 +583,25 @@ impl AppState {
             MediaKind::Image => {}
         }
 
+        // A favourite star over a GIF, revealed on hover like the picker tiles.
+        if let Some(target) = &media.favorite {
+            let format = match &media.kind {
+                MediaKind::Gif { .. } => kc_http::FAVORITE_GIF_FORMAT_VIDEO,
+                _ => kc_http::FAVORITE_GIF_FORMAT_IMAGE,
+            };
+            let gif = kc_http::Gif {
+                id: String::new(),
+                url: target.url.to_owned(),
+                src: target.url.to_owned(),
+                gif_src: target.url.to_owned(),
+                preview: String::new(),
+                width: target.width,
+                height: target.height,
+                video: format == kc_http::FAVORITE_GIF_FORMAT_VIDEO,
+            };
+            overlay.add_overlay(&self.gif_star(&gif));
+        }
+
         // Loading (and, for GIFs, playing) starts when a spoiler is revealed.
         let gif_video = match &media.kind {
             MediaKind::Gif { video_url } => Some(video_url.clone()),
@@ -714,18 +752,40 @@ impl AppState {
                 .then(|| media_of(&embed.video))
                 .flatten()
                 .map(|(video_url, _, _)| video_url);
-            return Some(self.media_preview(Media {
-                still: &url,
-                target: &target,
-                width,
-                height,
-                kind: match video {
-                    Some(video_url) => MediaKind::Gif { video_url },
-                    None => MediaKind::Image,
-                },
-                spoiler: false,
-                description: None,
-            }));
+            // A gifv can be favourited, keyed by its original (non-proxy) media
+            // URL -- the same key Discord's own client and the picker use. Fall
+            // back to the video/image/thumbnail original, else the proxy url.
+            let favorite = (kind == "gifv").then(|| {
+                let original = embed
+                    .video
+                    .as_ref()
+                    .and_then(|media| media.url.clone())
+                    .or_else(|| embed.image.as_ref().and_then(|media| media.url.clone()))
+                    .or_else(|| embed.thumbnail.as_ref().and_then(|media| media.url.clone()))
+                    .unwrap_or_else(|| url.clone());
+                (original, width, height)
+            });
+            return Some(
+                self.media_preview(Media {
+                    still: &url,
+                    target: &target,
+                    width,
+                    height,
+                    kind: match video {
+                        Some(video_url) => MediaKind::Gif { video_url },
+                        None => MediaKind::Image,
+                    },
+                    spoiler: false,
+                    description: None,
+                    favorite: favorite
+                        .as_ref()
+                        .map(|(url, width, height)| FavoriteTarget {
+                            url,
+                            width: *width,
+                            height: *height,
+                        }),
+                }),
+            );
         }
 
         let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -843,6 +903,7 @@ impl AppState {
                 },
                 spoiler: false,
                 description: None,
+                favorite: None,
             });
             preview.set_margin_top(4);
             card.append(&preview);

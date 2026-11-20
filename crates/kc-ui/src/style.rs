@@ -431,6 +431,31 @@ button.kc-channel:hover button.kc-dm-close:hover {
     opacity: 0.5;
 }
 
+/* The favourite star over a GIF (picker tile or chat message). Hidden until
+   the GIF is hovered, so it stays subtle; a favourited star (filled) stays
+   faintly visible so you can tell at a glance. */
+button.kc-gif-star {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+button.kc-gif-star image {
+    -gtk-icon-size: 14px;
+}
+
+overlay:hover > button.kc-gif-star,
+button.kc-gif-star:focus-visible,
+button.kc-gif-star.kc-favorited {
+    opacity: 1;
+}
+
+button.kc-gif-star.kc-favorited image {
+    color: #f0b232;
+}
+
 /* A role's colour, before its name. */
 .kc-role-dot {
     min-width: 12px;

@@ -937,7 +937,7 @@ impl AppState {
             fav_tab.set_active(true); // open on the Favorited tab
             GIF_TAB.with(|t| t.set(true));
             // Refetch favourites each opening (they may have changed).
-            GIF_FAVORITES.with_borrow_mut(|cache| *cache = None);
+            crate::gif_favorites::clear();
             app.load_gifs(String::new());
         });
         let app = self.clone();
@@ -959,22 +959,31 @@ impl AppState {
             // The favourites are fetched once per picker opening and cached, so
             // typing filters them without re-fetching. They have no title, but
             // a Tenor URL carries a descriptive slug, so match on that.
+            // The cache lives on the GTK thread; the fetch runs on a worker
+            // thread, so only fetch when not yet loaded and populate the cache
+            // in `done` (on the GTK thread). `None` means "already loaded,
+            // nothing fetched".
+            let already = crate::gif_favorites::is_loaded();
             self.spawn(
                 async move {
-                    if GIF_FAVORITES.with_borrow(|cache| cache.is_none()) {
-                        let favorites = http.favorite_gifs().await.unwrap_or_default();
-                        GIF_FAVORITES.with_borrow_mut(|cache| *cache = Some(favorites));
+                    if already {
+                        None
+                    } else {
+                        Some(http.favorite_gifs().await.unwrap_or_default())
                     }
                 },
-                move |app, ()| {
+                move |app, fetched| {
+                    if let Some(favorites) = fetched {
+                        crate::gif_favorites::set_all(favorites);
+                    }
                     if GIF_QUERY.with_borrow(|current| *current != asked) {
                         return;
                     }
                     let needle = asked.to_lowercase();
-                    let matches = GIF_FAVORITES.with_borrow(|cache| {
+                    let matches = crate::gif_favorites::with(|cache| {
                         cache
+                            .unwrap_or_default()
                             .iter()
-                            .flatten()
                             .filter(|gif| {
                                 needle.is_empty()
                                     || gif.url.to_lowercase().contains(&needle)
@@ -1075,8 +1084,118 @@ impl AppState {
                 app.gif_button.popdown();
                 app.send_text(url.clone());
             });
-            flow.insert(&button, -1);
+
+            // A star in the top-right corner, over the tile, toggles the
+            // favourite. It sits in an overlay above the send button so it
+            // takes the click itself (and does not also send the gif).
+            let overlay = gtk::Overlay::new();
+            overlay.set_child(Some(&button));
+            overlay.add_overlay(&self.gif_star(&gif));
+            flow.insert(&overlay, -1);
         }
+    }
+
+    /// Fetches the favourite GIFs into the shared cache if not already loaded,
+    /// then re-renders the open channel so the star on any chat GIF reflects
+    /// the real favourited state. A no-op if the cache is already populated.
+    pub(crate) fn prefetch_gif_favorites(self: &Rc<Self>) {
+        if crate::gif_favorites::is_loaded() {
+            return;
+        }
+        let Some((_, http, _)) = self.active() else {
+            return;
+        };
+        crate::video_setup::spawn_local(
+            self,
+            async move { http.favorite_gifs().await.unwrap_or_default() },
+            |app, favorites| {
+                crate::gif_favorites::set_all(favorites);
+                // Redraw so existing GIF messages pick up their star state.
+                app.render_messages();
+            },
+        );
+    }
+
+    /// A star button (top-right overlay) that favourites or unfavourites the
+    /// given GIF. It shows filled when the GIF is in the favourites cache,
+    /// outline otherwise, and reveals on hover (styled by `kc-gif-star`).
+    pub(crate) fn gif_star(self: &Rc<Self>, gif: &kc_http::Gif) -> gtk::Button {
+        let favorited = crate::gif_favorites::is_favorited(&gif.url, &gif.src);
+        let star = gtk::Button::new();
+        star.add_css_class("flat");
+        star.add_css_class("circular");
+        star.add_css_class("osd");
+        star.add_css_class("kc-gif-star");
+        star.set_halign(gtk::Align::End);
+        star.set_valign(gtk::Align::Start);
+        star.set_margin_top(6);
+        star.set_margin_end(6);
+        crate::gif_favorites::set_star_icon(&star, favorited);
+
+        let app = self.clone();
+        let gif = gif.clone();
+        star.connect_clicked(move |star| {
+            app.toggle_gif_favorite(star, &gif);
+        });
+        star
+    }
+
+    /// Favourites or unfavourites `gif`, flipping the star icon optimistically,
+    /// updating the shared cache, and syncing with Discord. On failure the icon
+    /// is reverted and the status line explains.
+    fn toggle_gif_favorite(self: &Rc<Self>, star: &gtk::Button, gif: &kc_http::Gif) {
+        let Some((_, http, _)) = self.active() else {
+            return;
+        };
+        let now_favorite = !crate::gif_favorites::is_favorited(&gif.url, &gif.src);
+        // Optimistic: flip the icon and the cache immediately.
+        crate::gif_favorites::set_star_icon(star, now_favorite);
+        if now_favorite {
+            crate::gif_favorites::insert(gif.clone());
+        } else {
+            crate::gif_favorites::remove(&gif.url, &gif.src);
+        }
+
+        let url = gif.url.clone();
+        let src = if gif.src.is_empty() {
+            gif.url.clone()
+        } else {
+            gif.src.clone()
+        };
+        let format = if gif.video {
+            kc_http::FAVORITE_GIF_FORMAT_VIDEO
+        } else {
+            kc_http::FAVORITE_GIF_FORMAT_IMAGE
+        };
+        let (width, height) = (gif.width, gif.height);
+        let gif = gif.clone();
+        let star = star.downgrade();
+        crate::video_setup::spawn_local(
+            self,
+            async move {
+                http.set_favorite_gif(&url, &src, format, width, height, now_favorite)
+                    .await
+            },
+            move |app, result| {
+                if let Err(error) = result {
+                    // Revert the optimistic change.
+                    if now_favorite {
+                        crate::gif_favorites::remove(&gif.url, &gif.src);
+                    } else {
+                        crate::gif_favorites::insert(gif.clone());
+                    }
+                    if let Some(star) = star.upgrade() {
+                        crate::gif_favorites::set_star_icon(&star, !now_favorite);
+                    }
+                    let verb = if now_favorite {
+                        "favourite"
+                    } else {
+                        "unfavourite"
+                    };
+                    app.set_status(&format!("Could not {verb} the GIF: {error}"));
+                }
+            },
+        );
     }
 
     /// Development aid: opens the GIF picker and fills it with made-up
@@ -1107,7 +1226,7 @@ impl AppState {
         // these made-up favourites instead of nothing, on the Favorited tab.
         GIF_QUERY.with_borrow_mut(|current| current.clear());
         GIF_TAB.with(|t| t.set(true));
-        GIF_FAVORITES.with_borrow_mut(|cache| *cache = Some(make(6)));
+        crate::gif_favorites::set_all(make(6));
         self.show_gifs(make(6));
         popover
     }
@@ -1343,9 +1462,6 @@ thread_local! {
     static GIF_QUERY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// Which tab is showing: true = Favorited, false = Search.
     static GIF_TAB: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    /// The favourites fetched for this picker opening, cached so typing filters
-    /// them without re-fetching. Cleared when the picker opens.
-    static GIF_FAVORITES: std::cell::RefCell<Option<Vec<kc_http::Gif>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A fresh GIF-tile flow (two columns), configured as the picker wants it.

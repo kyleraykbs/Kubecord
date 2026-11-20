@@ -537,6 +537,20 @@ impl AppState {
                 // frame, not the animation.
                 let id = id_at(0, 41);
                 store.apply("MESSAGE_CREATE", &gif_message(id, ADA));
+                // Seed the favourites cache so the star on the GIF shows its
+                // favourited (filled, visible) state in the demo; without this
+                // it is only revealed on hover, which a screenshot cannot show.
+                let url = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+                crate::gif_favorites::set_all(vec![kc_http::Gif {
+                    id: String::new(),
+                    url: url.to_owned(),
+                    src: url.to_owned(),
+                    gif_src: url.to_owned(),
+                    preview: url.to_owned(),
+                    width: 400,
+                    height: 400,
+                    video: false,
+                }]);
                 self.open_channel(general);
                 if mode == "gif-viewer" {
                     // Open the GIF in the viewer (it animates there when

@@ -10,6 +10,7 @@ mod composer;
 mod content;
 mod demo;
 mod friends;
+mod gif_favorites;
 mod group_dm;
 mod image_viewer;
 mod images;
