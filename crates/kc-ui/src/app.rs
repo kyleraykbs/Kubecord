@@ -937,7 +937,9 @@ impl AppState {
                     .clone()
                     .filter(|label| !label.trim().is_empty())
             })
-            .unwrap_or_else(|| account.token.redacted())
+            // Until Discord tells us the name (saved as the label from then
+            // on), show neutral text, never the token.
+            .unwrap_or_else(|| "Signing in…".to_owned())
     }
 
     pub(crate) fn persist_account(&self, account: Account) -> Option<String> {
@@ -1514,6 +1516,17 @@ impl AppState {
                         if let Some(user) = &user {
                             session.user = Some(user.clone());
                             session.account.user_id = Some(user.id);
+                            // Name an account that was added without a label
+                            // (e.g. a pasted token) by its user, once, so the
+                            // list never has to fall back to filler text.
+                            if session
+                                .account
+                                .label
+                                .as_ref()
+                                .is_none_or(|label| label.trim().is_empty())
+                            {
+                                session.account.label = Some(user.display_name().to_owned());
+                            }
                             let account = session.account.clone();
                             model.accounts.upsert(account);
                             if let Err(error) = model.accounts.save() {

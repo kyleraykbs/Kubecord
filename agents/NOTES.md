@@ -752,3 +752,8 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 - When you start a DM/group call, `start_call_with` rings the others and sets the outgoing ring (`calling_channel()`). `build_call_view` now shows a "Ringing <names>…" pill (`ringing_banner`, spinner + the channel's recipients not yet in the call) above the tiles while `calling_channel() == channel_id`.
 - It clears when the ring stops: the `CallRinging { anyone: false }` handler now calls `refresh_voice_view()` after `call_stopped_ringing()`, and a recipient answering re-renders the view (they move into `people`, so they drop out of the banner; when all have answered, `anyone` is false and the banner goes).
 - Screenshot-unverified: in demo mode sounds don't play so the calling slot isn't set; the logic compiles and is straightforward (a spinner + label in a `kc-ringing-banner` pill). Verify on a real outgoing call.
+
+## Unlabeled accounts: filler text, then the name saved as the label (2026-11-20)
+
+- `account_name` (app.rs) no longer falls back to the redacted token for an account with no label and no live session yet; it shows "Signing in…" instead (the token is never shown in the list).
+- On `UiEvent::Ready`, if the account's label is empty/None it is set to the user's `display_name()` and saved (`model.accounts.upsert` + `save`). So a token-only account is named by its user once, permanently, and the filler is only ever seen during the brief first connect.
