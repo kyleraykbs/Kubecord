@@ -1683,9 +1683,11 @@ impl AppState {
                 anyone,
             } => {
                 // Our call stopped ringing the others (answered, declined,
-                // or given up).
+                // or given up): stop the sound and drop the "Ringing …"
+                // banner.
                 if !anyone && self.calling_channel() == Some(channel_id) {
                     self.call_stopped_ringing();
+                    self.refresh_voice_view();
                 }
                 if ringing {
                     self.call_notification(account, channel_id);

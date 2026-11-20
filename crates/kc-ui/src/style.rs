@@ -307,6 +307,14 @@ button.kc-link-button:hover {
 .kc-call-decline { background-color: @error_bg_color; }
 .kc-call-accept { background-color: @success_bg_color; }
 
+/* "Ringing …" above the call while we wait for someone to answer. */
+.kc-ringing-banner {
+    padding: 6px 14px;
+    margin-bottom: 10px;
+    border-radius: 999px;
+    background-color: alpha(@window_fg_color, 0.08);
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;

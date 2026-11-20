@@ -394,6 +394,39 @@ impl AppState {
     /// Lays the call out. With nothing enlarged, every tile sits in a grid
     /// that fills the room; with one enlarged, it takes the room and the
     /// rest line up small beneath it.
+    /// A "Ringing …" banner naming the people we are calling who have not
+    /// answered yet, or `None` when we are not ringing anyone in this channel.
+    fn ringing_banner(
+        self: &Rc<Self>,
+        channel_id: Option<Snowflake>,
+        people: &[Participant],
+    ) -> Option<gtk::Widget> {
+        let channel_id = channel_id.filter(|id| self.calling_channel() == Some(*id))?;
+        let names: Vec<String> = self.with_session(|session| {
+            session.store.read(|state| {
+                let recipients = state.channels.get(&channel_id)?.recipients.clone()?;
+                let names = recipients
+                    .iter()
+                    .filter(|user| !people.iter().any(|person| person.id == user.id))
+                    .map(|user| state.display_name(None, user))
+                    .collect::<Vec<_>>();
+                Some(names)
+            })
+        })??;
+        if names.is_empty() {
+            return None;
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("kc-ringing-banner");
+        row.set_halign(gtk::Align::Center);
+        let spinner = gtk::Spinner::new();
+        spinner.set_valign(gtk::Align::Center);
+        spinner.start();
+        row.append(&spinner);
+        row.append(&label(&format!("Ringing {}…", names.join(", ")), &[]));
+        Some(row.upcast())
+    }
+
     fn build_call_view(
         self: &Rc<Self>,
         account: AccountId,
@@ -429,6 +462,13 @@ impl AppState {
             return;
         }
         self.voice_view.set_valign(gtk::Align::Fill);
+
+        // While we are ringing others who have not answered, show who is
+        // being rung; it clears when the ring stops (answered, declined or
+        // given up), because that refreshes this view.
+        if let Some(banner) = self.ringing_banner(channel_id, people) {
+            self.voice_view.append(&banner);
+        }
 
         // Streams first, then people, as Discord orders them. A stream is
         // always a tile of its own, next to its owner's.
