@@ -340,6 +340,7 @@ impl AppState {
     fn channel_button(self: &Rc<Self>, row: &ChannelRow, selected: bool) -> gtk::Button {
         let channel = &row.channel;
         let button = gtk::Button::new();
+        button.set_widget_name(&format!("channel-{}", channel.id));
         button.add_css_class("flat");
         button.add_css_class("kc-channel");
         if selected {

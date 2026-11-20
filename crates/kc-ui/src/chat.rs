@@ -58,6 +58,8 @@ pub(crate) struct ChatView {
     restore: Option<(f64, f64)>,
     /// A scroll-back fetch is scheduled for the next idle.
     older_queued: bool,
+    /// [`AppState::queue_scroll_settle`] is scheduled for the next idle.
+    settle_queued: bool,
 }
 
 /// Whether `message` continues the group started by `previous`.
@@ -110,7 +112,28 @@ impl AppState {
         // The content height changes when rows are added and when images
         // finish loading; keep the reading position through both.
         let app = self.clone();
-        adjustment.connect_changed(move |adjustment| {
+        adjustment.connect_changed(move |_| app.queue_scroll_settle());
+    }
+
+    /// Puts the list back where it belongs after its content changed
+    /// height: at the bottom while following, or at the same message after
+    /// older rows went in above.
+    ///
+    /// Never done inside the adjustment's `changed` signal: the viewport
+    /// emits it at the end of its size allocation, after placing the list,
+    /// and the reallocation a new value asks for is dropped there. The
+    /// adjustment then claimed the bottom while the list was still drawn
+    /// at the old offset, so a message just sent sat below the window and
+    /// scrolling down could not reach it (it was "at the bottom" already)
+    /// until scrolling up moved the list again.
+    fn queue_scroll_settle(self: &Rc<Self>) {
+        if std::mem::replace(&mut self.chat.borrow_mut().settle_queued, true) {
+            return;
+        }
+        let app = self.clone();
+        glib::idle_add_local_once(move || {
+            app.chat.borrow_mut().settle_queued = false;
+            let adjustment = app.messages_scroll.vadjustment();
             let restore = app.chat.borrow_mut().restore.take();
             if let Some((upper, value)) = restore {
                 adjustment.set_value(value + (adjustment.upper() - upper));
@@ -125,13 +148,7 @@ impl AppState {
         let adjustment = self.messages_scroll.vadjustment();
         adjustment.set_value(adjustment.upper() - adjustment.page_size());
         // Layout has not run for rows added this cycle; go again after it.
-        let app = self.clone();
-        glib::idle_add_local_once(move || {
-            if app.chat.borrow().at_bottom {
-                let adjustment = app.messages_scroll.vadjustment();
-                adjustment.set_value(adjustment.upper() - adjustment.page_size());
-            }
-        });
+        self.queue_scroll_settle();
     }
 
     /// Shows the selected channel, or the right placeholder. Rebuilds the

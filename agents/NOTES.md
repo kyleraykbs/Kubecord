@@ -552,3 +552,10 @@ dispatch; contains account data).
 - Mute and deafen only changed the local microphone and the voice server's speaking flag; nobody else saw them. Others see `self_mute` / `self_deaf` from the main-gateway voice state (op 4). `announce_voice_state` (session.rs) sends it for the call being joined or in, on join and on every toggle; deafening also sends `self_mute: true`, as the official client does. Camera updates use the same flags.
 - Your own entry in the sidebar and the call tiles uses the local choice (`VoiceUiState::own_flags`) instead of waiting for Discord's echo.
 - `GatewayHandle::detached()` gives a handle whose payloads land on a receiver, for tests of what is sent.
+
+## Chat could not reach a message just sent (2026-11-19)
+
+- Reproduced offline with `KYLECORD_DEMO=chat`: after a message was added, the scroll adjustment reported the bottom (`upper - page - value = 0`) while the new row was drawn just below the window (top at the old visible bottom). Cause: the list's `changed` handler set the adjustment value. The viewport emits `changed` at the end of its size allocation (its adjustments are frozen while it allocates), after it has placed the list; the reallocation the new value queues is dropped, so the list stays at the old offset. Scrolling down could not move a value already at the maximum; scrolling up moved it and reallocated. The same applied to keeping the place when older rows are prepended.
+- Fix: `queue_scroll_settle` does that work on the next idle (coalesced). Rows that grow late (images, embeds, edits) go through the same path.
+- Rule: never set an adjustment's value from its own `changed` (or `value-changed`) handler; defer it, as with visibility changes.
+- Dev aid `KYLECORD_DEMO=chat|sidebar|voice-empty|voice-people|voice-joined` (demo.rs): an offline made-up account and server fed through the real store reducers; prints `demo:` scroll measurements on stderr. Run with `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` in a scratch directory plus `KYLECORD_SCREENSHOT`.

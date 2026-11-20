@@ -155,6 +155,12 @@ pub fn run() -> glib::ExitCode {
                 app_state.show_video_demo(&mode);
             });
         }
+        if let Ok(mode) = std::env::var("KYLECORD_DEMO") {
+            let app_state = state.clone();
+            glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                app_state.show_demo(&mode);
+            });
+        }
         if let Ok(popup) = std::env::var("KYLECORD_POPUP") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {

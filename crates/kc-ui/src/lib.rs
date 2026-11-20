@@ -6,6 +6,7 @@ mod captcha;
 mod chat;
 mod composer;
 mod content;
+mod demo;
 mod friends;
 mod images;
 mod live;
