@@ -11,6 +11,8 @@
 //! - `voice-empty`: the page of a voice channel nobody is in.
 //! - `voice-people`: the page of a voice channel others are in.
 //! - `voice-joined`: in a voice channel, muted and deafened.
+//! - `stream-menu`: watching Ada's screen share; her user menu (saved like
+//!   the other menus) offers Stop Watching and a Stream Volume slider.
 //! - `mod-menu`, `mod-menu-higher`, `mod-move`: the user menu (saved to
 //!   `<screenshot>.menu.png`, as popovers are not part of the window
 //!   picture) for a member below you, a member above you, and the Move To
@@ -370,6 +372,54 @@ impl AppState {
                     self.open_channel(lounge);
                 }
                 self.render_voice_panel();
+            }
+            "stream-menu" => {
+                // Ada is screen-sharing and you are watching her: her user
+                // menu then offers Stop Watching and a Stream Volume slider
+                // beside the voice one. Saved to `<screenshot>.menu.png`.
+                store.apply(
+                    "VOICE_STATE_UPDATE",
+                    &json!({"user_id": ADA.to_string(), "channel_id": LOUNGE.to_string(),
+                            "guild_id": GUILD.to_string(), "session_id": "x", "self_stream": true}),
+                );
+                store.apply(
+                    "VOICE_STATE_UPDATE",
+                    &json!({"user_id": ME.to_string(), "channel_id": LOUNGE.to_string(),
+                            "guild_id": GUILD.to_string(), "session_id": "x"}),
+                );
+                self.with_session_mut(|session| {
+                    session.voice = Some(VoiceUiState {
+                        guild_id: Some(Snowflake::new(GUILD)),
+                        channel_id: Snowflake::new(LOUNGE),
+                        muted: false,
+                        deafened: false,
+                        camera: false,
+                        streaming: false,
+                        watching: Some(Snowflake::new(ADA)),
+                    });
+                });
+                if let Some(lounge) = channel(LOUNGE) {
+                    self.open_channel(lounge);
+                }
+                self.render_voice_panel();
+                // Open the menu once the window has been sized, so its
+                // popover lays out (and can be captured) correctly.
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let anchor = app.window.clone().upcast::<gtk::Widget>();
+                    let menu = app.show_user_menu(Snowflake::new(ADA), &anchor, 420.0, 120.0);
+                    if let (Some(popover), Ok(path)) = (menu, std::env::var("KYLECORD_SCREENSHOT"))
+                    {
+                        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                            let path = format!("{path}.menu.png");
+                            if let Err(error) =
+                                crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the menu: {error}");
+                            }
+                        });
+                    }
+                });
             }
             mode if mode.starts_with("settings-") || mode == "invite" => {
                 FAKE_REST.set(mode != "settings-error");

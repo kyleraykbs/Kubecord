@@ -258,6 +258,16 @@ impl AppState {
                 self,
             );
         }
+        if ctx.watching && !ctx.is_me {
+            add(
+                "Stop Watching",
+                false,
+                Box::new(move |app| {
+                    let _ = app.cmd_tx.try_send(Command::StopWatching { account });
+                }),
+                self,
+            );
+        }
         // Each picture arriving for them (their stream, their camera) can
         // be enlarged, or moved into a window of its own and back.
         for is_stream in [true, false] {

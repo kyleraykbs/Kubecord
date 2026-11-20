@@ -907,6 +907,27 @@ impl AppState {
             shown.set_visible(on);
         });
         controls.append(&info);
+        // For a stream we are watching (not our own), a way to stop without
+        // the right-click menu, as the in-call tile has.
+        let (account, user_id, is_stream) = key;
+        let watching = self
+            .voice_demo
+            .borrow()
+            .as_ref()
+            .map(|demo| demo.watching)
+            .unwrap_or_else(|| {
+                self.with_session(|session| session.voice.as_ref().and_then(|voice| voice.watching))
+                    .flatten()
+            });
+        let watching_this = is_stream && watching == Some(user_id);
+        if watching_this {
+            let stop = gtk::Button::with_label("Stop Watching");
+            let app = self.clone();
+            stop.connect_clicked(move |_| {
+                let _ = app.cmd_tx.try_send(Command::StopWatching { account });
+            });
+            controls.append(&stop);
+        }
         view.add_overlay(&controls);
         let window = gtk::Window::builder()
             .title(title)
@@ -1077,6 +1098,28 @@ impl AppState {
             "popout" => {
                 self.refresh_voice_view();
                 self.pop_out_video((account, stream.0, true), "kyleraykbs's stream");
+                // Save the pop-out window of its own (it is a separate
+                // surface, so the main screenshot does not hold it) to
+                // `<screenshot>.popout.png`, to check its controls.
+                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                    let app = self.clone();
+                    let key = (account, stream.0, true);
+                    if let Some(window) = app.popouts.borrow().get(&key).map(|p| p.window.clone()) {
+                        window.present();
+                    }
+                    gtk::glib::timeout_add_local_once(Duration::from_millis(3000), move || {
+                        if let Some(window) =
+                            app.popouts.borrow().get(&key).map(|p| p.window.clone())
+                        {
+                            let path = format!("{path}.popout.png");
+                            if let Err(error) =
+                                crate::app::save_window_png(&window, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the pop-out: {error}");
+                            }
+                        }
+                    });
+                }
             }
             "sequence" => {
                 self.focused_video.set(Some(stream));
