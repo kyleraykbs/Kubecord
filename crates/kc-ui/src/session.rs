@@ -773,6 +773,10 @@ fn spawn_account(
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
+            voice_retries: 0,
+            relocating: false,
+            stream_retries: 0,
+            stream_carry: None,
         };
 
         loop {
@@ -789,6 +793,15 @@ fn spawn_account(
                                 "READY" => {
                                     voice.self_user_id =
                                         serde_json::from_value(data["user"]["id"].clone()).ok();
+                                    if voice.connection.is_some() {
+                                        rejoin_after_new_session(
+                                            &mut voice,
+                                            account,
+                                            &ui,
+                                            &control_tx,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 "VOICE_STATE_UPDATE" => {
                                     handle_voice_state(
@@ -944,12 +957,12 @@ fn spawn_account(
                 }
                 control = control_rx.recv() => {
                     let Some(control) = control else { break };
-                    handle_voice_control(&mut voice, control, account, &ui).await;
+                    handle_voice_control(&mut voice, control, account, &ui, &control_tx).await;
                 }
             }
         }
 
-        teardown_voice(&mut voice, account, &ui, true).await;
+        teardown_voice(&mut voice, account, &ui, true, "the account stopped").await;
         if let Ok(mut registry) = VOICE_COMMANDS.lock() {
             registry.remove(&account);
         }
@@ -995,6 +1008,16 @@ struct VoiceRuntime {
     watch_generation: u64,
     /// Local per-user playback volumes, re-applied after each (re)connect.
     user_volumes: HashMap<Snowflake, f32>,
+    /// Reconnects of the call since it was last ready.
+    voice_retries: u32,
+    /// The call lost its voice server and waits for the gateway to name
+    /// the next one; the connection object is kept meanwhile.
+    relocating: bool,
+    /// Reconnects of the Go Live connection since it was last ready.
+    stream_retries: u32,
+    /// A Go Live whose capture keeps running while its connection is
+    /// replaced; the next stream connection takes it over.
+    stream_carry: Option<StreamConnection>,
 }
 
 /// Watching another participant's stream: its own connection, set up from
@@ -1166,13 +1189,35 @@ struct StreamConnection {
 
 /// Signals from a voice connection's consumer task back to the account loop.
 enum VoiceControl {
+    /// The call's voice connection closed (`code`: the server's close
+    /// code, `None` when the connection was simply lost).
     Closed {
+        generation: u64,
+        code: Option<u16>,
+        reason: String,
+    },
+    /// The call's voice connection finished its handshake.
+    VoiceReady {
+        generation: u64,
+    },
+    /// Time to connect the call to its server again.
+    RetryVoice {
+        generation: u64,
+    },
+    /// The gateway never named a new voice server for the call.
+    RelocateTimeout {
         generation: u64,
     },
     StreamReady {
         generation: u64,
     },
     StreamClosed {
+        generation: u64,
+        code: Option<u16>,
+        reason: String,
+    },
+    /// Time to connect the Go Live to its server again.
+    RetryStream {
         generation: u64,
     },
     StreamSource {
@@ -1211,11 +1256,98 @@ async fn handle_voice_control(
     control: VoiceControl,
     account: AccountId,
     ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
 ) {
     match control {
-        VoiceControl::Closed { generation } => {
-            if generation == voice.generation && voice.connection.is_some() {
-                teardown_voice(voice, account, ui, true).await;
+        VoiceControl::Closed {
+            generation,
+            code,
+            reason,
+        } => {
+            if generation != voice.generation || voice.connection.is_none() {
+                return;
+            }
+            let action = voice_close_action(code);
+            tracing::warn!(
+                ?code,
+                reason,
+                ?action,
+                relocating = voice.relocating,
+                "the call's voice connection closed"
+            );
+            if voice.relocating {
+                // The gateway is about to name the next server.
+                return;
+            }
+            match action {
+                CloseAction::Retry => {
+                    if schedule_voice_retry(voice, control_tx) {
+                        tell_reconnecting(account, ui).await;
+                    } else {
+                        give_up_call(
+                            voice,
+                            account,
+                            ui,
+                            "the voice server could not be reached again",
+                        )
+                        .await;
+                    }
+                }
+                CloseAction::AwaitServer => {
+                    // An invalid voice session: ask the gateway for a
+                    // fresh one by stating the call again. (Not after a
+                    // plain disconnect: that may be a kick, and the gateway
+                    // says so on its own.)
+                    if code == Some(4006) {
+                        announce_voice_state(voice);
+                    }
+                    await_relocation(voice, control_tx);
+                    tell_reconnecting(account, ui).await;
+                }
+                CloseAction::End => {
+                    let why = format!(
+                        "the voice server ended the call ({} {reason})",
+                        code.unwrap_or(0)
+                    );
+                    give_up_call(voice, account, ui, &why).await;
+                }
+            }
+        }
+        VoiceControl::VoiceReady { generation } => {
+            if generation != voice.generation {
+                return;
+            }
+            let reconnected = voice.voice_retries > 0;
+            voice.voice_retries = 0;
+            if let Some(connection) = &voice.connection {
+                tracing::info!(channel_id = %connection.channel_id, reconnected, "call connected");
+                // A camera carried over from the previous connection.
+                if let Some(camera) = &connection.camera {
+                    connection.handle.set_video(true);
+                    camera.force_keyframe();
+                }
+            }
+            restart_carried_stream(voice, control_tx);
+        }
+        VoiceControl::RetryVoice { generation } => {
+            if generation == voice.generation && voice.connection.is_some() && !voice.relocating {
+                reconnect_voice(voice, account, ui, control_tx, "the connection dropped").await;
+            }
+        }
+        VoiceControl::RelocateTimeout { generation } => {
+            if generation == voice.generation && voice.relocating && voice.connection.is_some() {
+                give_up_call(
+                    voice,
+                    account,
+                    ui,
+                    "Discord named no voice server to move the call to",
+                )
+                .await;
+            }
+        }
+        VoiceControl::RetryStream { generation } => {
+            if generation == voice.stream_generation && voice.stream_connection.is_some() {
+                reconnect_stream(voice, account, ui, control_tx).await;
             }
         }
         VoiceControl::VideoNetwork {
@@ -1280,7 +1412,15 @@ async fn handle_voice_control(
             }
         }
         VoiceControl::StreamReady { generation } => {
-            if generation == voice.stream_generation && voice.stream_connection.is_some() {
+            if generation == voice.stream_generation
+                && let Some(connection) = &voice.stream_connection
+            {
+                voice.stream_retries = 0;
+                // A capture carried over from the previous connection:
+                // viewers need a full frame to start from.
+                if let Some(source) = &connection.source {
+                    source.force_keyframe();
+                }
                 voice.streaming = true;
                 let _ = ui.send(UiEvent::StreamStarted { account }).await;
             }
@@ -1294,12 +1434,47 @@ async fn handle_voice_control(
                 stop_watching(voice, account, ui, true).await;
             }
         }
-        VoiceControl::StreamClosed { generation } => {
-            if generation == voice.stream_generation && voice.stream_connection.is_some() {
-                // Deleted on Discord too (harmless if it is gone
-                // already), so the next Go Live is answered.
-                stop_stream(voice, account, ui, true).await;
+        VoiceControl::StreamClosed {
+            generation,
+            code,
+            reason,
+        } => {
+            let Some(connection) = &voice.stream_connection else {
+                return;
+            };
+            if generation != voice.stream_generation {
+                return;
             }
+            // A running capture is worth keeping when the stream's server
+            // merely dropped the connection.
+            let capturing = connection.source.is_some();
+            let action = voice_close_action(code);
+            tracing::warn!(
+                ?code,
+                reason,
+                ?action,
+                capturing,
+                "the Go Live connection closed"
+            );
+            if action == CloseAction::Retry && capturing && voice.stream_retries < VOICE_RETRIES {
+                let delay = Duration::from_secs(1 << voice.stream_retries);
+                voice.stream_retries += 1;
+                let control = control_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = control.send(VoiceControl::RetryStream { generation });
+                });
+                return;
+            }
+            let message = if reason.is_empty() {
+                "The stream's connection closed.".to_owned()
+            } else {
+                format!("The stream's connection closed: {reason}")
+            };
+            let _ = ui.send(UiEvent::StreamError { account, message }).await;
+            // Deleted on Discord too (harmless if it is gone already), so
+            // the next Go Live is answered.
+            stop_stream(voice, account, ui, true).await;
         }
         VoiceControl::StreamStartTimeout { attempt } => {
             if attempt == voice.stream_attempt && voice.stream_pending {
@@ -1386,6 +1561,7 @@ async fn handle_voice_state(
         return;
     }
     let channel_id: Option<Snowflake> = serde_json::from_value(data["channel_id"].clone()).ok();
+    let session_id = data["session_id"].as_str().map(str::to_owned);
     match channel_id {
         None => {
             // Discord reports the old voice state as `channel_id: null` while
@@ -1394,7 +1570,17 @@ async fn handle_voice_state(
             // with the new channel never connects and the UI stays on "Join
             // Voice". Only an established connection means a real leave.
             if voice.connection.is_some() {
-                teardown_voice(voice, account, ui, true).await;
+                // Left from another client, kicked, the channel deleted,
+                // or the session that held the call is gone.
+                tracing::warn!(?session_id, ours = ?voice.session_id, "Discord says we are no longer in the call");
+                teardown_voice(
+                    voice,
+                    account,
+                    ui,
+                    true,
+                    "Discord removed us from the channel",
+                )
+                .await;
             } else if voice.pending_join.is_some() {
                 tracing::debug!("ignoring stale self voice state with no channel during join");
             }
@@ -1405,7 +1591,30 @@ async fn handle_voice_state(
             {
                 return;
             }
-            voice.session_id = data["session_id"].as_str().map(str::to_owned);
+            if let Some(connection) = &mut voice.connection {
+                if session_id.is_some() && session_id != voice.session_id {
+                    tracing::info!(%channel_id, "the call has a new voice session");
+                    voice.session_id = session_id;
+                }
+                if connection.channel_id != channel_id {
+                    // Moved to another channel (by a moderator, or from
+                    // another client). The new server details follow.
+                    tracing::info!(from = %connection.channel_id, to = %channel_id, "moved to another voice channel");
+                    connection.channel_id = channel_id;
+                    stop_watching(voice, account, ui, true).await;
+                    // A Go Live belongs to the channel it started in.
+                    stop_stream(voice, account, ui, true).await;
+                    await_relocation(voice, control_tx);
+                    let _ = ui
+                        .send(UiEvent::VoiceJoined {
+                            account,
+                            channel_id,
+                        })
+                        .await;
+                }
+                return;
+            }
+            voice.session_id = session_id;
             maybe_connect(voice, account, ui, control_tx).await;
         }
     }
@@ -1432,11 +1641,40 @@ async fn handle_server_update(
     if guild_id != target {
         return;
     }
-    if let Some(token) = data["token"].as_str() {
-        voice.server_token = Some(token.to_owned());
+    let token = data["token"].as_str().map(str::to_owned);
+    let endpoint = data["endpoint"].as_str().map(str::to_owned);
+    if voice.connection.is_some() && voice.pending_join.is_none() {
+        // The call's voice server changed under it (Discord moves calls
+        // between servers), or this answers a rejoin.
+        let Some(endpoint) = endpoint else {
+            // No server yet: another update names it.
+            tracing::warn!("the call's voice server is being reassigned");
+            if token.is_some() {
+                voice.server_token = token;
+            }
+            if !voice.relocating {
+                await_relocation(voice, control_tx);
+            }
+            return;
+        };
+        let changed = Some(&endpoint) != voice.endpoint.as_ref()
+            || (token.is_some() && token != voice.server_token);
+        tracing::info!(%endpoint, changed, relocating = voice.relocating, "voice server update during the call");
+        voice.endpoint = Some(endpoint);
+        if token.is_some() {
+            voice.server_token = token;
+        }
+        if changed || voice.relocating {
+            voice.voice_retries = 0;
+            reconnect_voice(voice, account, ui, control_tx, "the voice server changed").await;
+        }
+        return;
     }
-    if let Some(endpoint) = data["endpoint"].as_str() {
-        voice.endpoint = Some(endpoint.to_owned());
+    if token.is_some() {
+        voice.server_token = token;
+    }
+    if endpoint.is_some() {
+        voice.endpoint = endpoint;
     }
     maybe_connect(voice, account, ui, control_tx).await;
 }
@@ -1559,11 +1797,24 @@ async fn handle_stream_server_update(
     if voice.stream_key.is_none() && !voice.stream_pending && voice.stream_connection.is_none() {
         return;
     }
-    if let Some(token) = data["token"].as_str() {
-        voice.stream_token = Some(token.to_owned());
+    let token = data["token"].as_str().map(str::to_owned);
+    let endpoint = data["endpoint"].as_str().map(str::to_owned);
+    let moved = voice.stream_connection.is_some()
+        && endpoint.is_some()
+        && (endpoint != voice.stream_endpoint || (token.is_some() && token != voice.stream_token));
+    if token.is_some() {
+        voice.stream_token = token;
     }
-    if let Some(endpoint) = data["endpoint"].as_str() {
-        voice.stream_endpoint = Some(endpoint.to_owned());
+    if endpoint.is_some() {
+        voice.stream_endpoint = endpoint;
+    }
+    if moved {
+        // The stream's server changed under it: keep the capture going on
+        // a connection to the new one.
+        tracing::info!(endpoint = ?voice.stream_endpoint, "Go Live server changed");
+        voice.stream_retries = 0;
+        reconnect_stream(voice, account, ui, control_tx).await;
+        return;
     }
     maybe_start_stream(voice, account, ui, control_tx).await;
 }
@@ -1617,6 +1868,22 @@ async fn maybe_start_stream(
     if !voice.stream_pending || voice.stream_connection.is_some() {
         return;
     }
+    voice.stream_pending = false;
+    if !connect_stream(voice, account, ui, control_tx).await {
+        voice.stream_pending = true;
+    }
+}
+
+/// Opens the Go Live connection from what the gateway sent for it. A
+/// capture carried over from an earlier connection (`stream_carry`) moves
+/// to it; otherwise the screen or camera is opened. Returns false while
+/// the gateway's details are still incomplete.
+async fn connect_stream(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) -> bool {
     let (Some(key), Some(rtc_id), Some(token), Some(endpoint), Some(session_id), Some(user_id)) = (
         voice.stream_key.clone(),
         voice.stream_rtc_id,
@@ -1625,10 +1892,10 @@ async fn maybe_start_stream(
         voice.session_id.clone(),
         voice.self_user_id,
     ) else {
-        return;
+        return false;
     };
     let Some(connection) = &voice.connection else {
-        return;
+        return false;
     };
     let channel_id = connection.channel_id;
     let dave_channel_id = Snowflake::new(rtc_id.get().saturating_sub(1));
@@ -1644,24 +1911,35 @@ async fn maybe_start_stream(
         dave_channel_id,
         receive_only: false,
     };
-    tracing::info!(%rtc_id, %key, endpoint = %params.endpoint, "stream connecting");
-    voice.stream_pending = false;
+    let carried = voice.stream_carry.take();
+    tracing::info!(%rtc_id, %key, endpoint = %params.endpoint, carried = carried.is_some(), "stream connecting");
     voice.stream_generation = voice.stream_generation.wrapping_add(1);
     let generation = voice.stream_generation;
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
     match kc_voice::connect(params, event_tx).await {
-        Ok(handle) => {
+        Ok(new_handle) => {
             debug!(%key, %rtc_id, "go live stream connecting");
+            // A running capture keeps its handle; it now leads here.
+            let (handle, carried) = match carried {
+                Some(carried) => {
+                    carried.handle.retarget(&new_handle).disconnect_now();
+                    (carried.handle.clone(), Some(carried))
+                }
+                None => (new_handle, None),
+            };
+            let (source, audio) = carried
+                .map(|carried| (carried.source, carried.audio))
+                .unwrap_or((None, None));
+            let carrying = source.is_some();
             voice.stream_connection = Some(StreamConnection {
                 handle: handle.clone(),
-                source: None,
-                audio: None,
+                source,
+                audio,
                 key,
             });
 
             // Readiness enables the video track and tells the UI.
-            let ui_events = ui.clone();
             let control = control_tx.clone();
             let ready_handle = handle.clone();
             tokio::spawn(async move {
@@ -1704,16 +1982,16 @@ async fn maybe_start_stream(
                                 remb_kbps,
                             });
                         }
+                        // A Closed always follows; it decides what next.
                         VoiceEvent::Error(message) => {
-                            tracing::warn!(%message, "stream voice error");
-                            let _ = ui_events
-                                .send(UiEvent::StreamError { account, message })
-                                .await;
-                            let _ = control.send(VoiceControl::StreamClosed { generation });
-                            break;
+                            tracing::warn!(%message, generation, "stream connection failed");
                         }
-                        VoiceEvent::Closed { .. } => {
-                            let _ = control.send(VoiceControl::StreamClosed { generation });
+                        VoiceEvent::Closed { code, reason } => {
+                            let _ = control.send(VoiceControl::StreamClosed {
+                                generation,
+                                code,
+                                reason,
+                            });
                             break;
                         }
                         _ => {}
@@ -1738,6 +2016,9 @@ async fn maybe_start_stream(
             handle.set_loss_keyframe_spacing(Duration::from_millis(u64::from(
                 video_settings.loss_keyframe_ms,
             )));
+            if carrying {
+                return true;
+            }
             let stream_delay_ms = voice.stream_delay_ms;
             let drop_after_ms = video_settings.drop_frames_after_ms;
             let drop_after =
@@ -1849,18 +2130,14 @@ async fn maybe_start_stream(
                         }
                     };
                     if result.is_ok() {
-                        let ui_events = source_ui.clone();
                         let control = source_control.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                             if watchdog_frames.load(Ordering::Relaxed) == 0 {
-                                let _ = ui_events
-                                    .send(UiEvent::StreamError {
-                                        account,
-                                        message: "screen capture produced no frames".to_owned(),
-                                    })
-                                    .await;
-                                let _ = control.send(VoiceControl::StreamClosed { generation });
+                                let _ = control.send(VoiceControl::StreamSource {
+                                    generation,
+                                    result: Err("screen capture produced no frames".to_owned()),
+                                });
                             }
                         });
                     }
@@ -1871,6 +2148,7 @@ async fn maybe_start_stream(
                     result: result.map(Box::new),
                 });
             });
+            true
         }
         Err(error) => {
             let _ = ui
@@ -1880,6 +2158,7 @@ async fn maybe_start_stream(
                 })
                 .await;
             stop_stream(voice, account, ui, false).await;
+            true
         }
     }
 }
@@ -1899,32 +2178,18 @@ async fn maybe_connect(
     let Some(user_id) = voice.self_user_id else {
         return;
     };
-    let (Some(session_id), Some(token), Some(endpoint)) = (
-        voice.session_id.clone(),
-        voice.server_token.clone(),
-        voice.endpoint.clone(),
-    ) else {
+    let Some(params) = voice_params(voice, guild_id, channel_id) else {
         return;
     };
 
-    tracing::info!(%channel_id, ?guild_id, "voice connecting from gateway state");
-    let params = VoiceParams {
-        server_id: guild_id.unwrap_or(channel_id),
-        channel_id,
-        user_id,
-        session_id,
-        token,
-        endpoint,
-        video: true,
-        screen: false,
-        dave_channel_id: channel_id,
-        receive_only: false,
-    };
+    tracing::info!(%channel_id, ?guild_id, endpoint = %params.endpoint, "voice connecting from gateway state");
     voice.pending_join = None;
+    voice.voice_retries = 0;
+    voice.relocating = false;
     voice.generation = voice.generation.wrapping_add(1);
     let generation = voice.generation;
 
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
     match kc_voice::connect(params, event_tx).await {
         Ok(handle) => {
             tracing::info!(%channel_id, "voice connection started");
@@ -1958,7 +2223,7 @@ async fn maybe_connect(
                     audio.set_volume(stream_audio_key(*user_id), *volume);
                 }
             }
-            if voice.muted {
+            if voice.muted || voice.deafened {
                 handle.set_speaking(0);
             }
 
@@ -1976,103 +2241,9 @@ async fn maybe_connect(
                     channel_id,
                 })
                 .await;
-
-            let ui = ui.clone();
-            let control = control_tx.clone();
-            tokio::spawn(async move {
-                let mut report = tokio::time::interval(Duration::from_secs(5));
-                let mut reported = kc_media::receive::ReceiveStats::default();
-                let mut videos = VideoFeeds::new(account, false, ui.clone());
-                loop {
-                    let event = tokio::select! {
-                        event = event_rx.recv() => event,
-                        _ = report.tick() => {
-                            // How playback coped with what the network delivered.
-                            if let Some(audio) = &audio {
-                                let stats = audio.receive_stats();
-                                if stats != reported {
-                                    debug!(?stats, "voice playback");
-                                    reported = stats;
-                                }
-                            }
-                            continue;
-                        }
-                    };
-                    let Some(event) = event else { break };
-                    match event {
-                        VoiceEvent::Audio {
-                            user_id,
-                            opus,
-                            sequence,
-                            ..
-                        } => {
-                            if let Some(audio) = &audio {
-                                audio.push_remote(user_id.get(), sequence, &opus);
-                            }
-                        }
-                        VoiceEvent::ClientDisconnect { user_id } => {
-                            if let Some(audio) = &audio {
-                                audio.remove_remote(user_id.get());
-                            }
-                            videos.end(user_id);
-                        }
-                        VoiceEvent::Video {
-                            user_id,
-                            frame,
-                            keyframe,
-                            ..
-                        } => videos.push(user_id, frame, keyframe),
-                        VoiceEvent::VideoEnded { user_id } => videos.end(user_id),
-                        VoiceEvent::Speaking {
-                            user_id, speaking, ..
-                        } => {
-                            let _ = ui
-                                .send(UiEvent::VoiceSpeaking {
-                                    account,
-                                    user_id,
-                                    speaking,
-                                })
-                                .await;
-                        }
-                        VoiceEvent::Ready { .. } => {
-                            let _ = ui
-                                .send(UiEvent::VoiceJoined {
-                                    account,
-                                    channel_id,
-                                })
-                                .await;
-                        }
-                        VoiceEvent::ForceKeyframe => {
-                            let _ = control.send(VoiceControl::ForceCameraKeyframe { generation });
-                        }
-                        VoiceEvent::Ping { millis } => {
-                            let _ = ui.try_send(UiEvent::VoicePing { account, millis });
-                        }
-                        VoiceEvent::VideoNetwork {
-                            sent,
-                            lost,
-                            remb_kbps,
-                        } => {
-                            let _ = control.send(VoiceControl::VideoNetwork {
-                                generation,
-                                stream: false,
-                                sent,
-                                lost,
-                                remb_kbps,
-                            });
-                        }
-                        VoiceEvent::Error(message) => {
-                            let _ = ui.send(UiEvent::VoiceError { account, message }).await;
-                            let _ = control.send(VoiceControl::Closed { generation });
-                        }
-                        VoiceEvent::Closed { .. } => {
-                            let _ = control.send(VoiceControl::Closed { generation });
-                        }
-                        _ => {}
-                    }
-                }
-                videos.end_all();
-            });
+            spawn_voice_events(
+                event_rx, audio, generation, channel_id, account, ui, control_tx,
+            );
         }
         Err(error) => {
             tracing::warn!(%error, "voice connect failed");
@@ -2084,6 +2255,393 @@ async fn maybe_connect(
                 .await;
         }
     }
+}
+
+/// What a voice connection to `channel_id` needs from the gateway, once
+/// it has all arrived: our session, the voice server and its token.
+fn voice_params(
+    voice: &VoiceRuntime,
+    guild_id: Option<Snowflake>,
+    channel_id: Snowflake,
+) -> Option<VoiceParams> {
+    Some(VoiceParams {
+        server_id: guild_id.unwrap_or(channel_id),
+        channel_id,
+        user_id: voice.self_user_id?,
+        session_id: voice.session_id.clone()?,
+        token: voice.server_token.clone()?,
+        endpoint: voice.endpoint.clone()?,
+        video: true,
+        screen: false,
+        dave_channel_id: channel_id,
+        receive_only: false,
+    })
+}
+
+/// Reads one voice connection's events: sound and video to the speakers
+/// and tiles, and its state changes to the account loop.
+fn spawn_voice_events(
+    mut event_rx: mpsc::UnboundedReceiver<VoiceEvent>,
+    audio: Option<Arc<VoiceAudio>>,
+    generation: u64,
+    channel_id: Snowflake,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    let ui = ui.clone();
+    let control = control_tx.clone();
+    tokio::spawn(async move {
+        let mut report = tokio::time::interval(Duration::from_secs(5));
+        let mut reported = kc_media::receive::ReceiveStats::default();
+        let mut videos = VideoFeeds::new(account, false, ui.clone());
+        loop {
+            let event = tokio::select! {
+                event = event_rx.recv() => event,
+                _ = report.tick() => {
+                    // How playback coped with what the network delivered.
+                    if let Some(audio) = &audio {
+                        let stats = audio.receive_stats();
+                        if stats != reported {
+                            debug!(?stats, "voice playback");
+                            reported = stats;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let Some(event) = event else { break };
+            match event {
+                VoiceEvent::Audio {
+                    user_id,
+                    opus,
+                    sequence,
+                    ..
+                } => {
+                    if let Some(audio) = &audio {
+                        audio.push_remote(user_id.get(), sequence, &opus);
+                    }
+                }
+                VoiceEvent::ClientDisconnect { user_id } => {
+                    if let Some(audio) = &audio {
+                        audio.remove_remote(user_id.get());
+                    }
+                    videos.end(user_id);
+                }
+                VoiceEvent::Video {
+                    user_id,
+                    frame,
+                    keyframe,
+                    ..
+                } => videos.push(user_id, frame, keyframe),
+                VoiceEvent::VideoEnded { user_id } => videos.end(user_id),
+                VoiceEvent::Speaking {
+                    user_id, speaking, ..
+                } => {
+                    let _ = ui
+                        .send(UiEvent::VoiceSpeaking {
+                            account,
+                            user_id,
+                            speaking,
+                        })
+                        .await;
+                }
+                VoiceEvent::Ready { .. } => {
+                    let _ = control.send(VoiceControl::VoiceReady { generation });
+                    let _ = ui
+                        .send(UiEvent::VoiceJoined {
+                            account,
+                            channel_id,
+                        })
+                        .await;
+                }
+                VoiceEvent::ForceKeyframe => {
+                    let _ = control.send(VoiceControl::ForceCameraKeyframe { generation });
+                }
+                VoiceEvent::Ping { millis } => {
+                    let _ = ui.try_send(UiEvent::VoicePing { account, millis });
+                }
+                VoiceEvent::VideoNetwork {
+                    sent,
+                    lost,
+                    remb_kbps,
+                } => {
+                    let _ = control.send(VoiceControl::VideoNetwork {
+                        generation,
+                        stream: false,
+                        sent,
+                        lost,
+                        remb_kbps,
+                    });
+                }
+                // A Closed always follows; it decides what happens next.
+                VoiceEvent::Error(message) => {
+                    tracing::warn!(%message, generation, "voice connection failed");
+                }
+                VoiceEvent::Closed { code, reason } => {
+                    let _ = control.send(VoiceControl::Closed {
+                        generation,
+                        code,
+                        reason,
+                    });
+                    break;
+                }
+                _ => {}
+            }
+        }
+        videos.end_all();
+    });
+}
+
+/// Moves the call to a new voice connection without leaving it: the
+/// server moved, the old connection dropped, or the gateway session was
+/// replaced. The microphone, the camera and the playback carry on; every
+/// holder of the connection's handle follows it to the new one.
+async fn reconnect_voice(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+    why: &str,
+) {
+    let Some((guild_id, channel_id)) = voice
+        .connection
+        .as_ref()
+        .map(|connection| (connection.guild_id, connection.channel_id))
+    else {
+        return;
+    };
+    let Some(params) = voice_params(voice, guild_id, channel_id) else {
+        tracing::warn!(
+            why,
+            "cannot reconnect the call: the gateway has not sent the voice server yet"
+        );
+        return;
+    };
+    tracing::info!(why, %channel_id, endpoint = %params.endpoint, attempt = voice.voice_retries, "voice reconnecting");
+    voice.relocating = false;
+    voice.generation = voice.generation.wrapping_add(1);
+    let generation = voice.generation;
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<VoiceEvent>();
+    match kc_voice::connect(params, event_tx).await {
+        Ok(new_handle) => {
+            let Some(connection) = &mut voice.connection else {
+                return;
+            };
+            let previous = connection.handle.retarget(&new_handle);
+            previous.disconnect_now();
+            if voice.muted || voice.deafened {
+                connection.handle.set_speaking(0);
+            }
+            spawn_voice_events(
+                event_rx,
+                connection.audio.clone(),
+                generation,
+                channel_id,
+                account,
+                ui,
+                control_tx,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "voice reconnect failed to start");
+            schedule_voice_retry(voice, control_tx);
+        }
+    }
+}
+
+/// How many times in a row a dropped call is reconnected before it is
+/// given up.
+const VOICE_RETRIES: u32 = 5;
+
+/// How long a call waits for the gateway to name its new voice server
+/// after the old one let it go, or after the gateway session was replaced.
+const RELOCATE_WAIT: Duration = Duration::from_secs(15);
+
+/// Schedules the next attempt to reconnect the call to the same server,
+/// with a growing pause (1, 2, 4, 8, 16 s). Returns false once the
+/// attempts are used up.
+fn schedule_voice_retry(
+    voice: &mut VoiceRuntime,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) -> bool {
+    if voice.voice_retries >= VOICE_RETRIES {
+        return false;
+    }
+    let delay = Duration::from_secs(1 << voice.voice_retries);
+    voice.voice_retries += 1;
+    let generation = voice.generation;
+    let control = control_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = control.send(VoiceControl::RetryVoice { generation });
+    });
+    true
+}
+
+/// Waits for the gateway to say where the call goes next (a new voice
+/// server, a new session for us, or that we left).
+fn await_relocation(voice: &mut VoiceRuntime, control_tx: &mpsc::UnboundedSender<VoiceControl>) {
+    voice.relocating = true;
+    let generation = voice.generation;
+    let control = control_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(RELOCATE_WAIT).await;
+        let _ = control.send(VoiceControl::RelocateTimeout { generation });
+    });
+}
+
+/// What to do when the voice server closes the call's connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseAction {
+    /// Connect to the same server again.
+    Retry,
+    /// Wait for the gateway to name a server (or to say we left).
+    AwaitServer,
+    /// The call is over.
+    End,
+}
+
+fn voice_close_action(code: Option<u16>) -> CloseAction {
+    match code {
+        // Disconnected (kicked, channel gone, or moved to another server)
+        // and call terminated (also sent when the voice server changes):
+        // the gateway says which. Session no longer valid: a new gateway
+        // session brings a new one.
+        Some(4006 | 4014 | 4022) => CloseAction::AwaitServer,
+        // Protocol and authentication failures, unknown server, unknown
+        // encryption mode, E2EE required, bad request, rate limited:
+        // connecting again cannot help.
+        Some(4001..=4005 | 4011 | 4012 | 4016 | 4017 | 4020 | 4021) => CloseAction::End,
+        // Network loss (no close frame, 1006), a normal or going-away close,
+        // session timeout (4009), voice server crashed (4015), anything new.
+        _ => CloseAction::Retry,
+    }
+}
+
+/// Shows that the call is being put back together.
+async fn tell_reconnecting(account: AccountId, ui: &async_channel::Sender<UiEvent>) {
+    let _ = ui
+        .send(UiEvent::VoiceError {
+            account,
+            message: "Voice connection lost; reconnecting…".to_owned(),
+        })
+        .await;
+}
+
+/// Ends a call that could not be kept: tells Discord we left, so nobody
+/// sees us sitting there silent, and says why.
+async fn give_up_call(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    why: &str,
+) {
+    let guild_id = voice
+        .connection
+        .as_ref()
+        .and_then(|connection| connection.guild_id);
+    voice
+        .handle
+        .update_voice_state(guild_id, None, voice.muted, voice.deafened, false);
+    teardown_voice(voice, account, ui, true, why).await;
+    let _ = ui
+        .send(UiEvent::VoiceError {
+            account,
+            message: format!("Disconnected from voice: {why}"),
+        })
+        .await;
+}
+
+/// Connects the Go Live again to the server it had, keeping its capture.
+async fn reconnect_stream(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    let Some(connection) = voice.stream_connection.take() else {
+        return;
+    };
+    tracing::info!(attempt = voice.stream_retries, "Go Live reconnecting");
+    voice.stream_carry = Some(connection);
+    if !connect_stream(voice, account, ui, control_tx).await {
+        tracing::warn!("Go Live cannot reconnect: its server details are gone");
+        stop_stream(voice, account, ui, true).await;
+    }
+}
+
+/// After the call moved to a new gateway session, Discord has dropped the
+/// old session's Go Live. Asks for a new one; the capture carried over
+/// goes live on it when it is ready.
+fn restart_carried_stream(
+    voice: &mut VoiceRuntime,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    if voice.stream_carry.is_none() || voice.stream_pending || voice.stream_connection.is_some() {
+        return;
+    }
+    let Some((guild_id, channel_id)) = voice
+        .connection
+        .as_ref()
+        .map(|connection| (connection.guild_id, connection.channel_id))
+    else {
+        return;
+    };
+    tracing::info!(?guild_id, %channel_id, "creating the go live stream again");
+    voice.stream_pending = true;
+    voice.stream_attempt = voice.stream_attempt.wrapping_add(1);
+    give_up_unanswered_stream(voice.stream_attempt, control_tx);
+    voice.stream_key = None;
+    voice.stream_rtc_id = None;
+    voice.stream_token = None;
+    voice.stream_endpoint = None;
+    voice.handle.stream_create(guild_id, channel_id);
+    if let Some(user_id) = voice.self_user_id {
+        voice
+            .handle
+            .stream_pause(&stream_key(guild_id, channel_id, user_id), false);
+    }
+}
+
+/// The gateway started a new session (READY) while a call was up. The
+/// voice state belonged to the old session; state the call again so
+/// Discord sends a new session and server for it, and keep everything
+/// running until then. A Go Live moves to a stream created anew.
+async fn rejoin_after_new_session(
+    voice: &mut VoiceRuntime,
+    account: AccountId,
+    ui: &async_channel::Sender<UiEvent>,
+    control_tx: &mpsc::UnboundedSender<VoiceControl>,
+) {
+    let Some(channel_id) = voice
+        .connection
+        .as_ref()
+        .map(|connection| connection.channel_id)
+    else {
+        return;
+    };
+    tracing::warn!(%channel_id, "the gateway started a new session during a call; joining it again");
+    voice.session_id = None;
+    stop_watching(voice, account, ui, false).await;
+    match voice.stream_connection.take() {
+        Some(stream) if stream.source.is_some() => {
+            voice.stream_carry = Some(stream);
+            voice.stream_key = None;
+            voice.stream_rtc_id = None;
+            voice.stream_token = None;
+            voice.stream_endpoint = None;
+            // Events of the old stream connection no longer apply.
+            voice.stream_generation = voice.stream_generation.wrapping_add(1);
+        }
+        other => {
+            voice.stream_connection = other;
+            stop_stream(voice, account, ui, true).await;
+        }
+    }
+    announce_voice_state(voice);
+    await_relocation(voice, control_tx);
+    tell_reconnecting(account, ui).await;
 }
 
 async fn start_camera(
@@ -2139,7 +2697,7 @@ async fn apply_voice_command(
             channel_id,
         } => {
             if voice.connection.is_some() || voice.pending_join.is_some() {
-                teardown_voice(voice, account, ui, true).await;
+                teardown_voice(voice, account, ui, true, "joining another channel").await;
             }
             voice.pending_join = Some((guild_id, channel_id));
             voice.session_id = None;
@@ -2164,7 +2722,7 @@ async fn apply_voice_command(
                 .handle
                 .update_voice_state(guild_id, None, voice.muted, voice.deafened, false);
             if voice.connection.is_some() || voice.pending_join.is_some() {
-                teardown_voice(voice, account, ui, true).await;
+                teardown_voice(voice, account, ui, true, "left").await;
             }
         }
         VoiceCommand::SetMute(muted) => {
@@ -2673,16 +3231,22 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
     let had_any = voice.streaming
         || voice.stream_pending
         || voice.stream_connection.is_some()
+        || voice.stream_carry.is_some()
         || key.is_some();
     voice.stream_pending = false;
     voice.streaming = false;
     voice.stream_camera = None;
     voice.stream_parent = None;
     voice.stream_capture = None;
-    if let Some(connection) = voice.stream_connection.take() {
+    voice.stream_retries = 0;
+    for connection in [voice.stream_connection.take(), voice.stream_carry.take()]
+        .into_iter()
+        .flatten()
+    {
+        // Disconnect first: stopping the sound share can take a moment.
+        connection.handle.disconnect().await;
         drop(connection.source);
         drop(connection.audio);
-        connection.handle.disconnect().await;
     }
     voice.stream_key = None;
     voice.stream_rtc_id = None;
@@ -2692,15 +3256,23 @@ async fn clear_stream(voice: &mut VoiceRuntime) -> ClearedStream {
     ClearedStream { key, had_any }
 }
 
+/// Ends the call locally (and any stream or watching with it). `why` is
+/// logged, so the log tells how each call ended.
 async fn teardown_voice(
     voice: &mut VoiceRuntime,
     account: AccountId,
     ui: &async_channel::Sender<UiEvent>,
     notify: bool,
+    why: &str,
 ) {
+    let had_connection = voice.connection.is_some() || voice.pending_join.is_some();
+    if had_connection {
+        tracing::info!(why, streaming = voice.streaming, "call ended");
+    }
+    voice.relocating = false;
+    voice.voice_retries = 0;
     stop_watching(voice, account, ui, true).await;
     stop_stream(voice, account, ui, notify).await;
-    let had_connection = voice.connection.is_some() || voice.pending_join.is_some();
     if let Some(connection) = voice.connection.take() {
         connection.handle.disconnect().await;
         drop(connection.camera);
@@ -2812,6 +3384,10 @@ mod tests {
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
+            voice_retries: 0,
+            relocating: false,
+            stream_retries: 0,
+            stream_carry: None,
         }
     }
 
@@ -2822,6 +3398,9 @@ mod tests {
             kinds.push(match event {
                 UiEvent::StreamError { .. } => "error",
                 UiEvent::StreamStopped { .. } => "stopped",
+                UiEvent::VoiceLeft { .. } => "left",
+                UiEvent::VoiceJoined { .. } => "joined",
+                UiEvent::VoiceError { .. } => "voice-error",
                 _ => "other",
             });
         }
@@ -2851,6 +3430,7 @@ mod tests {
             },
             0,
             &ui_tx,
+            &mpsc::unbounded_channel().0,
         )
         .await;
         // No error, and nothing left to block the next Go Live.
@@ -2870,6 +3450,7 @@ mod tests {
             },
             0,
             &ui_tx,
+            &mpsc::unbounded_channel().0,
         )
         .await;
         assert_eq!(told(&ui_rx), ["error", "stopped"]);
@@ -2890,6 +3471,7 @@ mod tests {
             VoiceControl::StreamStartTimeout { attempt: 2 },
             0,
             &ui_tx,
+            &mpsc::unbounded_channel().0,
         )
         .await;
         assert!(told(&ui_rx).is_empty());
@@ -2900,6 +3482,7 @@ mod tests {
             VoiceControl::StreamStartTimeout { attempt: 3 },
             0,
             &ui_tx,
+            &mpsc::unbounded_channel().0,
         )
         .await;
         assert_eq!(told(&ui_rx), ["error", "stopped"]);
@@ -2991,6 +3574,250 @@ mod tests {
         };
         assert_eq!(voice.own_flags(Snowflake(12)), Some((true, true)));
         assert_eq!(voice.own_flags(Snowflake(13)), None);
+    }
+
+    /// A voice runtime in a call in channel 12 of guild 5, its connection
+    /// pointed at a server that is not there.
+    async fn in_a_call() -> (VoiceRuntime, mpsc::UnboundedReceiver<serde_json::Value>) {
+        let (handle, sent) = GatewayHandle::detached();
+        let mut voice = runtime(handle);
+        voice.pending_join = None;
+        voice.session_id = Some("session".to_owned());
+        voice.server_token = Some("token".to_owned());
+        voice.endpoint = Some("127.0.0.1:9".to_owned());
+        let params = voice_params(&voice, Some(Snowflake(5)), Snowflake(12)).unwrap();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let handle = kc_voice::connect(params, event_tx).await.unwrap();
+        voice.connection = Some(VoiceConnection {
+            handle,
+            audio: None,
+            camera: None,
+            guild_id: Some(Snowflake(5)),
+            channel_id: Snowflake(12),
+        });
+        voice.generation = 3;
+        (voice, sent)
+    }
+
+    #[test]
+    fn voice_close_codes_decide_what_follows() {
+        for code in [None, Some(1000), Some(1006), Some(4009), Some(4015)] {
+            assert_eq!(voice_close_action(code), CloseAction::Retry, "{code:?}");
+        }
+        for code in [4006, 4014, 4022] {
+            assert_eq!(voice_close_action(Some(code)), CloseAction::AwaitServer);
+        }
+        for code in [4004, 4011, 4016, 4017, 4021] {
+            assert_eq!(voice_close_action(Some(code)), CloseAction::End);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_voice_server_moves_the_call_without_leaving() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, _sent) = in_a_call().await;
+        handle_server_update(
+            &mut voice,
+            &json!({"guild_id": "5", "token": "new-token", "endpoint": "127.0.0.1:10"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.connection.is_some());
+        assert_eq!(voice.generation, 4, "a new connection was made");
+        assert_eq!(voice.endpoint.as_deref(), Some("127.0.0.1:10"));
+        assert_eq!(voice.server_token.as_deref(), Some("new-token"));
+        assert!(!told(&ui_rx).contains(&"left"));
+
+        // The same server again changes nothing.
+        handle_server_update(
+            &mut voice,
+            &json!({"guild_id": "5", "token": "new-token", "endpoint": "127.0.0.1:10"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.generation, 4);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_voice_connection_is_retried_then_given_up() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, mut sent) = in_a_call().await;
+        let closed = |generation| VoiceControl::Closed {
+            generation,
+            code: Some(1006),
+            reason: String::new(),
+        };
+        for attempt in 1..=VOICE_RETRIES {
+            let current = closed(voice.generation);
+            handle_voice_control(&mut voice, current, 0, &ui_tx, &control_tx).await;
+            assert_eq!(voice.voice_retries, attempt);
+            assert!(voice.connection.is_some());
+        }
+        assert!(!told(&ui_rx).contains(&"left"));
+        // A close from an older connection is not this call's business.
+        handle_voice_control(&mut voice, closed(1), 0, &ui_tx, &control_tx).await;
+        assert!(voice.connection.is_some());
+        // Out of attempts: the call ends, and Discord is told we left.
+        let current = closed(voice.generation);
+        handle_voice_control(&mut voice, current, 0, &ui_tx, &control_tx).await;
+        assert!(voice.connection.is_none());
+        assert!(told(&ui_rx).contains(&"left"));
+        assert_eq!(
+            voice_states_sent(&mut sent)
+                .last()
+                .map(|state| state.0.clone()),
+            Some(serde_json::Value::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_waits_for_the_gateway_to_say_where_next() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, _sent) = in_a_call().await;
+        let generation = voice.generation;
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::Closed {
+                generation,
+                code: Some(4014),
+                reason: "Disconnected.".to_owned(),
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.relocating && voice.connection.is_some());
+        // The gateway names the new server: the call moves there.
+        handle_server_update(
+            &mut voice,
+            &json!({"guild_id": "5", "token": "token", "endpoint": "127.0.0.1:9"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(!voice.relocating);
+        assert_eq!(voice.generation, generation + 1);
+        // A timeout armed before the move does nothing.
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::RelocateTimeout { generation },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.connection.is_some());
+        assert!(!told(&ui_rx).contains(&"left"));
+    }
+
+    #[tokio::test]
+    async fn a_fatal_close_or_no_new_server_ends_the_call() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, _sent) = in_a_call().await;
+        let generation = voice.generation;
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::Closed {
+                generation,
+                code: Some(4014),
+                reason: String::new(),
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::RelocateTimeout { generation },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.connection.is_none());
+        assert!(told(&ui_rx).contains(&"left"));
+
+        let (mut voice, _sent) = in_a_call().await;
+        let generation = voice.generation;
+        handle_voice_control(
+            &mut voice,
+            VoiceControl::Closed {
+                generation,
+                code: Some(4004),
+                reason: "Authentication failed".to_owned(),
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.connection.is_none());
+        assert!(told(&ui_rx).contains(&"left"));
+    }
+
+    #[tokio::test]
+    async fn a_new_gateway_session_rejoins_the_call() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, mut sent) = in_a_call().await;
+        voice.muted = true;
+        rejoin_after_new_session(&mut voice, 0, &ui_tx, &control_tx).await;
+        assert!(voice.relocating && voice.connection.is_some());
+        assert!(voice.session_id.is_none());
+        assert_eq!(
+            voice_states_sent(&mut sent),
+            [(json!(Snowflake(12)), true, false, false)]
+        );
+        // Discord answers with the new session's state, then its server.
+        handle_voice_state(
+            &mut voice,
+            &json!({"user_id": "1", "channel_id": "12", "session_id": "fresh"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.session_id.as_deref(), Some("fresh"));
+        let generation = voice.generation;
+        handle_server_update(
+            &mut voice,
+            &json!({"guild_id": "5", "token": "token", "endpoint": "127.0.0.1:9"}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.generation, generation + 1);
+        assert!(!voice.relocating);
+        assert!(!told(&ui_rx).contains(&"left"));
+    }
+
+    #[tokio::test]
+    async fn being_removed_from_the_channel_ends_the_call() {
+        let (ui_tx, ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let (mut voice, _sent) = in_a_call().await;
+        handle_voice_state(
+            &mut voice,
+            &json!({"user_id": "1", "channel_id": null}),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice.connection.is_none());
+        assert_eq!(told(&ui_rx), ["left"]);
     }
 
     #[tokio::test]

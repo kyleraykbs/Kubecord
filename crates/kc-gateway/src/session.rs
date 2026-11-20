@@ -238,9 +238,15 @@ impl Gateway {
         let mut backoff_ms = 1_000u64;
 
         loop {
+            let mut established = false;
             let outcome = self
-                .connect_once(&mut session, &events, &mut commands)
+                .connect_once(&mut session, &events, &mut commands, &mut established)
                 .await;
+            // A connection that got as far as READY or RESUMED was healthy:
+            // the next drop starts the backoff over.
+            if established {
+                backoff_ms = 1_000;
+            }
             match outcome {
                 Outcome::Fatal => {
                     info!("gateway stopped after fatal close");
@@ -265,6 +271,7 @@ impl Gateway {
         session: &mut Session,
         events: &mpsc::UnboundedSender<GatewayEvent>,
         commands: &mut mpsc::UnboundedReceiver<Value>,
+        established: &mut bool,
     ) -> Outcome {
         let url = match (&session.id, &session.resume_url) {
             (Some(_), Some(resume)) => format!(
@@ -312,6 +319,7 @@ impl Gateway {
         });
 
         if let Some(_session_id) = &session.id {
+            info!(seq = ?session.seq, "gateway resuming the session");
             let payload = json!({
                 "op": 6,
                 "d": {
@@ -325,6 +333,7 @@ impl Gateway {
                 return Outcome::Reconnect { resumable: true };
             }
         } else {
+            info!("gateway identifying (new session)");
             let payload = identify_payload(&self.token, &self.properties);
             if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
                 warn!(%error, "gateway identify send failed");
@@ -363,6 +372,7 @@ impl Gateway {
                 }
                 message = read.next() => {
                     let Some(message) = message else {
+                        warn!("gateway connection ended without a close");
                         return Outcome::Reconnect { resumable: true };
                     };
                     let message = match message {
@@ -391,10 +401,16 @@ impl Gateway {
                                         session.resume_url = data["resume_gateway_url"]
                                             .as_str()
                                             .map(str::to_owned);
+                                        *established = true;
                                         info!(
                                             user = data.pointer("/user/username").and_then(|value| value.as_str()).unwrap_or("?"),
                                             "gateway ready"
                                         );
+                                    }
+                                    if name == "RESUMED" {
+                                        *established = true;
+                                        info!(seq = ?session.seq, "gateway resumed");
+                                        let _ = events.send(GatewayEvent::Resumed);
                                     }
                                     dump_dispatch(&name, &data);
                                     let _ = events.send(GatewayEvent::Dispatch {
@@ -410,11 +426,13 @@ impl Gateway {
                                     awaiting_ack = true;
                                 }
                                 7 => {
+                                    info!("gateway asked us to reconnect");
                                     let _ = events.send(GatewayEvent::Reconnect);
                                     return Outcome::Reconnect { resumable: true };
                                 }
                                 9 => {
                                     let resumable = value["d"].as_bool().unwrap_or(false);
+                                    warn!(resumable, "gateway invalidated the session");
                                     let _ = events.send(GatewayEvent::InvalidSession { resumable });
                                     return Outcome::Reconnect { resumable };
                                 }
@@ -505,7 +523,7 @@ fn fatal_or_reconnect(code: Option<u16>, reason: String) -> Outcome {
         // disallowed intents, invalid API version.
         Some(4004 | 4010 | 4011 | 4013 | 4014) => Outcome::Fatal,
         _ => {
-            debug!(?code, reason, "gateway connection ended; reconnecting");
+            warn!(?code, reason, "gateway connection closed; reconnecting");
             Outcome::Reconnect { resumable: true }
         }
     }

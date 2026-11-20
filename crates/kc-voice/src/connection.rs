@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::sink::SinkExt;
@@ -445,14 +446,56 @@ enum Command {
 }
 
 /// Command handle to a running voice connection.
+/// Command handle to a running voice connection. Every clone shares the
+/// connection it points at, so [`VoiceHandle::retarget`] moves all of them
+/// (microphone, camera, stream video and sound) to a new connection at
+/// once, without restarting what feeds them.
 #[derive(Clone)]
 pub struct VoiceHandle {
-    tx: mpsc::UnboundedSender<Command>,
+    tx: Arc<RwLock<mpsc::UnboundedSender<Command>>>,
 }
 
 impl VoiceHandle {
+    fn new(tx: mpsc::UnboundedSender<Command>) -> Self {
+        Self {
+            tx: Arc::new(RwLock::new(tx)),
+        }
+    }
+
+    fn send(&self, command: Command) {
+        let tx = match self.tx.read() {
+            Ok(tx) => tx,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = tx.send(command);
+    }
+
+    /// Points this handle and all its clones at the connection `to` drives,
+    /// for a call that moved to another voice server or reconnected.
+    /// Returns a handle to the connection they pointed at before, which
+    /// the caller disconnects.
+    pub fn retarget(&self, to: &VoiceHandle) -> VoiceHandle {
+        let new = match to.tx.read() {
+            Ok(tx) => tx.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let mut current = match self.tx.write() {
+            Ok(tx) => tx,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        VoiceHandle::new(std::mem::replace(&mut *current, new))
+    }
+
+    /// Whether the connection behind this handle has ended.
+    pub fn is_closed(&self) -> bool {
+        match self.tx.read() {
+            Ok(tx) => tx.is_closed(),
+            Err(poisoned) => poisoned.into_inner().is_closed(),
+        }
+    }
+
     pub fn send_audio(&self, opus: Vec<u8>, frame_ms: u32) {
-        let _ = self.tx.send(Command::SendAudio {
+        self.send(Command::SendAudio {
             opus,
             frame_ms,
             speaking: 1, // microphone
@@ -461,7 +504,7 @@ impl VoiceHandle {
 
     /// Audio for a Go Live stream, marked SOUNDSHARE rather than microphone.
     pub fn send_soundshare_audio(&self, opus: Vec<u8>, frame_ms: u32) {
-        let _ = self.tx.send(Command::SendAudio {
+        self.send(Command::SendAudio {
             opus,
             frame_ms,
             speaking: 2,
@@ -469,15 +512,15 @@ impl VoiceHandle {
     }
 
     pub fn send_video(&self, frame: Vec<u8>, frame_ms: u32) {
-        let _ = self.tx.send(Command::SendVideo { frame, frame_ms });
+        self.send(Command::SendVideo { frame, frame_ms });
     }
 
     pub fn set_speaking(&self, flags: u8) {
-        let _ = self.tx.send(Command::SetSpeaking(flags));
+        self.send(Command::SetSpeaking(flags));
     }
 
     pub fn set_video(&self, enabled: bool) {
-        let _ = self.tx.send(Command::SetVideo(enabled));
+        self.send(Command::SetVideo(enabled));
     }
 
     /// How long sent audio and video packets stay available for
@@ -487,20 +530,25 @@ impl VoiceHandle {
     /// lost. Shorter recovers sooner; too short and the extra keyframes
     /// themselves crowd a struggling connection.
     pub fn set_loss_keyframe_spacing(&self, spacing: Duration) {
-        let _ = self.tx.send(Command::SetLossKeyframeSpacing(spacing));
+        self.send(Command::SetLossKeyframeSpacing(spacing));
     }
 
     /// Sends every video packet twice (see [`Redundancy`]).
     pub fn set_redundancy(&self, enabled: bool) {
-        let _ = self.tx.send(Command::SetRedundancy(enabled));
+        self.send(Command::SetRedundancy(enabled));
     }
 
     pub fn set_retransmit_window(&self, window: Duration) {
-        let _ = self.tx.send(Command::SetRetransmitWindow(window));
+        self.send(Command::SetRetransmitWindow(window));
     }
 
     pub async fn disconnect(&self) {
-        let _ = self.tx.send(Command::Disconnect);
+        self.disconnect_now();
+    }
+
+    /// [`VoiceHandle::disconnect`] for code that cannot wait.
+    pub fn disconnect_now(&self) {
+        self.send(Command::Disconnect);
     }
 }
 
@@ -521,7 +569,7 @@ pub async fn connect(
             });
         }
     });
-    Ok(VoiceHandle { tx })
+    Ok(VoiceHandle::new(tx))
 }
 
 struct SessionState {
@@ -916,7 +964,8 @@ async fn run(
                 }
                 let stamp = now_millis();
                 let payload = json!({"op": 3, "d": {"t": stamp, "seq_ack": state.last_binary_seq}});
-                if send_json(&mut state.write, payload).await.is_err() {
+                if let Err(error) = send_json(&mut state.write, payload).await {
+                    warn!(%error, server = %state.params.endpoint, "voice heartbeat could not be sent");
                     break;
                 }
                 state.ping_pending = Some((stamp, std::time::Instant::now()));
@@ -938,7 +987,10 @@ async fn run(
                 }
             }
             message = state.read.next() => {
-                let Some(message) = message else { break };
+                let Some(message) = message else {
+                    warn!(server = %state.params.endpoint, "voice connection ended without a close");
+                    break;
+                };
                 match message {
                     Ok(Message::Text(text)) => {
                         if let Ok(value) = serde_json::from_str::<Value>(&text)
@@ -949,6 +1001,7 @@ async fn run(
                     }
                     Ok(Message::Close(frame)) => {
                         let (code, reason) = close_parts(frame);
+                        warn!(?code, reason, server = %state.params.endpoint, "voice server closed the connection");
                         let _ = state.events.send(VoiceEvent::Closed { code, reason });
                         return Ok(());
                     }
@@ -957,7 +1010,11 @@ async fn run(
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        let _ = state.events.send(VoiceEvent::Error(format!("voice ws: {error}")));
+                        warn!(%error, server = %state.params.endpoint, "voice connection lost");
+                        let _ = state.events.send(VoiceEvent::Closed {
+                            code: None,
+                            reason: format!("voice ws: {error}"),
+                        });
                         return Ok(());
                     }
                 }
@@ -973,6 +1030,7 @@ async fn run(
         }
     }
 
+    debug!(server = %state.params.endpoint, "voice connection finished");
     let _ = state.events.send(VoiceEvent::Closed {
         code: None,
         reason: String::new(),
@@ -2424,6 +2482,23 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retargeting_moves_every_clone_to_the_new_connection() {
+        let (old_tx, mut old_rx) = mpsc::unbounded_channel();
+        let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+        let handle = VoiceHandle::new(old_tx);
+        // As the microphone and the camera hold it.
+        let microphone = handle.clone();
+        let previous = handle.retarget(&VoiceHandle::new(new_tx));
+        microphone.set_speaking(1);
+        assert!(matches!(new_rx.try_recv(), Ok(Command::SetSpeaking(1))));
+        assert!(old_rx.try_recv().is_err());
+        // The old connection can still be told to go.
+        previous.disconnect_now();
+        assert!(matches!(old_rx.try_recv(), Ok(Command::Disconnect)));
+        assert!(new_rx.try_recv().is_err());
+    }
 
     #[test]
     fn mode_names_round_trip() {
