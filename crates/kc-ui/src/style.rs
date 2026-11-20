@@ -315,6 +315,24 @@ button.kc-link-button:hover {
     background-color: alpha(@window_fg_color, 0.08);
 }
 
+/* The phone icon shakes in bursts, like a vibrating phone, then rests. */
+@keyframes kc-phone-vibrate {
+    0%   { -gtk-icon-transform: rotate(0deg); }
+    8%   { -gtk-icon-transform: rotate(-16deg); }
+    16%  { -gtk-icon-transform: rotate(16deg); }
+    24%  { -gtk-icon-transform: rotate(-13deg); }
+    32%  { -gtk-icon-transform: rotate(13deg); }
+    40%  { -gtk-icon-transform: rotate(-9deg); }
+    48%  { -gtk-icon-transform: rotate(9deg); }
+    56%  { -gtk-icon-transform: rotate(0deg); }
+    100% { -gtk-icon-transform: rotate(0deg); }
+}
+
+.kc-ringing-phone {
+    color: @success_bg_color;
+    animation: kc-phone-vibrate 1.3s ease-in-out infinite;
+}
+
 .kc-composer-bar {
     padding: 6px 12px;
     border-radius: 10px 10px 0 0;

@@ -419,10 +419,10 @@ impl AppState {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.add_css_class("kc-ringing-banner");
         row.set_halign(gtk::Align::Center);
-        let spinner = gtk::Spinner::new();
-        spinner.set_valign(gtk::Align::Center);
-        spinner.start();
-        row.append(&spinner);
+        let phone = gtk::Image::from_icon_name("call-start-symbolic");
+        phone.set_valign(gtk::Align::Center);
+        phone.add_css_class("kc-ringing-phone");
+        row.append(&phone);
         row.append(&label(&format!("Ringing {}…", names.join(", ")), &[]));
         Some(row.upcast())
     }
