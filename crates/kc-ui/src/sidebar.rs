@@ -27,6 +27,7 @@ struct ChannelRow {
     voice: Vec<VoiceUser>,
 }
 
+#[derive(Hash)]
 struct VoiceUser {
     id: Snowflake,
     name: String,
@@ -37,6 +38,22 @@ struct VoiceUser {
     server_deafened: bool,
     streaming: bool,
     video: bool,
+}
+
+/// Feeds the display-relevant fields of a channel row into `hasher`, so a
+/// redraw that would look the same is skipped. Deliberately excludes
+/// `Channel::last_message_id` and other fields that change on every message
+/// but do not change the row's appearance.
+fn hash_channel_row(row: &ChannelRow, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    row.channel.id.hash(hasher);
+    row.channel.name.hash(hasher);
+    row.channel.kind.hash(hasher);
+    row.channel.nsfw.hash(hasher);
+    row.unread.hash(hasher);
+    row.mentions.hash(hasher);
+    row.muted.hash(hasher);
+    row.voice.hash(hasher);
 }
 
 struct DmRow {
@@ -118,24 +135,19 @@ impl AppState {
     }
 
     fn fill_channels(self: &Rc<Self>, shown: Option<(bool, Option<Snowflake>, Option<Snowflake>)>) {
-        clear_box(&self.channel_box);
-        self.voice_rows.borrow_mut().clear();
+        // The clear lives inside each builder, after its fingerprint check,
+        // so a redraw that would show the same list leaves it (and its
+        // scroll position and hover) untouched.
         let Some((dm_mode, guild_id, selected)) = shown else {
+            clear_box(&self.channel_box);
+            self.voice_rows.borrow_mut().clear();
+            self.channels_fingerprint.set(None);
             return;
         };
 
         if dm_mode || guild_id.is_none() {
-            self.guild_name_label.set_label("Direct Messages");
-            // No server menu in the DM view.
-            self.guild_menu.set_popover(gtk::Popover::NONE);
-            self.guild_menu.set_sensitive(false);
-            self.guild_menu_arrow.set_visible(false);
             self.render_dm_list(selected);
         } else if let Some(guild_id) = guild_id {
-            self.guild_menu.set_sensitive(true);
-            self.guild_menu_arrow.set_visible(true);
-            let menu = self.build_server_menu(guild_id);
-            self.guild_menu.set_popover(Some(&menu));
             self.render_guild_channels(guild_id, selected);
         }
     }
@@ -191,6 +203,40 @@ impl AppState {
                 })
             })
             .unwrap_or(0);
+
+        // Skip the rebuild when the DM list would look the same (a message or
+        // presence event that changed nothing shown here). Hashes only the
+        // displayed fields, not the raw channel.
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            "dm".hash(&mut hasher);
+            selected.hash(&mut hasher);
+            pending.hash(&mut hasher);
+            for row in &rows {
+                row.channel.id.hash(&mut hasher);
+                row.channel.kind.hash(&mut hasher);
+                row.title.hash(&mut hasher);
+                row.subtitle.hash(&mut hasher);
+                row.icon.hash(&mut hasher);
+                row.status.hash(&mut hasher);
+                row.unread.hash(&mut hasher);
+                row.mentions.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        if self.channels_fingerprint.get() == Some(fingerprint) {
+            return;
+        }
+        self.channels_fingerprint.set(Some(fingerprint));
+
+        self.guild_name_label.set_label("Direct Messages");
+        // No server menu in the DM view.
+        self.guild_menu.set_popover(gtk::Popover::NONE);
+        self.guild_menu.set_sensitive(false);
+        self.guild_menu_arrow.set_visible(false);
+        clear_box(&self.channel_box);
+        self.voice_rows.borrow_mut().clear();
 
         let friends = gtk::Button::new();
         friends.set_focus_on_click(false);
@@ -349,6 +395,38 @@ impl AppState {
         }) else {
             return;
         };
+
+        // Skip the rebuild when it would draw the same list (a message or
+        // presence event elsewhere). Hashes only what is drawn, by field.
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            "guild".hash(&mut hasher);
+            guild_id.hash(&mut hasher);
+            selected.hash(&mut hasher);
+            name.hash(&mut hasher);
+            let mut folders: Vec<Snowflake> = collapsed.iter().copied().collect();
+            folders.sort_unstable();
+            folders.hash(&mut hasher);
+            for (category, rows) in &sections {
+                category.as_ref().map(|c| (c.id, &c.name)).hash(&mut hasher);
+                for row in rows {
+                    hash_channel_row(row, &mut hasher);
+                }
+            }
+            hasher.finish()
+        };
+        if self.channels_fingerprint.get() == Some(fingerprint) {
+            return;
+        }
+        self.channels_fingerprint.set(Some(fingerprint));
+
+        self.guild_menu.set_sensitive(true);
+        self.guild_menu_arrow.set_visible(true);
+        let menu = self.build_server_menu(guild_id);
+        self.guild_menu.set_popover(Some(&menu));
+        clear_box(&self.channel_box);
+        self.voice_rows.borrow_mut().clear();
 
         self.guild_name_label
             .set_label(if name.is_empty() { "Server" } else { &name });

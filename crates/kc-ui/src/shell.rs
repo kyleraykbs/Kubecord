@@ -176,6 +176,8 @@ pub(crate) struct AppState {
     /// Hash of what the rail last drew, to skip a rebuild that would redraw
     /// the same thing. Reset to `None` to force the next rebuild.
     pub rail_fingerprint: Cell<Option<u64>>,
+    /// Hash of what the channel list last drew, for the same reason.
+    pub channels_fingerprint: Cell<Option<u64>>,
     /// Inline GIF players and the widgets showing them.
     pub players: RefCell<Vec<(glib::WeakRef<gtk::Widget>, std::rc::Weak<LoopingVideo>)>>,
     pub players_update_queued: Cell<bool>,
@@ -839,6 +841,7 @@ impl AppState {
             sidebar_redraw_queued: Cell::new(false),
             sidebar_shown: Cell::new(None),
             rail_fingerprint: Cell::new(None),
+            channels_fingerprint: Cell::new(None),
             players: RefCell::new(Vec::new()),
             players_update_queued: Cell::new(false),
         })
