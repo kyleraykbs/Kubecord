@@ -352,7 +352,7 @@ impl State {
         self.guild_settings
             .get(&guild_id)
             .and_then(|settings| settings.channel_overrides.get(&channel_id))
-            .is_some_and(|mute| mute.active(now))
+            .is_some_and(|channel| channel.mute.active(now))
     }
 
     /// Whether a channel is muted, directly or through its category.

@@ -101,10 +101,10 @@ impl AppState {
                         "call-start-symbolic"
                     });
                 }
-                self.window.set_title(Some(&match guild {
+                self.set_window_title(&match guild {
                     Some(guild) => format!("{title} — {guild}"),
                     None => title,
-                }));
+                });
             }
             None => {
                 self.header_icon.set_visible(dm_mode);
@@ -115,7 +115,7 @@ impl AppState {
                 self.channel_topic_label.set_label("");
                 self.search_entry.set_visible(false);
                 self.pins_button.set_visible(false);
-                self.window.set_title(Some("kylecord"));
+                self.set_window_title("kylecord");
             }
         }
     }

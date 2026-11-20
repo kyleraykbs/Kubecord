@@ -119,6 +119,10 @@ pub(crate) struct AppState {
     pub video_info: RefCell<crate::video_info::VideoInfo>,
     /// The ringing card for an incoming call, and its channel.
     pub incoming_call: RefCell<Option<(Snowflake, adw::Dialog)>>,
+    /// Desktop notifications shown, by account and channel, so opening the
+    /// channel takes them away; and how many arrived while the window was
+    /// not looked at (for the window title).
+    pub notifications: RefCell<crate::notifications::Shown>,
     /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
     /// slider to reopen at the chosen level.
     pub user_volumes: RefCell<HashMap<Snowflake, f32>>,
@@ -839,6 +843,7 @@ impl AppState {
             voice_demo: RefCell::new(None),
             video_info: RefCell::default(),
             incoming_call: RefCell::new(None),
+            notifications: RefCell::new(Default::default()),
             user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),
             typing_label,

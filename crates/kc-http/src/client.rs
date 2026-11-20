@@ -738,11 +738,19 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
-    /// Overrides the account's per-guild settings, e.g. `{"muted": true}`.
-    pub async fn patch_guild_settings(&self, guild_id: Snowflake, payload: Value) -> Result<()> {
-        self.patch(&format!("/users/@me/guild-settings/{guild_id}"), payload)
-            .await?;
-        Ok(())
+    /// Changes the account's notification settings for a guild (`None`:
+    /// the DM settings), e.g. `{"muted": true}` or the payloads from
+    /// [`guild_mute_payload`] / [`channel_notification_payload`]. Discord
+    /// answers with the guild's whole settings object (and a
+    /// `USER_GUILD_SETTINGS_UPDATE`). Endpoint as documented by
+    /// discord-userdoccers and used by Abaddon.
+    pub async fn patch_guild_settings(
+        &self,
+        guild_id: Option<Snowflake>,
+        payload: Value,
+    ) -> Result<Value> {
+        self.patch(&user_guild_settings_path(guild_id), payload)
+            .await
     }
 
     // -- relationships ---------------------------------------------------
@@ -1622,9 +1630,62 @@ fn first_form_error(errors: &Value, path: &str) -> Option<String> {
     })
 }
 
+/// `/users/@me/guilds/{guild}/settings`, with `@me` for DMs.
+pub fn user_guild_settings_path(guild_id: Option<Snowflake>) -> String {
+    match guild_id {
+        Some(guild_id) => format!("/users/@me/guilds/{guild_id}/settings"),
+        None => "/users/@me/guilds/@me/settings".to_owned(),
+    }
+}
+
+/// Mutes or unmutes a whole guild until it is turned back on.
+pub fn guild_mute_payload(muted: bool) -> Value {
+    if muted {
+        json!({"muted": true, "mute_config": {"selected_time_window": -1, "end_time": null}})
+    } else {
+        json!({"muted": false})
+    }
+}
+
+/// One channel's override: muted (until turned back on) or not, and its
+/// notification level (0 all, 1 mentions, 2 nothing, 3 the server's).
+pub fn channel_notification_payload(channel_id: Snowflake, muted: bool, level: u8) -> Value {
+    let mut entry = json!({"muted": muted, "message_notifications": level});
+    if muted {
+        entry["mute_config"] = json!({"selected_time_window": -1, "end_time": null});
+    }
+    json!({"channel_overrides": {channel_id.to_string(): entry}})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_settings_payloads() {
+        assert_eq!(
+            user_guild_settings_path(Some(Snowflake(5))),
+            "/users/@me/guilds/5/settings"
+        );
+        assert_eq!(
+            user_guild_settings_path(None),
+            "/users/@me/guilds/@me/settings"
+        );
+        assert_eq!(
+            guild_mute_payload(true),
+            json!({"muted": true, "mute_config": {"selected_time_window": -1, "end_time": null}})
+        );
+        assert_eq!(guild_mute_payload(false), json!({"muted": false}));
+        assert_eq!(
+            channel_notification_payload(Snowflake(9), false, 1),
+            json!({"channel_overrides": {"9": {"muted": false, "message_notifications": 1}}})
+        );
+        assert_eq!(
+            channel_notification_payload(Snowflake(9), true, 3),
+            json!({"channel_overrides": {"9": {"muted": true, "message_notifications": 3,
+                "mute_config": {"selected_time_window": -1, "end_time": null}}}})
+        );
+    }
 
     #[test]
     fn a_captcha_challenge_is_its_own_error() {

@@ -17,6 +17,7 @@ mod markdown;
 mod members;
 mod menu;
 mod moderation;
+mod notifications;
 mod ping;
 mod player;
 mod profile;

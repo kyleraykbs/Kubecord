@@ -97,6 +97,7 @@ pub fn run() -> glib::ExitCode {
             ui_tx_for_ui.clone(),
         );
         state.connect_signals();
+        state.install_notification_actions(app);
 
         let receiver = ui_rx_slot
             .borrow_mut()
@@ -1515,6 +1516,7 @@ impl AppState {
                 ringing,
             } => {
                 if ringing {
+                    self.call_notification(account, channel_id);
                     if self.model.borrow().active == Some(account) {
                         self.show_incoming_call(channel_id);
                     } else {
@@ -1683,6 +1685,14 @@ impl AppState {
     }
 
     pub(crate) fn handle_store_event(self: &Rc<Self>, account: AccountId, event: StoreEvent) {
+        // Any signed-in account can notify, not only the one shown.
+        if let StoreEvent::MessageAdded {
+            channel_id,
+            message_id,
+        } = &event
+        {
+            self.message_notification(account, *channel_id, *message_id);
+        }
         if self.model.borrow().active != Some(account) {
             return;
         }

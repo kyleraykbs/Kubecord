@@ -1251,6 +1251,7 @@ impl AppState {
     pub(crate) fn dismiss_incoming_call(&self, channel_id: Snowflake) {
         use libadwaita::prelude::*;
 
+        self.withdraw_call_notification(channel_id);
         let dialog = {
             let mut current = self.incoming_call.borrow_mut();
             if current

@@ -28,10 +28,15 @@ const METER_BLOCKS: f64 = 40.0;
 
 /// The pages, in order: name, title, icon. Each one is a tab in the list
 /// on the left.
-const PAGES: [(&str, &str, &str); 5] = [
+const PAGES: [(&str, &str, &str); 6] = [
     ("account", "My Account", "avatar-default-symbolic"),
     ("voice", "Voice", "audio-input-microphone-symbolic"),
     ("video", "Video", "camera-web-symbolic"),
+    (
+        "notifications",
+        "Notifications",
+        "preferences-system-notifications-symbolic",
+    ),
     ("chat", "Chat", "chat-message-new-symbolic"),
     ("advanced", "Advanced", "utilities-terminal-symbolic"),
 ];
@@ -137,6 +142,7 @@ impl AppState {
                 "voice" => self.voice_page(&panel),
                 "video" => self.video_page(&panel, &camera_frame, &screen_frame, &camera_dropdown),
                 "chat" => self.chat_page(),
+                "notifications" => self.notifications_page(),
                 _ => self.advanced_page(),
             };
             pages.add_named(&page_scroll(&content), Some(name));
@@ -235,6 +241,113 @@ impl AppState {
     }
 
     // -- my account ----------------------------------------------------------
+
+    // -- notifications -------------------------------------------------------
+
+    /// A switch row bound to one boolean preference.
+    fn pref_switch(
+        self: &Rc<Self>,
+        title: &str,
+        subtitle: &str,
+        get: fn(&CapturePreferences) -> bool,
+        set: fn(&mut CapturePreferences, bool),
+    ) -> adw::SwitchRow {
+        let row = adw::SwitchRow::new();
+        row.set_title(title);
+        row.set_subtitle(subtitle);
+        row.set_subtitle_lines(0);
+        row.set_active(get(&self.capture.borrow()));
+        let app = self.clone();
+        row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| set(prefs, active));
+        });
+        row
+    }
+
+    /// Desktop notifications: whether, what, and how they look.
+    fn notifications_page(self: &Rc<Self>) -> gtk::Box {
+        let page = page_box();
+        page.append(&section_title("Notifications"));
+        let intro = gtk::Label::new(Some(
+            "Each server's and channel's own notification settings apply too (right-click a channel, or the server menu). Nothing notifies while your status is Do Not Disturb, for your own messages, for people you blocked, or for the channel you are looking at.",
+        ));
+        intro.set_xalign(0.0);
+        intro.set_wrap(true);
+        intro.add_css_class("dim-label");
+        page.append(&intro);
+
+        let desktop = adw::PreferencesGroup::new();
+        desktop.set_title("Desktop Notifications");
+        desktop.add(&self.pref_switch(
+            "Enable Desktop Notifications",
+            "Show a notification for new messages that concern you. Clicking it opens the message.",
+            |prefs| prefs.notify_desktop,
+            |prefs, on| prefs.notify_desktop = on,
+        ));
+        desktop.add(&self.pref_switch(
+            "Show Message Content",
+            "Put the message text in the notification. Off, it only says who wrote and where.",
+            |prefs| prefs.notify_preview,
+            |prefs, on| prefs.notify_preview = on,
+        ));
+        let test_row = adw::ActionRow::builder()
+            .title("Test Notifications")
+            .subtitle("Sends a notification to your desktop now.")
+            .build();
+        let test = gtk::Button::with_label("Test");
+        test.set_valign(gtk::Align::Center);
+        let app = self.clone();
+        test.connect_clicked(move |_| app.test_notification());
+        test_row.add_suffix(&test);
+        desktop.add(&test_row);
+        page.append(&desktop);
+
+        let what = adw::PreferencesGroup::new();
+        what.set_title("What Notifies");
+        what.add(&self.pref_switch(
+            "All Messages in Direct Messages",
+            "Every message in a DM or group DM. Off, only messages that mention you there.",
+            |prefs| prefs.notify_all_dms,
+            |prefs, on| prefs.notify_all_dms = on,
+        ));
+        what.add(&self.pref_switch(
+            "Only Mentions in Servers",
+            "Ignore servers and channels set to All Messages: only mentions and replies that ping you.",
+            |prefs| prefs.notify_mentions_only,
+            |prefs, on| prefs.notify_mentions_only = on,
+        ));
+        what.add(&self.pref_switch(
+            "@everyone and @here",
+            "Unless the server's own settings suppress them.",
+            |prefs| prefs.notify_everyone,
+            |prefs, on| prefs.notify_everyone = on,
+        ));
+        what.add(&self.pref_switch(
+            "Role Mentions",
+            "Mentions of a role you have, unless the server's own settings suppress them.",
+            |prefs| prefs.notify_roles,
+            |prefs, on| prefs.notify_roles = on,
+        ));
+        what.add(&self.pref_switch(
+            "Incoming Calls",
+            "When someone calls you in a DM or group, while kylecord's window is not in front.",
+            |prefs| prefs.notify_calls,
+            |prefs, on| prefs.notify_calls = on,
+        ));
+        page.append(&what);
+
+        let window = adw::PreferencesGroup::new();
+        window.set_title("Window");
+        window.add(&self.pref_switch(
+            "Count New Notifications in the Window Title",
+            "Shows \"(2) kylecord\" until you come back to the window; most taskbars show the title. GTK 4 cannot flash a window or set an urgency hint, so this stands in for it.",
+            |prefs| prefs.notify_mark_window,
+            |prefs, on| prefs.notify_mark_window = on,
+        ));
+        page.append(&window);
+        page
+    }
 
     // -- chat ----------------------------------------------------------------
 

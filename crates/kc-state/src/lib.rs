@@ -8,6 +8,7 @@ pub mod guild;
 pub mod member_list;
 pub mod message;
 pub mod moderation;
+pub mod notify;
 pub mod permissions;
 mod queries;
 mod serde_util;

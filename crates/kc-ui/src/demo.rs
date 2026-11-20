@@ -22,6 +22,10 @@
 //!   page without made-up data: the load fails) and `invite`.
 //! - `viewer`: the image viewer (a default avatar, the only download),
 //!   zoomed in; saved to `<screenshot>.viewer.png`.
+//! - `notify`: messages arrive in other channels, a DM, a muted channel
+//!   and the open one; the notifications they would raise are printed
+//!   (`demo: notification …`, nothing reaches the desktop), then one is
+//!   "clicked" through the real `app.open-message` action.
 //! - `channel-menu` (saved like the user menu), `channel-create`,
 //!   `channel-edit` (a voice channel), `channel-text` (a text channel),
 //!   `channel-perms`.
@@ -56,6 +60,8 @@ const OWNER: u64 = 9;
 const ADA: u64 = 2;
 const GRACE: u64 = 3;
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+/// A DM with Ada.
+const DM: u64 = 950;
 
 /// A snowflake minted `ago` milliseconds before now, so the times read as
 /// today's.
@@ -144,8 +150,8 @@ fn ready() -> Value {
             {"user_id": "4", "roles": ["103", "104"]},
             {"user_id": OWNER.to_string(), "roles": []}
         ]],
-        "private_channels": [],
-        "relationships": [],
+        "private_channels": [{"id": DM.to_string(), "type": 1, "recipient_ids": ["2"]}],
+        "relationships": [{"id": "2", "type": 1, "user_id": "2"}],
         "read_state": {"entries": []},
         "user_guild_settings": {"entries": []},
         "user_settings": {"status": "online", "guild_folders": []}
@@ -378,6 +384,10 @@ impl AppState {
                     });
                 });
             }
+            "notify" => {
+                self.open_channel(general);
+                self.demo_notify(&store, account);
+            }
             mode if mode.starts_with("channel-") => {
                 self.open_channel(general);
                 let app = self.clone();
@@ -401,6 +411,112 @@ impl AppState {
                 self.demo_chat(&store);
             }
         }
+    }
+
+    fn demo_notify(self: &Rc<Self>, store: &kc_state::Store, account: session::AccountId) {
+        // topic-05 is muted; topic-06 is set to Nothing.
+        store.apply(
+            "USER_GUILD_SETTINGS_UPDATE",
+            &json!({"guild_id": GUILD.to_string(), "message_notifications": 0,
+            "channel_overrides": [
+                {"channel_id": "607", "muted": true, "message_notifications": 3},
+                {"channel_id": "608", "muted": false, "message_notifications": 2}
+            ]}),
+        );
+        let me = json!([{"id": ME.to_string(), "username": "demo"}]);
+        let arrivals = [
+            (
+                "plain in topic-01",
+                603,
+                2,
+                "Anyone up for a game tonight?",
+                json!({}),
+            ),
+            (
+                "in the open channel",
+                GENERAL,
+                3,
+                "Seen here already",
+                json!({}),
+            ),
+            ("muted channel", 607, 4, "Muted chatter", json!({})),
+            (
+                "muted channel, mentioned",
+                607,
+                4,
+                "<@1> this one is for you",
+                json!({"mentions": me}),
+            ),
+            (
+                "channel set to Nothing",
+                608,
+                2,
+                "<@1> even this",
+                json!({"mentions": me}),
+            ),
+            (
+                "role mention",
+                609,
+                3,
+                "<@&101> please look",
+                json!({"mention_roles": ["101"]}),
+            ),
+            ("silent", 603, 2, "@silent hello", json!({"flags": 4096})),
+            ("own message", 603, ME, "my own words", json!({})),
+            ("DM", DM, 2, "Hi! Are you around?", json!({})),
+        ];
+        let ids: Vec<u64> = (0..arrivals.len() as u64)
+            .map(|index| id_at(0, 700 + index))
+            .collect();
+        let dm_message = ids[arrivals.len() - 1];
+        for (index, (what, channel, author, content, extra)) in arrivals.into_iter().enumerate() {
+            let id = ids[index];
+            let app = self.clone();
+            let store = store.clone();
+            glib::timeout_add_local_once(
+                Duration::from_millis(1500 + index as u64 * 150),
+                move || {
+                    eprintln!("demo: arriving: {what}");
+                    let mut value = message(id, author, content);
+                    value["channel_id"] = json!(channel.to_string());
+                    if channel == DM {
+                        value["guild_id"] = serde_json::Value::Null;
+                    }
+                    if let (Some(base), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+                        for (key, item) in extra {
+                            base.insert(key.clone(), item.clone());
+                        }
+                    }
+                    store.apply("MESSAGE_CREATE", &value);
+                    let _ = &app;
+                },
+            );
+        }
+        // Click the DM's notification through the real action.
+        let app = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(3500), move || {
+            let target = crate::notifications::action_target(
+                account,
+                Snowflake::new(DM),
+                Snowflake::new(dm_message),
+            );
+            if let Some(application) = app.window.application() {
+                application.activate_action(
+                    crate::notifications::OPEN_ACTION,
+                    Some(&target.to_variant()),
+                );
+            }
+            let app = app.clone();
+            glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                let open = app
+                    .with_session(|session| session.selected_channel)
+                    .flatten();
+                eprintln!(
+                    "demo: after the click the open channel is {open:?}; window title {:?}",
+                    app.window.title()
+                );
+            });
+        });
     }
 
     fn demo_channels(self: &Rc<Self>, mode: &str) {

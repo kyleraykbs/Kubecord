@@ -675,6 +675,7 @@ impl AppState {
         let Some((active, http, store)) = self.active() else {
             return;
         };
+        self.withdraw_channel_notification(active, channel.id);
         let is_voice_only = channel.kind.is_voice() && !channel.kind.is_text();
         let (fetch, subscribe) = self
             .with_session_mut(|session| {

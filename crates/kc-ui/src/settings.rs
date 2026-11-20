@@ -154,6 +154,23 @@ pub struct CapturePreferences {
     pub auto_input_sensitivity: bool,
     /// Microphone frames quieter than this (dBFS) are not sent.
     pub input_threshold_db: f32,
+    /// Show desktop notifications.
+    pub notify_desktop: bool,
+    /// Put the message text in a notification.
+    pub notify_preview: bool,
+    /// Every DM message notifies (off: only pings in DMs).
+    pub notify_all_dms: bool,
+    /// Only mentions notify, whatever servers and channels say.
+    pub notify_mentions_only: bool,
+    /// `@everyone` and `@here` notify where the server allows them.
+    pub notify_everyone: bool,
+    /// Mentions of your roles notify where the server allows them.
+    pub notify_roles: bool,
+    /// Incoming DM and group calls notify.
+    pub notify_calls: bool,
+    /// Show the number of new notifications in the window title until the
+    /// window is looked at again.
+    pub notify_mark_window: bool,
 }
 
 pub const NOISE_SUPPRESSION: [&str; 3] = ["Off", "Standard", "Strong"];
@@ -223,6 +240,14 @@ impl Default for CapturePreferences {
             auto_gain_control: false,
             auto_input_sensitivity: true,
             input_threshold_db: kc_media::processing::DEFAULT_THRESHOLD_DB,
+            notify_desktop: true,
+            notify_preview: true,
+            notify_all_dms: true,
+            notify_mentions_only: false,
+            notify_everyone: true,
+            notify_roles: true,
+            notify_calls: true,
+            notify_mark_window: true,
         }
     }
 }
@@ -330,6 +355,16 @@ impl CapturePreferences {
                 .map(|key| AudioShare::Application { key }),
             3 => Some(AudioShare::Node),
             _ => None,
+        }
+    }
+
+    /// The notification choices for [`kc_state::notify::decide`].
+    pub fn notify_prefs(&self) -> kc_state::notify::NotifyPrefs {
+        kc_state::notify::NotifyPrefs {
+            all_dm_messages: self.notify_all_dms,
+            mentions_only: self.notify_mentions_only,
+            everyone: self.notify_everyone,
+            roles: self.notify_roles,
         }
     }
 
@@ -576,6 +611,8 @@ mod tests {
     fn old_settings_get_the_voice_defaults() {
         let mut old: CapturePreferences = serde_json::from_str(r#"{"fps": 30}"#).unwrap();
         old.normalize();
+        assert!(old.notify_desktop && old.notify_preview && old.notify_calls);
+        assert_eq!(old.notify_prefs(), kc_state::notify::NotifyPrefs::default());
         let processing = old.voice_processing();
         assert_eq!(processing, kc_media::processing::VoiceProcessing::default());
         assert!(processing.auto_sensitivity);

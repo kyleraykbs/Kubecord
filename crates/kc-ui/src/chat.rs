@@ -1445,7 +1445,7 @@ impl AppState {
     }
 
     /// Jumps to a message, loading the history around it when necessary.
-    fn jump_or_fetch(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
+    pub(crate) fn jump_or_fetch(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
         if self.jump_to_message(message_id) {
             return;
         }

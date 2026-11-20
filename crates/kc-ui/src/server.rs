@@ -185,21 +185,13 @@ impl AppState {
 
     /// Mutes or unmutes a whole server.
     fn set_guild_muted(self: &Rc<Self>, guild_id: Snowflake, muted: bool) {
-        let Some((_, http, _)) = self.active() else {
-            return;
-        };
-        self.spawn(
-            async move {
-                http.patch_guild_settings(guild_id, serde_json::json!({ "muted": muted }))
-                    .await
-            },
-            move |app, result| match result {
-                Ok(()) => app.set_status(if muted {
-                    "Server muted"
-                } else {
-                    "Server unmuted"
-                }),
-                Err(error) => app.set_status(&format!("Could not change notifications: {error}")),
+        self.change_notification_settings(
+            Some(guild_id),
+            kc_http::client::guild_mute_payload(muted),
+            if muted {
+                "Server muted"
+            } else {
+                "Server unmuted"
             },
         );
     }

@@ -82,15 +82,53 @@ fn comparable(timestamp: &str) -> &str {
     timestamp.get(..19).unwrap_or(timestamp)
 }
 
+/// Message notification levels, as Discord numbers them.
+pub mod level {
+    pub const ALL_MESSAGES: u8 = 0;
+    pub const ONLY_MENTIONS: u8 = 1;
+    pub const NO_MESSAGES: u8 = 2;
+    /// A channel follows its category, then the server.
+    pub const INHERIT: u8 = 3;
+}
+
+/// A channel's own notification settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelOverride {
+    pub mute: Mute,
+    /// One of [`level`]; [`level::INHERIT`] when the channel has none.
+    pub message_notifications: u8,
+}
+
+impl Default for ChannelOverride {
+    fn default() -> Self {
+        Self {
+            mute: Mute::default(),
+            message_notifications: level::INHERIT,
+        }
+    }
+}
+
+impl ChannelOverride {
+    fn parse(value: &Value) -> Self {
+        Self {
+            mute: Mute::parse(value),
+            message_notifications: value["message_notifications"]
+                .as_u64()
+                .map_or(level::INHERIT, |level| level as u8),
+        }
+    }
+}
+
 /// Notification settings for one guild (or for DMs when the key is `None`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GuildSettings {
     pub mute: Mute,
     pub suppress_everyone: bool,
     pub suppress_roles: bool,
-    /// 0 all messages, 1 only mentions, 2 nothing.
+    /// One of [`level`]: 0 all messages, 1 only mentions, 2 nothing (3,
+    /// or a guild without settings: the server's default).
     pub message_notifications: u8,
-    pub channel_overrides: HashMap<Snowflake, Mute>,
+    pub channel_overrides: HashMap<Snowflake, ChannelOverride>,
 }
 
 impl GuildSettings {
@@ -105,14 +143,14 @@ impl GuildSettings {
             Value::Array(overrides) => {
                 for entry in overrides {
                     if let Some(id) = entry["channel_id"].as_str().and_then(|id| id.parse().ok()) {
-                        channel_overrides.insert(id, Mute::parse(entry));
+                        channel_overrides.insert(id, ChannelOverride::parse(entry));
                     }
                 }
             }
             Value::Object(overrides) => {
                 for (id, entry) in overrides {
                     if let Ok(id) = id.parse() {
-                        channel_overrides.insert(id, Mute::parse(entry));
+                        channel_overrides.insert(id, ChannelOverride::parse(entry));
                     }
                 }
             }
@@ -124,7 +162,9 @@ impl GuildSettings {
                 mute: Mute::parse(value),
                 suppress_everyone: value["suppress_everyone"].as_bool().unwrap_or(false),
                 suppress_roles: value["suppress_roles"].as_bool().unwrap_or(false),
-                message_notifications: value["message_notifications"].as_u64().unwrap_or(0) as u8,
+                message_notifications: value["message_notifications"]
+                    .as_u64()
+                    .map_or(level::INHERIT, |level| level as u8),
                 channel_overrides,
             },
         )
@@ -165,6 +205,42 @@ mod tests {
         }));
         assert!(settings.mute.active("2025-12-31T23:00:00.000Z"));
         assert!(!settings.mute.active("2026-06-01T00:00:00.000Z"));
-        assert!(settings.channel_overrides[&Snowflake(5)].active("2030-01-01T00:00:00Z"));
+        assert!(
+            settings.channel_overrides[&Snowflake(5)]
+                .mute
+                .active("2030-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn notification_levels_are_read_for_guilds_and_channels() {
+        let (guild, settings) = GuildSettings::parse(&json!({
+            "guild_id": "1",
+            "message_notifications": 1,
+            "suppress_everyone": true,
+            "channel_overrides": [
+                {"channel_id": "5", "message_notifications": 0, "muted": false},
+                {"channel_id": "6", "message_notifications": 3, "muted": true},
+                {"channel_id": "7", "muted": false}
+            ]
+        }));
+        assert_eq!(guild, Some(Snowflake(1)));
+        assert_eq!(settings.message_notifications, level::ONLY_MENTIONS);
+        assert!(settings.suppress_everyone && !settings.suppress_roles);
+        let of = |id| settings.channel_overrides[&Snowflake(id)].message_notifications;
+        assert_eq!(of(5), level::ALL_MESSAGES);
+        assert_eq!(of(6), level::INHERIT);
+        assert_eq!(of(7), level::INHERIT);
+
+        // The update and PATCH response form: overrides keyed by channel.
+        let (dms, settings) = GuildSettings::parse(&json!({
+            "guild_id": null,
+            "channel_overrides": {"9": {"muted": true, "message_notifications": 2}}
+        }));
+        assert_eq!(dms, None);
+        assert_eq!(settings.message_notifications, level::INHERIT);
+        let dm = &settings.channel_overrides[&Snowflake(9)];
+        assert!(dm.mute.muted);
+        assert_eq!(dm.message_notifications, level::NO_MESSAGES);
     }
 }

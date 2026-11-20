@@ -218,6 +218,7 @@ impl AppState {
                 Box::new(move |app| app.delete_channel_confirm(id)),
             );
         }
+        self.add_notification_items(menu, popover, channel, guild);
         let line = gtk::Separator::new(gtk::Orientation::Horizontal);
         line.add_css_class("kc-menu-sep");
         menu.append(&line);
@@ -229,6 +230,89 @@ impl AppState {
                 app.set_status("Channel ID copied");
             }),
         );
+    }
+
+    /// Mute and the notification level for a channel or category: the
+    /// account's Discord settings, the same ones the official apps change.
+    fn add_notification_items(
+        self: &Rc<Self>,
+        menu: &gtk::Box,
+        popover: &gtk::Popover,
+        channel: &Channel,
+        guild: Snowflake,
+    ) {
+        use kc_state::settings::level;
+
+        let id = channel.id;
+        let (muted, current) = self
+            .with_session(|session| {
+                session.store.read(|state| {
+                    state
+                        .guild_settings
+                        .get(&Some(guild))
+                        .and_then(|settings| settings.channel_overrides.get(&id))
+                        .map_or((false, level::INHERIT), |own| {
+                            (own.mute.muted, own.message_notifications)
+                        })
+                })
+            })
+            .unwrap_or((false, level::INHERIT));
+        let line = gtk::Separator::new(gtk::Orientation::Horizontal);
+        line.add_css_class("kc-menu-sep");
+        menu.append(&line);
+        // `check`: `None` for a plain item, else whether it is the choice.
+        let add =
+            |text: String, check: Option<bool>, muted: bool, chosen: u8, done: &'static str| {
+                let item = menu_item(&text, false);
+                if let Some(checked) = check
+                    && let Some(label) = item.child()
+                {
+                    // A check column, so the choices line up.
+                    item.set_child(None::<&gtk::Widget>);
+                    let mark = gtk::Image::from_icon_name("object-select-symbolic");
+                    mark.set_pixel_size(12);
+                    mark.set_opacity(if checked { 1.0 } else { 0.0 });
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    row.append(&mark);
+                    row.append(&label);
+                    item.set_child(Some(&row));
+                }
+                let popover = popover.clone();
+                let app = self.clone();
+                item.connect_clicked(move |_| {
+                    popover.popdown();
+                    app.change_notification_settings(
+                        Some(guild),
+                        kc_http::client::channel_notification_payload(id, muted, chosen),
+                        done,
+                    );
+                });
+                menu.append(&item);
+            };
+        let what = if channel.kind.is_category() {
+            "Category"
+        } else {
+            "Channel"
+        };
+        if muted {
+            add(format!("Unmute {what}"), None, false, current, "Unmuted");
+        } else {
+            add(format!("Mute {what}"), None, true, current, "Muted");
+        }
+        for (value, text) in [
+            (level::INHERIT, "Use Server Default"),
+            (level::ALL_MESSAGES, "All Messages"),
+            (level::ONLY_MENTIONS, "Only @mentions"),
+            (level::NO_MESSAGES, "Nothing"),
+        ] {
+            add(
+                text.to_owned(),
+                Some(value == current),
+                muted,
+                value,
+                "Notification settings changed",
+            );
+        }
     }
 
     /// Creates a text or voice channel (in `parent`, a category), or a
