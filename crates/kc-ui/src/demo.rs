@@ -17,6 +17,9 @@
 //!   list.
 //! - `mod-kick`, `mod-ban`, `mod-timeout`, `mod-roles`: the dialogs.
 //! - `mod-error`: a kick that fails, to see the failure shown.
+//! - `settings-<page>` (`overview`, `roles`, `members`, `invites`, `bans`,
+//!   `audit`), `settings-role` (the role editor), `settings-error` (bans
+//!   page without made-up data: the load fails) and `invite`.
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -25,6 +28,7 @@
 //! Scroll positions are printed to stderr (`demo:` lines) so a run can be
 //! checked without looking at the screenshot.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -140,6 +144,72 @@ fn ready() -> Value {
     })
 }
 
+thread_local! {
+    /// Made-up REST answers (bans, invites, audit log) for the demo.
+    static FAKE_REST: Cell<bool> = const { Cell::new(false) };
+}
+
+fn fake<T>(make: impl FnOnce() -> Value) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    FAKE_REST
+        .get()
+        .then(make)
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub(crate) fn fake_bans() -> Option<Vec<kc_http::Ban>> {
+    fake(|| {
+        json!([
+            {"user": {"id": "70", "username": "spammer", "global_name": "Free Nitro"}, "reason": "Phishing links"},
+            {"user": {"id": "71", "username": "troll"}, "reason": null},
+            {"user": {"id": "72", "username": "raider42", "global_name": "Raider"}, "reason": "Raid on 2026-11-01"}
+        ])
+    })
+}
+
+pub(crate) fn fake_invites() -> Option<Vec<kc_http::Invite>> {
+    let soon = format!("{}+00:00", millis_to_iso(unix_millis_now() + 5 * 3_600_000));
+    fake(move || {
+        json!([
+            {"code": "demoAbc", "uses": 3, "max_uses": 0, "max_age": 0, "expires_at": null,
+             "inviter": {"id": "1", "username": "demo", "global_name": "Demo User"},
+             "channel": {"id": "601", "name": "general"}},
+            {"code": "x7Yz9Q", "uses": 1, "max_uses": 10, "max_age": 86400, "expires_at": soon,
+             "inviter": {"id": "3", "username": "grace", "global_name": "Grace"},
+             "channel": {"id": "601", "name": "general"}}
+        ])
+    })
+}
+
+pub(crate) fn fake_audit_log() -> Option<Value> {
+    fake(|| {
+        let at =
+            |ago_minutes: u64, sequence: u64| id_at(ago_minutes * 60_000, sequence).to_string();
+        json!({
+            "users": [
+                {"id": "1", "username": "demo", "global_name": "Demo User"},
+                {"id": "2", "username": "ada", "global_name": "Ada"},
+                {"id": "3", "username": "grace", "global_name": "Grace"},
+                {"id": "70", "username": "spammer", "global_name": "Free Nitro"}
+            ],
+            "audit_log_entries": [
+                {"id": at(3, 1), "user_id": "1", "action_type": 24, "target_id": "2",
+                 "changes": [{"key": "communication_disabled_until", "new_value": "2030-01-01T00:00:00+00:00"}],
+                 "reason": "Calm down for a bit"},
+                {"id": at(20, 2), "user_id": "3", "action_type": 22, "target_id": "70", "reason": "Phishing links"},
+                {"id": at(45, 3), "user_id": "3", "action_type": 25, "target_id": "2",
+                 "changes": [{"key": "$add", "new_value": [{"id": "104", "name": "Member"}]}]},
+                {"id": at(90, 4), "user_id": "1", "action_type": 10, "target_id": "601",
+                 "changes": [{"key": "name", "new_value": "general"}]},
+                {"id": at(200, 5), "user_id": "3", "action_type": 72, "target_id": "70",
+                 "options": {"channel_id": "601", "count": "1"}}
+            ]
+        })
+    })
+}
+
 fn message(id: u64, author: u64, content: &str) -> Value {
     let names = ["", "demo", "ada", "grace", "linus"];
     json!({
@@ -252,6 +322,29 @@ impl AppState {
                     self.open_channel(lounge);
                 }
                 self.render_voice_panel();
+            }
+            mode if mode.starts_with("settings-") || mode == "invite" => {
+                FAKE_REST.set(mode != "settings-error");
+                self.open_channel(general);
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let guild = Snowflake::new(GUILD);
+                    match mode.as_str() {
+                        "invite" => app.invite_dialog(guild),
+                        "settings-role" => {
+                            if let Some(panel) = app.show_server_settings(guild, Some("roles")) {
+                                app.role_editor(&panel, Snowflake::new(103));
+                            }
+                        }
+                        "settings-error" => {
+                            app.show_server_settings(guild, Some("bans"));
+                        }
+                        other => {
+                            app.show_server_settings(guild, other.strip_prefix("settings-"));
+                        }
+                    }
+                });
             }
             mode if mode.starts_with("mod-") => {
                 if let Some(lounge) = channel(LOUNGE) {

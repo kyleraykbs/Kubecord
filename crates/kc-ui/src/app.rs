@@ -614,10 +614,19 @@ impl AppState {
         outside.set_button(gtk::gdk::BUTTON_PRIMARY);
         outside.set_propagation_phase(gtk::PropagationPhase::Capture);
         let window = self.window.clone();
-        outside.connect_pressed(move |_, _, x, y| {
+        outside.connect_pressed(move |gesture, _, x, y| {
             let Some(dialog) = window.visible_dialog() else {
                 return;
             };
+            // A click in a popover (a menu opened from the dialog) reaches
+            // the window too, on the popover's own surface.
+            let on_window = gesture
+                .current_event()
+                .and_then(|event| event.surface())
+                .is_none_or(|surface| Some(surface) == window.surface());
+            if !on_window {
+                return;
+            }
             let Some(card) = dialog.child() else {
                 return;
             };

@@ -20,6 +20,7 @@ struct ServerInfo {
     name: String,
     owner: bool,
     manage_channels: bool,
+    /// Any Server Settings page is open to the account.
     can_edit: bool,
     muted: bool,
     /// A channel to make invites against (the open one, or the first).
@@ -34,34 +35,30 @@ impl AppState {
                 let guild = state.guilds.get(&guild_id)?;
                 let me = state.my_id()?;
                 let owner = guild.owner_id == Some(me);
-                let roles = state
-                    .member(guild_id, me)
-                    .map(|member| member.roles.clone())
-                    .unwrap_or_default();
-                let perms = permissions::base(guild, me, &roles);
-                let admin = owner || perms & permissions::ADMINISTRATOR != 0;
-                // A text channel to point invites at: the open one, else any.
-                let invite_channel = selected
-                    .filter(|id| {
-                        state
-                            .channels
-                            .get(id)
-                            .is_some_and(|c| c.guild_id == Some(guild_id) && c.kind.is_text())
-                    })
-                    .or_else(|| {
-                        let mut texts: Vec<&kc_state::Channel> = state
-                            .channels
-                            .values()
-                            .filter(|c| c.guild_id == Some(guild_id) && c.kind.is_text())
-                            .collect();
-                        texts.sort_by_key(|c| c.position.unwrap_or(0));
-                        texts.first().map(|c| c.id)
-                    });
+                let perms = state.guild_permissions(guild_id);
+                // A channel invites can be made for: the open one, else any.
+                let invitable = |id: &Snowflake| {
+                    state
+                        .channels
+                        .get(id)
+                        .is_some_and(|c| c.guild_id == Some(guild_id) && !c.kind.is_category())
+                        && state.can(*id, permissions::CREATE_INSTANT_INVITE)
+                        && state.can(*id, permissions::VIEW_CHANNEL)
+                };
+                let invite_channel = selected.filter(invitable).or_else(|| {
+                    let mut channels: Vec<&kc_state::Channel> = state
+                        .channels
+                        .values()
+                        .filter(|c| invitable(&c.id))
+                        .collect();
+                    channels.sort_by_key(|c| c.sort_key());
+                    channels.first().map(|c| c.id)
+                });
                 Some(ServerInfo {
                     name: guild.name.clone(),
                     owner,
-                    manage_channels: admin || perms & permissions::MANAGE_CHANNELS != 0,
-                    can_edit: admin,
+                    manage_channels: perms & permissions::MANAGE_CHANNELS != 0,
+                    can_edit: perms & crate::server_settings::settings_permissions() != 0,
                     muted: state.guild_muted(guild_id),
                     invite_channel,
                 })
@@ -115,11 +112,11 @@ impl AppState {
             }
         };
 
-        if let Some(channel) = info.invite_channel {
+        if info.invite_channel.is_some() {
             add(
                 "Invite People",
                 false,
-                Box::new(move |app| app.create_invite(channel)),
+                Box::new(move |app| app.invite_dialog(guild_id)),
                 self,
             );
         }
@@ -144,7 +141,9 @@ impl AppState {
             add(
                 "Server Settings",
                 false,
-                Box::new(move |app| app.server_settings_dialog(guild_id)),
+                Box::new(move |app| {
+                    app.show_server_settings(guild_id, None);
+                }),
                 self,
             );
         }
@@ -182,25 +181,6 @@ impl AppState {
 
         popover.set_child(Some(&menu));
         popover
-    }
-
-    /// Creates an invite for a channel and copies its link to the clipboard.
-    pub(crate) fn create_invite(self: &Rc<Self>, channel: Snowflake) {
-        let Some((_, http, _)) = self.active() else {
-            return;
-        };
-        self.spawn(
-            async move { http.create_invite(channel).await },
-            |app, result| match result {
-                Ok(code) if !code.is_empty() => {
-                    let link = format!("https://discord.gg/{code}");
-                    app.window.clipboard().set_text(&link);
-                    app.set_status(&format!("Invite copied: {link}"));
-                }
-                Ok(_) => app.set_status("Could not create an invite"),
-                Err(error) => app.set_status(&format!("Could not create an invite: {error}")),
-            },
-        );
     }
 
     /// Prompts for a name and creates a channel (or a category).
@@ -248,63 +228,7 @@ impl AppState {
                 async move { http.create_channel(guild_id, &name, kind, None).await },
                 |app, result| match result {
                     Ok(_) => app.set_status("Channel created"),
-                    Err(error) => app.set_status(&format!("Could not create channel: {error}")),
-                },
-            );
-        });
-        dialog.present(Some(&self.window));
-    }
-
-    /// A small Server Settings dialog: rename the guild.
-    fn server_settings_dialog(self: &Rc<Self>, guild_id: Snowflake) {
-        let current = self
-            .with_session(|session| {
-                session
-                    .store
-                    .read(|state| state.guilds.get(&guild_id).map(|guild| guild.name.clone()))
-            })
-            .flatten()
-            .unwrap_or_default();
-
-        let dialog = adw::AlertDialog::new(Some("Server Settings"), None);
-        dialog.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
-        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("save"));
-        dialog.set_close_response("cancel");
-
-        let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        fields.set_margin_top(8);
-        fields.append(&label("Server Name", &["caption", "dim-label"]));
-        let entry = gtk::Entry::new();
-        entry.set_text(&current);
-        fields.append(&entry);
-        dialog.set_extra_child(Some(&fields));
-
-        let app = self.clone();
-        let entry_weak = entry.downgrade();
-        dialog.connect_response(None, move |dialog, response| {
-            if response != "save" {
-                return;
-            }
-            let Some(entry) = entry_weak.upgrade() else {
-                return;
-            };
-            let name = entry.text().trim().to_string();
-            dialog.close();
-            if name.is_empty() || name == current {
-                return;
-            }
-            let Some((_, http, _)) = app.active() else {
-                return;
-            };
-            app.spawn(
-                async move {
-                    http.edit_guild(guild_id, serde_json::json!({ "name": name }))
-                        .await
-                },
-                |app, result| match result {
-                    Ok(_) => app.set_status("Server updated"),
-                    Err(error) => app.set_status(&format!("Could not update server: {error}")),
+                    Err(error) => app.report_failure("Could not create the channel", &error),
                 },
             );
         });
