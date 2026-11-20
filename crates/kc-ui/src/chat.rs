@@ -113,15 +113,16 @@ impl AppState {
             let at_bottom = distance < 48.0;
             let was = app.chat.borrow().at_bottom;
             app.chat.borrow_mut().at_bottom = at_bottom;
-            if at_bottom != was {
-                if at_bottom {
-                    let channel = app.chat.borrow().channel;
-                    if let Some(channel) = channel {
-                        app.ack_channel(channel);
-                    }
+            if at_bottom && !was {
+                let channel = app.chat.borrow().channel;
+                if let Some(channel) = channel {
+                    app.ack_channel(channel);
                 }
-                app.update_present();
             }
+            // Refresh the jump-to-latest button every scroll, so it hides the
+            // moment the bottom is reached (not only when `at_bottom` toggles,
+            // which `scroll_to_bottom` pre-sets).
+            app.update_present();
             if adjustment.value() < 400.0 {
                 app.queue_load_older();
             }
@@ -200,6 +201,9 @@ impl AppState {
         adjustment.set_value(adjustment.upper() - adjustment.page_size());
         // Layout has not run for rows added this cycle; go again after it.
         self.queue_scroll_settle();
+        // Hide the jump button now (setting the same value fires no scroll
+        // event, so it would otherwise linger).
+        self.update_present();
     }
 
     /// Shows the selected channel, or the right placeholder. Rebuilds the

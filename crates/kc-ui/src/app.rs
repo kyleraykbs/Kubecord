@@ -159,7 +159,15 @@ pub fn run() -> glib::ExitCode {
             glib::ControlFlow::Continue
         });
 
-        state.start_existing();
+        // An offline demo (`KYLECORD_DEMO`/`KYLECORD_VIDEO_DEMO`) brings its
+        // own fake session; don't also start real accounts from disk, or a
+        // leftover sandbox token would reach Discord and raise a real
+        // "signed you out" dialog over the demo.
+        let demo = std::env::var_os("KYLECORD_DEMO").is_some()
+            || std::env::var_os("KYLECORD_VIDEO_DEMO").is_some();
+        if !demo {
+            state.start_existing();
+        }
         state.window.present();
 
         let identifier_state = state.clone();
@@ -1537,6 +1545,9 @@ impl AppState {
                 }
                 if self.model.borrow().active == Some(account) {
                     self.render_all();
+                    // Warm the favourite-GIF cache so the star on chat GIFs
+                    // shows the right state; the picker refreshes it on open.
+                    self.prefetch_gif_favorites();
                 }
                 if let Some(error) = save_error {
                     self.set_status(&error);

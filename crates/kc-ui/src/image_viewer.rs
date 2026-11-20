@@ -143,6 +143,8 @@ impl Viewer {
     fn fit(&self) {
         self.fitted.set(true);
         self.pending.set(None);
+        self.picture.set_halign(gtk::Align::Fill);
+        self.picture.set_valign(gtk::Align::Fill);
         self.picture.set_size_request(-1, -1);
         self.picture.set_content_fit(gtk::ContentFit::ScaleDown);
         self.scroll
@@ -166,6 +168,12 @@ impl Viewer {
         self.fitted.set(false);
         self.scale.set(next.scale);
         self.picture.set_content_fit(gtk::ContentFit::Fill);
+        // Center so the scrolled window gives the picture exactly its
+        // requested size; left at Fill it would stretch the picture to the
+        // viewport in whichever dimension the zoomed image is smaller than it,
+        // distorting the aspect ratio (a vertical stretch for a wide image).
+        self.picture.set_halign(gtk::Align::Center);
+        self.picture.set_valign(gtk::Align::Center);
         self.picture.set_size_request(
             (image.0 * next.scale).round() as i32,
             (image.1 * next.scale).round() as i32,

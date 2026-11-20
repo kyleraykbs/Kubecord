@@ -795,3 +795,9 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 - Favorited tab: favourites are fetched once per opening and cached (`GIF_FAVORITES`, cleared on each `connect_show`); typing filters the cache by the Tenor URL slug (favourites carry no title). Placeholder "Search your favorites".
 - Search tab: empty shows Trending; a query runs `gif_search` over all of Tenor. Placeholder "Search Tenor".
 - One shared flow (`gif_flow`/`fill_gif_flow`, `show_gifs`) replaces the multi-section layout; switching tab re-runs the current search against that tab's source. Verified with `KYLECORD_DEMO=gif-picker` (tabs + favourite tiles render).
+
+## Jump button, viewer zoom, demo sign-out dialog (2026-11-20)
+
+- Jump-to-latest button lingered: visibility only refreshed when `at_bottom` toggled, but `scroll_to_bottom` pre-sets `at_bottom`, so reaching the bottom (and clicking the button) often didn't hide it. Now `update_present` runs on every scroll event (short-circuited: the store `detached` read only happens when already at the bottom) and `scroll_to_bottom` calls it directly.
+- Image viewer zoom stretched vertically at some zooms: with `ContentFit::Fill` + a size request, the ScrolledWindow stretched the picture to the viewport in the non-scrolling dimension (a wide image zoomed shorter than the viewport → vertical stretch). Fixed by centering the picture when zoomed (`halign`/`valign` Center) so it gets exactly its requested size; reset to Fill when fitted.
+- Offline demos showed a real "Discord Signed You Out" dialog (for the demo account): `start_existing` started real accounts from a leftover sandbox `accounts.json`, whose token Discord rejects (4004). Activate now skips `start_existing` when `KYLECORD_DEMO`/`KYLECORD_VIDEO_DEMO` is set (the demo brings its own session); `KYLECORD_POPUP` still uses a real account.
