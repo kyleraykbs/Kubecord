@@ -398,13 +398,28 @@ impl AppState {
     ) {
         clear_box(&self.voice_view);
         self.voice_tiles.borrow_mut().clear();
+        // The channel to offer joining, when we are not in it.
+        let join_target = channel_id
+            .filter(|_| !joined)
+            .and_then(|channel_id| {
+                self.with_session(|session| {
+                    session
+                        .store
+                        .read(|state| state.channels.get(&channel_id).cloned())
+                })
+            })
+            .flatten();
         if people.is_empty() {
             self.voice_view.set_valign(gtk::Align::Center);
-            self.voice_view.append(&empty_state(
+            let page = empty_state(
                 "audio-volume-high-symbolic",
                 "No One Is Here",
-                "Double-click the channel in the sidebar to join.",
-            ));
+                "Nobody is in this voice channel yet.",
+            );
+            if let Some(channel) = join_target {
+                page.set_child(Some(&self.join_button(channel)));
+            }
+            self.voice_view.append(&page);
             return;
         }
         self.voice_view.set_valign(gtk::Align::Fill);
@@ -474,39 +489,30 @@ impl AppState {
             }
         }
 
-        if !joined && let Some(channel_id) = channel_id {
-            // A DM call you are not in: join it from here. A voice channel
-            // is joined from the sidebar.
-            let channel = self
-                .with_session(|session| {
-                    session
-                        .store
-                        .read(|state| state.channels.get(&channel_id).cloned())
-                })
-                .flatten()
-                .filter(|channel| channel.guild_id.is_none());
-            match channel {
-                Some(channel) => {
-                    let join = gtk::Button::with_label("Join Call");
-                    join.add_css_class("suggested-action");
-                    join.add_css_class("pill");
-                    join.set_halign(gtk::Align::Center);
-                    let app = self.clone();
-                    join.connect_clicked(move |_| app.join_call(&channel));
-                    self.voice_view.append(&join);
-                }
-                None => {
-                    let hint =
-                        gtk::Label::new(Some("Double-click the channel in the sidebar to join."));
-                    hint.add_css_class("dim-label");
-                    hint.set_wrap(true);
-                    hint.set_justify(gtk::Justification::Center);
-                    hint.set_max_width_chars(60);
-                    hint.set_halign(gtk::Align::Center);
-                    self.voice_view.append(&hint);
-                }
-            }
+        if let Some(channel) = join_target {
+            self.voice_view.append(&self.join_button(channel));
         }
+    }
+
+    /// The button that joins a call we are not in: a guild voice channel
+    /// or a DM call.
+    fn join_button(self: &Rc<Self>, channel: Channel) -> gtk::Button {
+        let guild = channel.guild_id.is_some();
+        let join = gtk::Button::with_label(if guild { "Join Voice" } else { "Join Call" });
+        join.add_css_class("suggested-action");
+        join.add_css_class("pill");
+        join.set_halign(gtk::Align::Center);
+        let app = self.clone();
+        join.connect_clicked(move |button| {
+            // Once is enough; the page is redrawn when the call starts.
+            button.set_sensitive(false);
+            if guild {
+                app.join_voice_channel(&channel);
+            } else {
+                app.join_call(&channel);
+            }
+        });
+        join
     }
 
     /// What a tile has to show for a person (or, with `is_stream`, for
