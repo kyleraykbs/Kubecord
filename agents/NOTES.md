@@ -622,3 +622,12 @@ dispatch; contains account data).
 - `kc-ui/src/login.rs`: the page (`LoginPage`, replacing the old token widgets on `AppState`) with an `adw::ToggleGroup` (Email & Password | Token), `adw::PasswordEntryRow`, per-field error labels, spinner while busy, code step with Back and "Text Me a Code". One code field takes 6 digits (TOTP, or SMS once a text was sent) or an 8-character backup code (`code_method`). `advance(step, result) → Next::{SignedIn, Show(step, feedback)}` is the tested state machine. A token from either form goes through `Command::Login` (checks `/users/@me`, saves exactly as before). The password field is emptied as soon as it is read. The signed-out dialog opens the Token form.
 - `KYLECORD_DEMO=login-<password|token|add|busy|errors|location|code|code-sms|code-wrong|expired|submit>` shows each state offline; in demo runs `AuthClient` points at `https://127.0.0.1:9`.
 - Never tried against Discord (it may flag the account): the live request shapes, the `/experiments` fingerprint, field error codes other than INVALID_LOGIN / ACCOUNT_LOGIN_VERIFICATION_EMAIL, and the body-vs-header captcha retry are from knowledge of the web client, not observed. Tests use canned JSON and a local mock HTTP server (`AuthClient::with_base("http://127.0.0.1:…")`; only loopback may be plain HTTP).
+
+## Jumping to messages beyond the loaded history (2026-11-20)
+
+- Clicking a reply's quote now uses `jump_or_fetch` (as search, pins and notifications did): a message outside the window loads the page around it (`?around=`).
+- That page replaces the channel's window and is marked `detached` (`MessageBuffer::replace_around`) when its last message is older than the channel's `last_message_id`. A detached window takes no live MESSAGE_CREATEs, so it never has a gap; the channel's last id and unread state still update.
+- Scrolling within 400 px of the bottom of a detached window fetches `?after=` the newest row (`load_newer`); a short page means it reached the present and live messages are added again.
+- A "Jump to Present" pill shows over the list while detached. It, and sending a message from a detached view (`follow_sent_message`), drop the window at once (so messages arriving meanwhile are kept), fetch the newest page and rebuild.
+- Before, `jump_or_fetch` replaced the window with an old page and then appended live messages after it, leaving a silent gap and no way back down.
+- Unverified on screen: the demo has no REST, so the fetches were not exercised; reducers are unit-tested.

@@ -60,6 +60,11 @@ pub(crate) struct ChatView {
     older_queued: bool,
     /// [`AppState::queue_scroll_settle`] is scheduled for the next idle.
     settle_queued: bool,
+    /// A page of newer messages is being fetched for a window that stops
+    /// short of the present.
+    newer_loading: bool,
+    /// "Jump to Present", shown while the window stops short of the present.
+    present: Option<gtk::Button>,
 }
 
 /// Whether `message` continues the group started by `previous`.
@@ -105,7 +110,26 @@ impl AppState {
             if adjustment.value() < 400.0 {
                 app.queue_load_older();
             }
+            if distance < 400.0 {
+                app.load_newer();
+            }
         });
+
+        let present = gtk::Button::new();
+        let content = adw::ButtonContent::new();
+        content.set_icon_name("go-bottom-symbolic");
+        content.set_label("Jump to Present");
+        present.set_child(Some(&content));
+        present.add_css_class("pill");
+        present.add_css_class("suggested-action");
+        present.set_halign(gtk::Align::Center);
+        present.set_valign(gtk::Align::End);
+        present.set_margin_bottom(12);
+        present.set_visible(false);
+        let app = self.clone();
+        present.connect_clicked(move |_| app.jump_to_present());
+        self.message_overlay.add_overlay(&present);
+        self.chat.borrow_mut().present = Some(present);
 
         self.connect_toolbar();
 
@@ -270,6 +294,116 @@ impl AppState {
         }
         self.chat.borrow_mut().rows = entries;
         self.scroll_to_bottom();
+        self.update_present();
+    }
+
+    /// Whether the open channel's window stops short of the present.
+    fn detached(&self, channel_id: Snowflake) -> bool {
+        self.active().is_some_and(|(_, _, store)| {
+            store.read(|state| {
+                state
+                    .messages
+                    .get(&channel_id)
+                    .is_some_and(|buffer| buffer.is_detached())
+            })
+        })
+    }
+
+    fn update_present(&self) {
+        let channel = self.chat.borrow().channel;
+        let show = channel.is_some_and(|channel| self.detached(channel));
+        if let Some(button) = &self.chat.borrow().present {
+            button.set_visible(show);
+        }
+    }
+
+    /// Fetches the page after the newest message shown, for a window loaded
+    /// around an older message.
+    fn load_newer(self: &Rc<Self>) {
+        let Some(channel_id) = self.chat.borrow().channel else {
+            return;
+        };
+        if self.chat.borrow().newer_loading || !self.detached(channel_id) {
+            return;
+        }
+        let Some(newest_shown) = self.chat.borrow().rows.last().map(|entry| entry.id) else {
+            return;
+        };
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        self.chat.borrow_mut().newer_loading = true;
+        self.spawn(
+            async move { http.messages_after(channel_id, PAGE, newest_shown).await },
+            move |app, result| {
+                app.chat.borrow_mut().newer_loading = false;
+                match result {
+                    Ok(messages) => {
+                        let full_page = messages.len() >= PAGE as usize;
+                        let mut ids: Vec<_> = messages.iter().map(|message| message.id).collect();
+                        ids.sort();
+                        store.write(|state| state.load_newer(channel_id, messages, full_page));
+                        // Rows go in below the reading position, which stays
+                        // put; scrolling on fetches the next page.
+                        app.chat.borrow_mut().at_bottom = false;
+                        for id in ids {
+                            app.message_added(channel_id, id);
+                        }
+                        app.update_present();
+                    }
+                    Err(error) => {
+                        app.set_status(&format!("Could not load newer messages: {error}"))
+                    }
+                }
+            },
+        );
+    }
+
+    /// A message is being sent to `channel_id`: if the view is on older
+    /// messages, go to the present, where it will appear.
+    pub(crate) fn follow_sent_message(self: &Rc<Self>, channel_id: Snowflake) {
+        if self.chat.borrow().channel == Some(channel_id) && self.detached(channel_id) {
+            self.jump_to_present();
+        }
+    }
+
+    /// Leaves a window of older messages for the channel's newest ones.
+    pub(crate) fn jump_to_present(self: &Rc<Self>) {
+        let Some(channel_id) = self.chat.borrow().channel else {
+            return;
+        };
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        if let Some(button) = &self.chat.borrow().present {
+            button.set_sensitive(false);
+        }
+        // Drop the old window now, so messages arriving meanwhile (one just
+        // sent, say) are kept and merge with the page fetched below. The rows
+        // on screen stay until that page is in.
+        store.write(|state| state.messages.remove(&channel_id));
+        self.chat.borrow_mut().channel = None;
+        self.with_session_mut(|session| {
+            session.history.insert(channel_id, Default::default());
+        });
+        self.spawn(
+            async move { http.messages(channel_id, PAGE, None).await },
+            move |app, result| {
+                if let Some(button) = &app.chat.borrow().present {
+                    button.set_sensitive(true);
+                }
+                match result {
+                    Ok(messages) => {
+                        store.write(|state| state.load_history(channel_id, messages));
+                        app.render_messages();
+                    }
+                    Err(error) => {
+                        app.set_status(&format!("Could not load the newest messages: {error}"));
+                        app.render_messages();
+                    }
+                }
+            },
+        );
     }
 
     fn build_entry(
@@ -915,12 +1049,11 @@ impl AppState {
         }
 
         if let Some(target) = target {
+            let channel_id = message.channel_id;
             let click = gtk::GestureClick::new();
             let app = self.clone();
             click.connect_released(move |_, _, _, _| {
-                if !app.jump_to_message(target) {
-                    app.set_status("That message is further back; scroll up to load it");
-                }
+                app.jump_or_fetch(channel_id, target);
             });
             row.add_controller(click);
             row.set_cursor_from_name(Some("pointer"));
@@ -1458,16 +1591,17 @@ impl AppState {
                 Ok(messages) => {
                     // Replace the window with the page around the target, so
                     // the list stays contiguous.
-                    store.write(|state| {
-                        state.messages.remove(&channel_id);
-                        state.load_history(channel_id, messages);
-                    });
+                    store.write(|state| state.load_around(channel_id, messages));
                     app.with_session_mut(|session| {
                         session.history.insert(channel_id, Default::default());
                     });
                     app.chat.borrow_mut().channel = None;
                     app.render_messages();
-                    app.jump_to_message(message_id);
+                    // Rows are built but not laid out yet.
+                    let app = app.clone();
+                    glib::idle_add_local_once(move || {
+                        app.jump_to_message(message_id);
+                    });
                 }
                 Err(error) => app.set_status(&format!("Could not load that message: {error}")),
             },

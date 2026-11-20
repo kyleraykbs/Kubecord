@@ -21,6 +21,10 @@ const MESSAGE_WINDOW: usize = 300;
 pub struct MessageBuffer {
     messages: Vec<Message>,
     limit: usize,
+    /// The window was loaded around an older message and does not reach the
+    /// channel's newest one; new messages are not added until it does, so the
+    /// window never has a gap in it.
+    detached: bool,
 }
 
 impl Default for MessageBuffer {
@@ -28,6 +32,7 @@ impl Default for MessageBuffer {
         Self {
             messages: Vec::new(),
             limit: MESSAGE_WINDOW,
+            detached: false,
         }
     }
 }
@@ -35,6 +40,35 @@ impl Default for MessageBuffer {
 impl MessageBuffer {
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Whether the window stops short of the channel's newest message.
+    pub fn is_detached(&self) -> bool {
+        self.detached
+    }
+
+    pub fn set_detached(&mut self, detached: bool) {
+        self.detached = detached;
+    }
+
+    /// Replaces the window with a page loaded around an older message.
+    /// `newest` is the channel's newest message id, when known.
+    pub fn replace_around(&mut self, mut messages: Vec<Message>, newest: Option<Snowflake>) {
+        messages.sort_by_key(|message| message.id);
+        messages.dedup_by_key(|message| message.id);
+        self.detached = match (messages.last(), newest) {
+            (Some(last), Some(newest)) => last.id < newest,
+            // Without a known newest id, a full page may have more after it.
+            _ => false,
+        };
+        self.messages = messages;
+    }
+
+    /// Merges a page of messages newer than the window. A short page means
+    /// the window has reached the present.
+    pub fn extend_newer(&mut self, messages: Vec<Message>, full_page: bool) {
+        self.detached = full_page;
+        self.extend(messages);
     }
 
     pub fn get(&self, id: Snowflake) -> Option<&Message> {
@@ -891,7 +925,10 @@ impl State {
                 .mention_count += 1;
         }
 
-        self.messages.entry(channel_id).or_default().insert(message);
+        let buffer = self.messages.entry(channel_id).or_default();
+        if !buffer.is_detached() {
+            buffer.insert(message);
+        }
         if let Some(channel) = self.channels.get_mut(&channel_id) {
             channel.last_message_id = Some(id);
         }
@@ -1087,16 +1124,43 @@ impl State {
     }
 
     pub fn load_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
-        for message in &messages {
+        self.note_authors(&messages);
+        self.messages
+            .entry(channel_id)
+            .or_default()
+            .extend(messages);
+    }
+
+    /// Replaces a channel's window with the page around an older message.
+    pub fn load_around(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
+        self.note_authors(&messages);
+        let newest = self
+            .channels
+            .get(&channel_id)
+            .and_then(|channel| channel.last_message_id);
+        self.messages
+            .entry(channel_id)
+            .or_default()
+            .replace_around(messages, newest);
+    }
+
+    /// Adds a page of messages after the window; `full_page` says whether
+    /// Discord may have more after it.
+    pub fn load_newer(&mut self, channel_id: Snowflake, messages: Vec<Message>, full_page: bool) {
+        self.note_authors(&messages);
+        self.messages
+            .entry(channel_id)
+            .or_default()
+            .extend_newer(messages, full_page);
+    }
+
+    fn note_authors(&mut self, messages: &[Message]) {
+        for message in messages {
             self.upsert_user(message.author.clone());
             for user in &message.mentions {
                 self.upsert_user(user.clone());
             }
         }
-        self.messages
-            .entry(channel_id)
-            .or_default()
-            .extend(messages);
     }
 
     pub fn mark_read(&mut self, channel_id: Snowflake, message_id: Snowflake) {
@@ -1440,6 +1504,68 @@ mod tests {
             "timestamp": "2026-11-12T00:00:00.000000+00:00",
             "type": 0
         })
+    }
+
+    fn parsed(id: u64, channel: u64) -> Message {
+        serde_json::from_value(message(id, channel, "old")).unwrap()
+    }
+
+    #[test]
+    fn a_window_around_an_old_message_takes_no_new_messages_until_it_reaches_the_present() {
+        let store = Store::new();
+        store.apply(
+            "CHANNEL_CREATE",
+            &json!({"id": "10", "type": 0, "guild_id": "5", "name": "general", "position": 1}),
+        );
+        store.apply("MESSAGE_CREATE", &message(900, 10, "newest"));
+        store.write(|state| state.load_around(Snowflake(10), vec![parsed(20, 10), parsed(10, 10)]));
+        store.read(|state| {
+            let buffer = &state.messages[&Snowflake(10)];
+            assert!(buffer.is_detached());
+            let ids: Vec<_> = buffer.messages().iter().map(|m| m.id.0).collect();
+            assert_eq!(ids, [10, 20]);
+        });
+
+        // A live message would leave a gap after 20, so it waits.
+        store.apply("MESSAGE_CREATE", &message(901, 10, "live"));
+        store.read(|state| {
+            assert_eq!(state.messages(Snowflake(10)).len(), 2);
+            assert_eq!(
+                state.channels[&Snowflake(10)].last_message_id,
+                Some(Snowflake(901))
+            );
+        });
+
+        // A full page after the window: still short of the present.
+        store.write(|state| state.load_newer(Snowflake(10), vec![parsed(30, 10)], true));
+        store.apply("MESSAGE_CREATE", &message(902, 10, "live"));
+        assert!(store.read(|state| state.messages[&Snowflake(10)].is_detached()));
+
+        // A short page reaches it; live messages are added again.
+        store.write(|state| {
+            state.load_newer(Snowflake(10), vec![parsed(901, 10), parsed(902, 10)], false)
+        });
+        store.apply("MESSAGE_CREATE", &message(903, 10, "live"));
+        store.read(|state| {
+            let ids: Vec<_> = state
+                .messages(Snowflake(10))
+                .iter()
+                .map(|m| m.id.0)
+                .collect();
+            assert_eq!(ids, [10, 20, 30, 901, 902, 903]);
+        });
+    }
+
+    #[test]
+    fn a_window_that_includes_the_newest_message_is_not_detached() {
+        let store = Store::new();
+        store.apply(
+            "CHANNEL_CREATE",
+            &json!({"id": "10", "type": 0, "guild_id": "5", "name": "general", "position": 1}),
+        );
+        store.apply("MESSAGE_CREATE", &message(20, 10, "newest"));
+        store.write(|state| state.load_around(Snowflake(10), vec![parsed(10, 10), parsed(20, 10)]));
+        assert!(!store.read(|state| state.messages[&Snowflake(10)].is_detached()));
     }
 
     #[test]

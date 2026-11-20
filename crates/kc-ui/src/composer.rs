@@ -273,6 +273,9 @@ impl AppState {
             self.set_status("Messages are limited to 2000 characters");
             return;
         }
+        if editing.is_none() {
+            self.follow_sent_message(channel);
+        }
 
         let mention_reply = self.context_ping.is_active();
         self.composer.buffer().set_text("");
@@ -861,6 +864,7 @@ impl AppState {
         let Some((_, http, _)) = self.active() else {
             return;
         };
+        self.follow_sent_message(channel);
         self.spawn(
             async move { http.send_message(channel, &content, None).await },
             |app, result| {
