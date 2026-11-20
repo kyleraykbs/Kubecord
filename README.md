@@ -27,7 +27,11 @@ libopus and the Rust toolchain. The packaged binary wraps
 
 ## Logging in
 
-Add an account from the login page with a **user token**. The token is stored in
+Add an account from the login page with either an **email and password** (with a
+two-factor code when the account requires one) or a **user token** directly.
+Discord may ask for a captcha or an email confirmation for a login from a
+third-party client. Only the resulting token is kept; the password and any codes
+are never stored or logged. The token is stored in
 `$XDG_CONFIG_HOME/kylecord/accounts.json` with mode 0600. Multiple accounts are
 supported; each account owns its gateway connection, REST client and at most one
 voice connection.

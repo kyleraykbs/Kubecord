@@ -282,7 +282,10 @@ pub(crate) fn script_urls(html: &str) -> Vec<String> {
         .captures_iter(html)
         .map(|capture| format!("https://discord.com{}", &capture[1]))
         .collect();
-    urls.dedup();
+    // Drop every duplicate (not just adjacent ones), keeping first order, so
+    // the fetch budget is not spent twice on the same script.
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
     urls.sort_by_key(|url| !url.contains("/assets/web."));
     urls
 }
@@ -478,8 +481,10 @@ pub(crate) struct Sounds {
     ring: RefCell<Option<(Snowflake, Sound)>>,
     /// The ring while we call someone.
     calling: RefCell<Option<(Snowflake, Sound)>>,
-    /// Bumped per ring, so an old timeout does not stop a newer ring.
-    ring_serial: Cell<u64>,
+    /// Bumped per ring, so an old timeout does not stop a newer ring. One per
+    /// direction ([0] incoming, [1] outgoing), so a ring in one direction
+    /// does not defeat the other's auto-stop backstop.
+    ring_serial: [Cell<u64>; 2],
     /// When our outgoing ring started.
     calling_since: Cell<Option<std::time::Instant>>,
     /// The call you are in and the others in it.
@@ -636,12 +641,12 @@ impl AppState {
                 .calling_since
                 .set(Some(std::time::Instant::now()));
         }
-        let serial = self.sounds.ring_serial.get() + 1;
-        self.sounds.ring_serial.set(serial);
+        let serial = self.sounds.ring_serial[outgoing as usize].get() + 1;
+        self.sounds.ring_serial[outgoing as usize].set(serial);
         let app = Rc::downgrade(self);
         glib::timeout_add_seconds_local_once(RING_LIMIT_SECS, move || {
             if let Some(app) = app.upgrade()
-                && app.sounds.ring_serial.get() == serial
+                && app.sounds.ring_serial[outgoing as usize].get() == serial
             {
                 app.stop_ring(outgoing);
             }

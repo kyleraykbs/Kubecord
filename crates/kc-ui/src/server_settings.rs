@@ -267,8 +267,6 @@ pub(crate) struct Panel {
     bans_loaded: RefCell<Vec<kc_http::Ban>>,
     invites: gtk::Box,
     audit: gtk::Box,
-    /// Set while controls are filled in, so their handlers stay quiet.
-    filling: Cell<bool>,
 }
 
 impl Panel {
@@ -390,7 +388,6 @@ impl AppState {
             bans_loaded: RefCell::new(Vec::new()),
             invites: gtk::Box::new(gtk::Orientation::Vertical, 0),
             audit: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            filling: Cell::new(false),
         });
 
         let pages = gtk::Stack::new();
@@ -661,9 +658,6 @@ impl AppState {
         let target = panel.clone();
         let voice_ids: Vec<Snowflake> = voice.iter().map(|(id, _)| *id).collect();
         afk_channel.connect_selected_notify(move |row| {
-            if target.filling.get() {
-                return;
-            }
             let value = match row.selected() {
                 0 => Value::Null,
                 index => voice_ids
@@ -689,9 +683,6 @@ impl AppState {
         let app = self.clone();
         let target = panel.clone();
         afk_timeout.connect_selected_notify(move |row| {
-            if target.filling.get() {
-                return;
-            }
             let seconds = AFK_TIMEOUTS
                 .get(row.selected() as usize)
                 .map_or(300, |(_, seconds)| *seconds);
@@ -728,9 +719,6 @@ impl AppState {
         let target = panel.clone();
         let text_ids: Vec<Snowflake> = text.iter().map(|(id, _)| *id).collect();
         system.connect_selected_notify(move |row| {
-            if target.filling.get() {
-                return;
-            }
             let value = match row.selected() {
                 0 => Value::Null,
                 index => text_ids
@@ -756,9 +744,6 @@ impl AppState {
         let app = self.clone();
         let target = panel.clone();
         notifications.connect_selected_notify(move |row| {
-            if target.filling.get() {
-                return;
-            }
             app.patch_guild(
                 &target,
                 json!({ "default_message_notifications": row.selected() }),
@@ -1441,12 +1426,15 @@ impl AppState {
             more.set_valign(gtk::Align::Center);
             more.set_tooltip_text(Some("Member Actions"));
             let app = self.clone();
+            // Act on this dialog's server, not whatever is selected behind
+            // the (non-modal) settings window.
+            let guild = panel.guild;
             more.connect_clicked(move |button| {
                 let anchor = button.clone().upcast::<gtk::Widget>();
-                app.show_user_menu(user_id, &anchor, 16.0, 16.0);
+                app.show_user_menu_in(user_id, &anchor, 16.0, 16.0, Some(guild));
             });
             row.add_suffix(&more);
-            self.attach_user_menu(&row, user_id);
+            self.attach_user_menu_in(&row, user_id, Some(panel.guild));
             list.append(&row);
         }
         panel.members.append(&list);

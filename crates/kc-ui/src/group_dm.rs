@@ -339,21 +339,34 @@ impl AppState {
                 });
                 self.spawn(
                     async move {
+                        // Add in order, stopping at the first failure, and
+                        // report which ids were accepted so only those show
+                        // locally (the rejected ones must not appear added).
+                        let mut added = Vec::new();
+                        let mut failed = None;
                         for user in &users {
-                            http.add_group_recipient(group, *user).await?;
+                            match http.add_group_recipient(group, *user).await {
+                                Ok(()) => added.push(*user),
+                                Err(error) => {
+                                    failed = Some(error);
+                                    break;
+                                }
+                            }
                         }
-                        Ok(())
+                        (added, failed)
                     },
-                    move |app, result: kc_http::Result<()>| {
-                        // The gateway sends CHANNEL_RECIPIENT_ADD too; the
-                        // reducer replaces rather than duplicates.
+                    move |app, (added, failed): (Vec<Snowflake>, Option<kc_http::Error>)| {
+                        // Only the accepted users are applied; the gateway's
+                        // CHANNEL_RECIPIENT_ADD replaces, not duplicates.
                         for user in &known {
-                            store.apply(
-                                "CHANNEL_RECIPIENT_ADD",
-                                &json!({"channel_id": group.to_string(), "user": user}),
-                            );
+                            if added.contains(&user.id) {
+                                store.apply(
+                                    "CHANNEL_RECIPIENT_ADD",
+                                    &json!({"channel_id": group.to_string(), "user": user}),
+                                );
+                            }
                         }
-                        if let Err(error) = result {
+                        if let Some(error) = failed {
                             app.report_failure("Could not add to the group", &error);
                         }
                     },

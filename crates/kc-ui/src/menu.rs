@@ -79,6 +79,18 @@ impl AppState {
         widget: &impl IsA<gtk::Widget>,
         user_id: Snowflake,
     ) {
+        self.attach_user_menu_in(widget, user_id, None);
+    }
+
+    /// Like [`Self::attach_user_menu`], but acts on `guild` rather than the
+    /// currently-selected one — for the Server Settings members list, whose
+    /// non-modal dialog may name a different server than the one open.
+    pub(crate) fn attach_user_menu_in(
+        self: &Rc<Self>,
+        widget: &impl IsA<gtk::Widget>,
+        user_id: Snowflake,
+        guild: Option<Snowflake>,
+    ) {
         let gesture = gtk::GestureClick::new();
         gesture.set_button(gdk::BUTTON_SECONDARY);
         let app = self.clone();
@@ -86,7 +98,7 @@ impl AppState {
         gesture.connect_pressed(move |gesture, _, x, y| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
             if let Some(anchor) = anchor.upgrade() {
-                app.show_user_menu(user_id, &anchor, x, y);
+                app.show_user_menu_in(user_id, &anchor, x, y, guild);
             }
         });
         widget.add_controller(gesture);
@@ -96,9 +108,11 @@ impl AppState {
         &self,
         account_user: Option<Snowflake>,
         user_id: Snowflake,
+        guild_override: Option<Snowflake>,
     ) -> Option<UserContext> {
         self.with_session(|session| {
-            let guild = session.selected_guild.filter(|_| !session.dm_mode);
+            let guild =
+                guild_override.or_else(|| session.selected_guild.filter(|_| !session.dm_mode));
             let voice = session.voice.as_ref();
             let watching = voice.and_then(|voice| voice.watching) == Some(user_id);
             session.store.read(|state| {
@@ -135,11 +149,24 @@ impl AppState {
         x: f64,
         y: f64,
     ) -> Option<gtk::Popover> {
+        self.show_user_menu_in(user_id, anchor, x, y, None)
+    }
+
+    /// Like [`Self::show_user_menu`], but computes the menu against `guild`
+    /// instead of the selected one (the Server Settings members list).
+    pub(crate) fn show_user_menu_in(
+        self: &Rc<Self>,
+        user_id: Snowflake,
+        anchor: &gtk::Widget,
+        x: f64,
+        y: f64,
+        guild: Option<Snowflake>,
+    ) -> Option<gtk::Popover> {
         let (account, _, _) = self.active()?;
         let account_user = self
             .with_session(|session| session.user.as_ref().map(|u| u.id))
             .flatten();
-        let ctx = self.user_context(account_user, user_id)?;
+        let ctx = self.user_context(account_user, user_id, guild)?;
 
         let popover = gtk::Popover::new();
         self.anchor_popover(&popover, anchor, x, y);

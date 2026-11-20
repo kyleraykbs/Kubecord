@@ -111,10 +111,12 @@ pub fn decide(facts: &MessageFacts, prefs: &NotifyPrefs) -> Option<NotifyReason>
     if facts.mentions_me {
         return Some(NotifyReason::Mention);
     }
-    if facts.mentions_my_role && prefs.roles && !facts.suppress_roles {
+    // A muted place notifies only for a direct @mention of you, not for a
+    // role or @everyone/@here ping (as Discord).
+    if facts.mentions_my_role && prefs.roles && !facts.suppress_roles && !facts.muted {
         return Some(NotifyReason::RoleMention);
     }
-    if facts.mentions_everyone && prefs.everyone && !facts.suppress_everyone {
+    if facts.mentions_everyone && prefs.everyone && !facts.suppress_everyone && !facts.muted {
         return Some(NotifyReason::Everyone);
     }
     let all = facts.level == level::ALL_MESSAGES;
@@ -374,6 +376,39 @@ mod tests {
             ),
             Some(NotifyReason::Mention)
         );
+        // A muted place does NOT notify for a role or @everyone ping, only a
+        // direct @mention of you.
+        assert_eq!(
+            decide(
+                &MessageFacts {
+                    mentions_my_role: true,
+                    ..muted
+                },
+                &prefs
+            ),
+            None
+        );
+        assert_eq!(
+            decide(
+                &MessageFacts {
+                    mentions_everyone: true,
+                    ..muted
+                },
+                &prefs
+            ),
+            None
+        );
+        // But an unmuted place still does.
+        assert_eq!(
+            decide(
+                &MessageFacts {
+                    mentions_everyone: true,
+                    ..guild_message()
+                },
+                &prefs
+            ),
+            Some(NotifyReason::Everyone)
+        );
     }
 
     #[test]
@@ -539,12 +574,12 @@ mod tests {
                        "author": {"id": "1", "username": "me"}, "content": "hi"}}),
         );
         assert_eq!(notify(&state, &reply, false), Some(NotifyReason::Mention));
-        // A role you have, in an only-mentions channel.
+        // Channel 604 is muted, so a role you have does NOT notify there —
+        // only a direct @mention does (checked above). A RoleMention in a
+        // non-muted channel is covered by
+        // `everyone_and_roles_follow_server_and_app_settings`.
         let role = message("604", "2", json!({"mention_roles": ["77"]}));
-        assert_eq!(
-            notify(&state, &role, false),
-            Some(NotifyReason::RoleMention)
-        );
+        assert_eq!(notify(&state, &role, false), None);
         let other_role = message("604", "2", json!({"mention_roles": ["78"]}));
         assert_eq!(notify(&state, &other_role, false), None);
         // DMs, and a DM call's start message (the ring covers it).

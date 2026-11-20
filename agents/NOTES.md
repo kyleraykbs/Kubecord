@@ -719,3 +719,14 @@ dispatch; contains account data).
 
 - The main-thread watchdogs (main-loop + off-thread), the per-event timer, and the sidebar/member rebuild timings now log only when `crate::logging::diagnostics()` is on (checked before building the warning, so free when off).
 - New setting `CapturePreferences.log_diagnostics` (serde default false), applied via `crate::logging::set_diagnostics` in `apply()`, with a "Performance Diagnostics" switch in Settings → Advanced → Log File. Off by default, so release logs stay clean; turn on to investigate a hitch.
+
+## Release correctness review fixes (2026-11-20)
+
+Four read-only review agents went over the session's untested code. No high-severity bugs. Fixed:
+- notify.rs: a muted server/channel still notified for role and @everyone/@here pings — a muted place now notifies only for a direct @mention (gated the role/everyone branches on `!muted`). Test extended.
+- group_dm.rs: "Add Friends to Group" applied the optimistic CHANNEL_RECIPIENT_ADD for every selected user even when the HTTP add failed; now it applies only the ids the server accepted (stops at the first failure, reports the rest).
+- menu.rs + server_settings.rs: the Server Settings members list moderated `session.selected_guild`, not the dialog's guild — so switching servers behind the (non-modal) settings window could kick/ban on the wrong server. Added `show_user_menu_in`/`attach_user_menu_in` taking an explicit guild; the members list passes `panel.guild`.
+- sounds.rs: the ring's 60 s auto-stop backstop used one shared serial, so a concurrent opposite-direction ring defeated it; now one serial per direction. Also dedup script URLs with a set (not adjacent-only) before the priority sort.
+- server_settings.rs: removed the dead `filling` guard (never set; the set-before-connect order already prevents spurious patches).
+
+Left (low / uncertain, noted for the user): login Cancel during an in-flight request can still add the account (edge case); SMS-send captcha not routed through the solve flow (rare); a late STREAM_DELETE after a gateway-session rejoin could tear down a re-created stream (timing-dependent).
