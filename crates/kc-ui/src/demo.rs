@@ -64,10 +64,6 @@ fn ready() -> Value {
     }
     channels.push(json!({"id": LOUNGE.to_string(), "type": 2, "name": "Lounge", "position": 10, "parent_id": "650"}));
     channels.push(json!({"id": EMPTY_VOICE.to_string(), "type": 2, "name": "Quiet Room", "position": 11, "parent_id": "650"}));
-    let voice_state = |user: u64, channel: u64, mute: bool| {
-        json!({"user_id": user.to_string(), "channel_id": channel.to_string(),
-               "guild_id": GUILD.to_string(), "session_id": "x", "self_mute": mute})
-    };
     json!({
         "user": {"id": ME.to_string(), "username": "demo", "global_name": "Demo User"},
         "users": [
@@ -79,12 +75,7 @@ fn ready() -> Value {
             "id": GUILD.to_string(), "name": "Demo Server", "owner_id": ME.to_string(),
             "joined_at": "2024-01-01T00:00:00+00:00",
             "roles": [{"id": GUILD.to_string(), "name": "@everyone", "permissions": "1099511627775", "position": 0}],
-            "channels": channels,
-            "voice_states": [
-                voice_state(2, LOUNGE, false),
-                voice_state(3, LOUNGE, true),
-                voice_state(4, 680, false),
-            ]
+            "channels": channels
         }],
         "merged_members": [[{"user_id": ME.to_string(), "roles": []}]],
         "private_channels": [],
@@ -117,6 +108,13 @@ impl AppState {
         session.connection = ConnState::Ready;
         let store = session.store.clone();
         store.apply("READY", &ready());
+        for (user, channel, mute) in [(2u64, LOUNGE, false), (3, LOUNGE, true), (4, 680, false)] {
+            store.apply(
+                "VOICE_STATE_UPDATE",
+                &json!({"user_id": user.to_string(), "channel_id": channel.to_string(),
+                        "guild_id": GUILD.to_string(), "session_id": "x", "self_mute": mute}),
+            );
+        }
         session.user = store.read(|state| state.me.clone());
         // Nothing to fetch or subscribe to: there is no gateway.
         for channel in [GENERAL, LOUNGE, EMPTY_VOICE] {
@@ -289,8 +287,10 @@ impl AppState {
                 let mut child = app.channel_box.first_child();
                 while let Some(widget) = child {
                     if widget.widget_name() == name.as_str() {
-                        widget.grab_focus();
                         if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                            if button.gets_focus_on_click() {
+                                button.grab_focus();
+                            }
                             button.emit_clicked();
                         }
                         break;

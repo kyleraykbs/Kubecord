@@ -59,15 +59,53 @@ impl AppState {
     }
 
     pub(crate) fn render_channels(self: &Rc<Self>) {
-        clear_box(&self.channel_box);
-        self.voice_rows.borrow_mut().clear();
-        let Some((dm_mode, guild_id, selected)) = self.with_session(|session| {
+        let shown = self.with_session(|session| {
             (
                 session.dm_mode,
                 session.selected_guild,
                 session.selected_channel,
             )
-        }) else {
+        });
+        // The list is rebuilt on every click, voice state and unread
+        // change. Rebuilding the same list must leave it where it was
+        // scrolled to; another server's or the DMs' list starts at the top.
+        let list = shown.map(|(dm_mode, guild_id, _)| (dm_mode, guild_id));
+        let same_list = list.is_some() && self.sidebar_shown.replace(list) == list;
+        let adjustment = self
+            .channel_box
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+            .map(|scroll| scroll.vadjustment());
+        let kept = adjustment
+            .as_ref()
+            .map(|adjustment| if same_list { adjustment.value() } else { 0.0 });
+
+        // A focused row about to be removed would hand the focus on, and
+        // the viewport scrolls to whatever takes it.
+        if GtkWindowExt::focus(&self.window)
+            .is_some_and(|focus| focus.is_ancestor(&self.channel_box))
+        {
+            GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        }
+        self.fill_channels(shown);
+
+        // Put the list back now, and again once the new rows have been
+        // measured, since the viewport clamps the value to its old height
+        // until then.
+        if let (Some(adjustment), Some(value)) = (adjustment, kept) {
+            adjustment.set_value(value);
+            glib::idle_add_local_once(move || {
+                if adjustment.value() != value {
+                    adjustment.set_value(value);
+                }
+            });
+        }
+    }
+
+    fn fill_channels(self: &Rc<Self>, shown: Option<(bool, Option<Snowflake>, Option<Snowflake>)>) {
+        clear_box(&self.channel_box);
+        self.voice_rows.borrow_mut().clear();
+        let Some((dm_mode, guild_id, selected)) = shown else {
             return;
         };
 
@@ -140,6 +178,7 @@ impl AppState {
             .unwrap_or(0);
 
         let friends = gtk::Button::new();
+        friends.set_focus_on_click(false);
         friends.add_css_class("flat");
         friends.add_css_class("kc-channel");
         if selected.is_none() {
@@ -172,6 +211,7 @@ impl AppState {
 
         for row in rows {
             let button = gtk::Button::new();
+            button.set_focus_on_click(false);
             button.add_css_class("flat");
             button.add_css_class("kc-channel");
             if selected == Some(row.channel.id) {
@@ -290,6 +330,7 @@ impl AppState {
             if let Some(category) = &category {
                 hidden = collapsed.contains(&category.id);
                 let header = gtk::Button::new();
+                header.set_focus_on_click(false);
                 header.add_css_class("flat");
                 header.add_css_class("kc-category");
                 header.set_margin_top(10);
@@ -341,6 +382,9 @@ impl AppState {
         let channel = &row.channel;
         let button = gtk::Button::new();
         button.set_widget_name(&format!("channel-{}", channel.id));
+        // A click must not move the focus into a list that is about to be
+        // rebuilt (see `render_channels`).
+        button.set_focus_on_click(false);
         button.add_css_class("flat");
         button.add_css_class("kc-channel");
         if selected {

@@ -559,3 +559,9 @@ dispatch; contains account data).
 - Fix: `queue_scroll_settle` does that work on the next idle (coalesced). Rows that grow late (images, embeds, edits) go through the same path.
 - Rule: never set an adjustment's value from its own `changed` (or `value-changed`) handler; defer it, as with visibility changes.
 - Dev aid `KYLECORD_DEMO=chat|sidebar|voice-empty|voice-people|voice-joined` (demo.rs): an offline made-up account and server fed through the real store reducers; prints `demo:` scroll measurements on stderr. Run with `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` in a scratch directory plus `KYLECORD_SCREENSHOT`.
+
+## Channel list jumped to the top on a click (2026-11-19)
+
+- Reproduced with `KYLECORD_DEMO=sidebar` (value 199 → 16 after clicking a voice channel near the bottom). The sidebar is rebuilt on every click and store event; the clicked button had taken the focus, and when it was removed GTK handed the focus on and the viewport scrolled to the new focus. Restoring the old value straight after the rebuild was not enough: the scroll to the focus lands later.
+- Fix (sidebar.rs `render_channels`): sidebar rows no longer take focus on click; if the focus is inside the list anyway (keyboard), it is cleared before the rebuild; the adjustment value is put back after the rebuild and again on the next idle (the viewport clamps to its old height until it has measured the new rows). Redrawing the same list (`sidebar_shown`: DM mode and guild) keeps its position; another server's list starts at the top. Checked with focus forced onto the row too.
+- The demo's READY guild `voice_states` are not read by the reducer (only GUILD_CREATE and READY_SUPPLEMENTAL carry them), so the demo seeds voice states with VOICE_STATE_UPDATE.

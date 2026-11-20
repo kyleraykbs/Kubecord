@@ -163,6 +163,9 @@ pub(crate) struct AppState {
     pub voice_rows: RefCell<HashMap<Snowflake, gtk::Widget>>,
     /// Coalesces bursts of store events into one sidebar redraw.
     pub sidebar_redraw_queued: Cell<bool>,
+    /// Which list the channel sidebar last showed: `(dm_mode, guild)`.
+    /// Redrawing the same list keeps its scroll position.
+    pub sidebar_shown: Cell<Option<(bool, Option<Snowflake>)>>,
     /// Inline GIF players and the widgets showing them.
     pub players: RefCell<Vec<(glib::WeakRef<gtk::Widget>, std::rc::Weak<LoopingVideo>)>>,
     pub players_update_queued: Cell<bool>,
@@ -872,6 +875,7 @@ impl AppState {
             speaking: RefCell::new(HashSet::new()),
             voice_rows: RefCell::new(HashMap::new()),
             sidebar_redraw_queued: Cell::new(false),
+            sidebar_shown: Cell::new(None),
             players: RefCell::new(Vec::new()),
             players_update_queued: Cell::new(false),
         })
