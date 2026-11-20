@@ -21,6 +21,9 @@ struct Sample {
     at: Instant,
     stats: FeedStats,
     shown: u64,
+    /// When the keyframe count last went up, for a steady "N s ago" that
+    /// counts real time rather than dividing frames by a fluctuating rate.
+    keyframe_at: Instant,
     /// What the panel says until the next measurement.
     text: String,
 }
@@ -74,13 +77,14 @@ fn describe(
     before: (FeedStats, u64),
     now: (FeedStats, u64),
     seconds: f64,
+    // Real seconds since the last full frame, or None when none has arrived.
+    since_keyframe: Option<f64>,
     upload: Option<VideoUpload>,
 ) -> String {
     let (earlier, shown_before) = before;
     let (stats, shown) = now;
     let seconds = seconds.max(0.001);
     let fps = (shown.saturating_sub(shown_before)) as f64 / seconds;
-    let arriving = (stats.frames.saturating_sub(earlier.frames)) as f64 / seconds;
     let kbps = (stats.bytes.saturating_sub(earlier.bytes)) as f64 * 8.0 / 1000.0 / seconds;
     let mut lines = vec![
         format!("{} × {}  ·  {:.0} fps", size.0, size.1, fps),
@@ -93,16 +97,13 @@ fn describe(
     ];
     // A full frame is one that needs none before it; a viewer who lost
     // the picture gets it back at the next one.
-    lines.push(if stats.keyframes == 0 {
-        "Full frames: none yet".to_owned()
-    } else if arriving >= 1.0 {
-        format!(
+    lines.push(match since_keyframe {
+        None => "Full frames: none yet".to_owned(),
+        Some(ago) => format!(
             "Full frames: {} · {:.0} s ago",
             grouped(stats.keyframes),
-            stats.since_keyframe as f64 / arriving
-        )
-    } else {
-        format!("Full frames: {}", grouped(stats.keyframes))
+            ago
+        ),
     });
     if let Some(upload) = upload {
         if upload.sent > 0 {
@@ -173,12 +174,23 @@ impl AppState {
             let upload = (Some(key.1) == me)
                 .then(|| info.uploads.get(&(key.0, key.2)).copied())
                 .flatten();
+            // The last full frame's time carries forward until a new one
+            // arrives (the keyframe count goes up), so "N s ago" only ever
+            // climbs and then resets, never jitters.
+            let keyframe_at = match info.samples.get(&key) {
+                Some(before) if stats.keyframes > before.stats.keyframes => now,
+                Some(before) => before.keyframe_at,
+                None => now,
+            };
+            let since_keyframe =
+                (stats.keyframes > 0).then(|| now.duration_since(keyframe_at).as_secs_f64());
             let text = match info.samples.get(&key) {
                 Some(before) => describe(
                     size,
                     (before.stats, before.shown),
                     (stats, shown),
                     now.duration_since(before.at).as_secs_f64(),
+                    since_keyframe,
                     upload,
                 ),
                 None => MEASURING.to_owned(),
@@ -194,6 +206,7 @@ impl AppState {
                     at: now,
                     stats,
                     shown,
+                    keyframe_at,
                     text,
                 },
             );
@@ -222,6 +235,7 @@ mod tests {
             (stats(1000, 5_000_000, 3, 10), 990),
             (stats(1030, 5_250_000, 3, 40), 1020),
             1.0,
+            Some(1.0),
             None,
         );
         assert_eq!(
@@ -243,6 +257,7 @@ mod tests {
             (stats(0, 0, 0, 0), 0),
             (stats(48, 850_000, 0, 48), 48),
             2.0,
+            None,
             Some(upload),
         );
         assert!(text.starts_with("1920 × 1080  ·  24 fps\n3,400 kbit/s"));
