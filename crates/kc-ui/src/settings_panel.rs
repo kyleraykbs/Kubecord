@@ -28,7 +28,7 @@ const METER_BLOCKS: f64 = 40.0;
 
 /// The pages, in order: name, title, icon. Each one is a tab in the list
 /// on the left.
-const PAGES: [(&str, &str, &str); 6] = [
+const PAGES: [(&str, &str, &str); 7] = [
     ("account", "My Account", "avatar-default-symbolic"),
     ("voice", "Voice", "audio-input-microphone-symbolic"),
     ("video", "Video", "camera-web-symbolic"),
@@ -37,6 +37,7 @@ const PAGES: [(&str, &str, &str); 6] = [
         "Notifications",
         "preferences-system-notifications-symbolic",
     ),
+    ("sounds", "Sounds", "audio-volume-high-symbolic"),
     ("chat", "Chat", "chat-message-new-symbolic"),
     ("advanced", "Advanced", "utilities-terminal-symbolic"),
 ];
@@ -143,6 +144,7 @@ impl AppState {
                 "video" => self.video_page(&panel, &camera_frame, &screen_frame, &camera_dropdown),
                 "chat" => self.chat_page(),
                 "notifications" => self.notifications_page(),
+                "sounds" => self.sounds_page(),
                 _ => self.advanced_page(),
             };
             pages.add_named(&page_scroll(&content), Some(name));
@@ -346,6 +348,164 @@ impl AppState {
             |prefs, on| prefs.notify_mark_window = on,
         ));
         page.append(&window);
+        page
+    }
+
+    // -- sounds --------------------------------------------------------------
+
+    /// Interface sounds: on or off, how loud, where they come from, and
+    /// each one with a preview.
+    fn sounds_page(self: &Rc<Self>) -> gtk::Box {
+        use crate::sounds::SoundEvent;
+
+        let page = page_box();
+        page.append(&section_title("Sounds"));
+
+        let general = adw::PreferencesGroup::new();
+        general.add(&self.pref_switch(
+            "Play Sounds",
+            "Notification, call and voice sounds. They play on the speaker chosen on the Voice page.",
+            |prefs| prefs.sounds_enabled,
+            |prefs, on| prefs.sounds_enabled = on,
+        ));
+        let volume_row = adw::ActionRow::builder().title("Volume").build();
+        let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        volume.set_value(f64::from(self.capture.borrow().sound_volume) * 100.0);
+        volume.set_draw_value(true);
+        volume.set_value_pos(gtk::PositionType::Right);
+        volume.set_format_value_func(|_, value| format!("{value:.0}%"));
+        volume.set_hexpand(true);
+        volume.set_width_request(220);
+        volume.set_valign(gtk::Align::Center);
+        let app = self.clone();
+        volume.connect_value_changed(move |scale| {
+            let volume = (scale.value() / 100.0) as f32;
+            app.update_prefs(|prefs| prefs.sound_volume = volume);
+        });
+        volume_row.add_suffix(&volume);
+        general.add(&volume_row);
+        page.append(&general);
+
+        let source = adw::PreferencesGroup::new();
+        source.set_title("Discord's Sounds");
+        source.set_description(Some(
+            "kylecord does not ship Discord's sounds: it downloads them from discord.com's public web app into its cache (no account details are sent). Until then, or if they cannot be found, short built-in tones play.",
+        ));
+        let status = adw::ActionRow::builder()
+            .title("Downloaded Sounds")
+            .subtitle(self.sounds.download.borrow().describe())
+            .subtitle_lines(0)
+            .build();
+        let refresh = gtk::Button::with_label("Refresh Sounds");
+        refresh.set_valign(gtk::Align::Center);
+        refresh.set_tooltip_text(Some(
+            "Looks up Discord's sounds again and downloads any that changed",
+        ));
+        let app = self.clone();
+        refresh.connect_clicked(move |_| app.fetch_sounds(true));
+        status.add_suffix(&refresh);
+        source.add(&status);
+        let folder = crate::sounds::override_dir();
+        let own = adw::ActionRow::builder()
+            .title("Your Own Sounds")
+            .subtitle(format!(
+                "A file named after a sound replaces it: {}/mention.ogg, for example (mp3, ogg, wav, flac or opus).",
+                folder
+                    .as_ref()
+                    .map_or_else(|| "?".to_owned(), |dir| dir.display().to_string())
+            ))
+            .subtitle_lines(0)
+            .build();
+        let open = gtk::Button::with_label("Open Folder");
+        open.set_valign(gtk::Align::Center);
+        let window = self.window.clone();
+        open.connect_clicked(move |_| {
+            if let Some(dir) = &folder {
+                let _ = std::fs::create_dir_all(dir);
+                gtk::FileLauncher::new(Some(&gtk::gio::File::for_path(dir))).launch(
+                    Some(&window),
+                    None::<&gtk::gio::Cancellable>,
+                    |_| {},
+                );
+            }
+        });
+        own.add_suffix(&open);
+        source.add(&own);
+        page.append(&source);
+
+        let events = adw::PreferencesGroup::new();
+        events.set_title("Each Sound");
+        let mut rows = Vec::new();
+        for event in SoundEvent::ALL {
+            let row = adw::ActionRow::builder().title(event.title()).build();
+            let preview = gtk::Button::from_icon_name("media-playback-start-symbolic");
+            preview.add_css_class("flat");
+            preview.set_valign(gtk::Align::Center);
+            preview.set_tooltip_text(Some("Play"));
+            let app = self.clone();
+            // A ring loops: play it for a few seconds only.
+            preview.connect_clicked(move |_| {
+                if let Some(sound) = app.play_sound_anyway(event) {
+                    glib::timeout_add_seconds_local_once(4, move || sound.stop());
+                }
+            });
+            row.add_suffix(&preview);
+            let switch = gtk::Switch::new();
+            switch.set_valign(gtk::Align::Center);
+            switch.set_active(
+                !self
+                    .capture
+                    .borrow()
+                    .sounds_off
+                    .iter()
+                    .any(|key| key == event.key()),
+            );
+            let app = self.clone();
+            switch.connect_active_notify(move |switch| {
+                let on = switch.is_active();
+                app.update_prefs(|prefs| {
+                    prefs.sounds_off.retain(|key| key != event.key());
+                    if !on {
+                        prefs.sounds_off.push(event.key().to_owned());
+                    }
+                });
+            });
+            row.add_suffix(&switch);
+            row.set_activatable_widget(Some(&switch));
+            events.add(&row);
+            rows.push((event, row.downgrade()));
+        }
+        page.append(&events);
+
+        // Each row says where its sound comes from, and follows downloads.
+        let show_sources = {
+            let app = Rc::downgrade(self);
+            move || {
+                let Some(app) = app.upgrade() else {
+                    return false;
+                };
+                let mut alive = false;
+                for (event, row) in &rows {
+                    if let (Some(row), Some(source)) = (row.upgrade(), app.sound_source(*event)) {
+                        alive = true;
+                        row.set_subtitle(&format!("{} · {}", source.describe(), event.key()));
+                    }
+                }
+                alive
+            }
+        };
+        show_sources();
+        let status = status.downgrade();
+        self.sounds
+            .on_change
+            .borrow_mut()
+            .push(Box::new(move |download| {
+                let Some(status) = status.upgrade() else {
+                    return false;
+                };
+                status.set_subtitle(&download.describe());
+                show_sources()
+            }));
         page
     }
 

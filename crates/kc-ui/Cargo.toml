@@ -25,6 +25,8 @@ kc-media.workspace = true
 kc-state.workspace = true
 kc-voice.workspace = true
 libadwaita = { workspace = true, features = ["v1_7"] }
+# Finding Discord's sound files in its web app's script bundles.
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

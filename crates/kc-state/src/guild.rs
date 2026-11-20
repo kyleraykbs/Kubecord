@@ -292,6 +292,9 @@ pub struct Stream {
     pub region: Option<String>,
     #[serde(default)]
     pub paused: bool,
+    /// Who is watching (STREAM_UPDATE).
+    #[serde(default)]
+    pub viewer_ids: Vec<Snowflake>,
 }
 
 #[cfg(test)]

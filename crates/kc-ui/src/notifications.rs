@@ -234,6 +234,7 @@ impl AppState {
         let Some(prepared) = prepared else {
             return;
         };
+        self.notification_sound(prepared.reason.is_mention());
         if !prefs.notify_desktop {
             return;
         }

@@ -30,6 +30,7 @@ mod settings;
 mod settings_panel;
 mod shell;
 mod sidebar;
+mod sounds;
 mod style;
 mod tile_grid;
 mod video_info;

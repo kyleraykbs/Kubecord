@@ -833,6 +833,11 @@ impl AppState {
             }
         });
         if let Some(account) = account {
+            self.play_sound(if desired {
+                crate::sounds::SoundEvent::Mute
+            } else {
+                crate::sounds::SoundEvent::Unmute
+            });
             let _ = self.cmd_tx.try_send(Command::SetMute {
                 account,
                 muted: desired,
@@ -854,6 +859,11 @@ impl AppState {
             }
         });
         if let Some(account) = account {
+            self.play_sound(if desired {
+                crate::sounds::SoundEvent::Deafen
+            } else {
+                crate::sounds::SoundEvent::Undeafen
+            });
             let _ = self.cmd_tx.try_send(Command::SetDeafen {
                 account,
                 deafened: desired,
@@ -1436,6 +1446,15 @@ impl AppState {
                 account,
                 channel_id,
             } => {
+                // The same call reports itself joined more than once (on
+                // connecting, when ready, after a reconnect).
+                let fresh = self
+                    .model
+                    .borrow()
+                    .sessions
+                    .get(&account)
+                    .and_then(|session| session.voice.as_ref())
+                    .is_none_or(|voice| voice.channel_id != channel_id);
                 {
                     let mut model = self.model.borrow_mut();
                     if let Some(session) = model.sessions.get_mut(&account) {
@@ -1469,12 +1488,16 @@ impl AppState {
                     }
                 }
                 if self.model.borrow().active == Some(account) {
+                    self.sounds_call_joined(channel_id, fresh);
                     self.render_voice_panel();
                     self.queue_sidebar();
                     self.refresh_voice_view();
                 }
             }
-            UiEvent::VoiceLeft { account } => {
+            UiEvent::VoiceLeft { account, lost } => {
+                if self.model.borrow().active == Some(account) {
+                    self.sounds_call_left(lost);
+                }
                 {
                     let mut model = self.model.borrow_mut();
                     if let Some(session) = model.sessions.get_mut(&account) {
@@ -1514,7 +1537,13 @@ impl AppState {
                 account,
                 channel_id,
                 ringing,
+                anyone,
             } => {
+                // Our call stopped ringing the others (answered, declined,
+                // or given up).
+                if !anyone && self.calling_channel() == Some(channel_id) {
+                    self.call_stopped_ringing();
+                }
                 if ringing {
                     self.call_notification(account, channel_id);
                     if self.model.borrow().active == Some(account) {
@@ -1598,13 +1627,18 @@ impl AppState {
                 }
             }
             UiEvent::StreamStarted { account } => {
-                {
+                let started = {
                     let mut model = self.model.borrow_mut();
                     if let Some(session) = model.sessions.get_mut(&account)
                         && let Some(voice) = &mut session.voice
                     {
-                        voice.streaming = true;
+                        !std::mem::replace(&mut voice.streaming, true)
+                    } else {
+                        false
                     }
+                };
+                if started {
+                    self.play_sound(crate::sounds::SoundEvent::StreamStart);
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("Sharing screen");
@@ -1612,13 +1646,18 @@ impl AppState {
                 }
             }
             UiEvent::StreamStopped { account } => {
-                {
+                let stopped = {
                     let mut model = self.model.borrow_mut();
                     if let Some(session) = model.sessions.get_mut(&account)
                         && let Some(voice) = &mut session.voice
                     {
-                        voice.streaming = false;
+                        std::mem::replace(&mut voice.streaming, false)
+                    } else {
+                        false
                     }
+                };
+                if stopped {
+                    self.play_sound(crate::sounds::SoundEvent::StreamStop);
                 }
                 if self.model.borrow().active == Some(account) {
                     self.set_status("");
@@ -1801,6 +1840,7 @@ impl AppState {
                 }
             }
             StoreEvent::VoiceStateUpdated { .. } => {
+                self.sounds_voice_changed();
                 self.queue_sidebar();
                 self.render_voice_panel();
                 self.refresh_voice_view();
@@ -1810,9 +1850,8 @@ impl AppState {
                 self.queue_sidebar();
                 self.render_user_bar();
             }
-            StoreEvent::VoiceServerUpdated { .. }
-            | StoreEvent::StreamUpdated(_)
-            | StoreEvent::BansUpdated(_) => {}
+            StoreEvent::StreamUpdated(key) => self.sounds_stream_changed(&key),
+            StoreEvent::VoiceServerUpdated { .. } | StoreEvent::BansUpdated(_) => {}
         }
     }
 

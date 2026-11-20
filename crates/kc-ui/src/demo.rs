@@ -26,6 +26,10 @@
 //!   and the open one; the notifications they would raise are printed
 //!   (`demo: notification …`, nothing reaches the desktop), then one is
 //!   "clicked" through the real `app.open-message` action.
+//! - `sounds`: you join the Lounge, Linus joins and leaves, you mute,
+//!   someone starts and stops watching your stream, the call is lost; the
+//!   sound each would play is printed (`demo: sound …`), then the Sounds
+//!   page opens. Nothing is downloaded or played.
 //! - `channel-menu` (saved like the user menu), `channel-create`,
 //!   `channel-edit` (a voice channel), `channel-text` (a text channel),
 //!   `channel-perms`.
@@ -388,6 +392,12 @@ impl AppState {
                 self.open_channel(general);
                 self.demo_notify(&store, account);
             }
+            "sounds" => {
+                if let Some(lounge) = channel(LOUNGE) {
+                    self.open_channel(lounge);
+                }
+                self.demo_sounds(&store, account);
+            }
             mode if mode.starts_with("channel-") => {
                 self.open_channel(general);
                 let app = self.clone();
@@ -516,6 +526,106 @@ impl AppState {
                     app.window.title()
                 );
             });
+        });
+    }
+
+    fn demo_sounds(self: &Rc<Self>, store: &kc_state::Store, account: session::AccountId) {
+        type Step = Box<dyn Fn(&Rc<AppState>, &kc_state::Store)>;
+        let steps: Vec<(&str, Step)> = vec![
+            (
+                "you join the Lounge",
+                Box::new(move |app, store| {
+                    store.apply(
+                        "VOICE_STATE_UPDATE",
+                        &json!({"user_id": ME.to_string(), "channel_id": LOUNGE.to_string(),
+                                "guild_id": GUILD.to_string(), "session_id": "x"}),
+                    );
+                    app.handle_event(session::UiEvent::VoiceJoined {
+                        account,
+                        channel_id: Snowflake::new(LOUNGE),
+                    });
+                    // Reported again once the connection is ready: no
+                    // second sound.
+                    app.handle_event(session::UiEvent::VoiceJoined {
+                        account,
+                        channel_id: Snowflake::new(LOUNGE),
+                    });
+                }),
+            ),
+            (
+                "Linus joins",
+                Box::new(|_, store| {
+                    store.apply(
+                        "VOICE_STATE_UPDATE",
+                        &json!({"user_id": "4", "channel_id": LOUNGE.to_string(),
+                                "guild_id": GUILD.to_string(), "session_id": "y"}),
+                    );
+                }),
+            ),
+            (
+                "Linus leaves",
+                Box::new(|_, store| {
+                    store.apply(
+                        "VOICE_STATE_UPDATE",
+                        &json!({"user_id": "4", "channel_id": null,
+                                "guild_id": GUILD.to_string(), "session_id": "y"}),
+                    );
+                }),
+            ),
+            (
+                "you mute",
+                Box::new(|app, _| app.voice_mute.set_active(true)),
+            ),
+            (
+                "you unmute",
+                Box::new(|app, _| app.voice_mute.set_active(false)),
+            ),
+            (
+                "your stream: nobody, then Ada watching, then not",
+                Box::new(|_, store| {
+                    let key = format!("guild:{GUILD}:{LOUNGE}:{ME}");
+                    for (index, viewers) in
+                        [json!([]), json!(["2"]), json!([])].into_iter().enumerate()
+                    {
+                        let store = store.clone();
+                        let key = key.clone();
+                        glib::timeout_add_local_once(
+                            Duration::from_millis(index as u64 * 80),
+                            move || {
+                                store.apply(
+                                    "STREAM_UPDATE",
+                                    &json!({"stream_key": key, "channel_id": LOUNGE.to_string(),
+                                            "viewer_ids": viewers, "paused": false}),
+                                );
+                            },
+                        );
+                    }
+                }),
+            ),
+            (
+                "the call is lost",
+                Box::new(move |app, _| {
+                    app.handle_event(session::UiEvent::VoiceLeft {
+                        account,
+                        lost: true,
+                    });
+                }),
+            ),
+        ];
+        for (index, (what, step)) in steps.into_iter().enumerate() {
+            let app = self.clone();
+            let store = store.clone();
+            glib::timeout_add_local_once(
+                Duration::from_millis(1200 + index as u64 * 300),
+                move || {
+                    eprintln!("demo: step: {what}");
+                    step(&app, &store);
+                },
+            );
+        }
+        let app = self.clone();
+        glib::timeout_add_local_once(Duration::from_millis(3800), move || {
+            app.show_settings_page("sounds");
         });
     }
 

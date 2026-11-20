@@ -123,6 +123,8 @@ pub(crate) struct AppState {
     /// channel takes them away; and how many arrived while the window was
     /// not looked at (for the window title).
     pub notifications: RefCell<crate::notifications::Shown>,
+    /// Interface sounds: Discord's, downloaded, and what is ringing.
+    pub sounds: crate::sounds::Sounds,
     /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
     /// slider to reopen at the chosen level.
     pub user_volumes: RefCell<HashMap<Snowflake, f32>>,
@@ -844,6 +846,7 @@ impl AppState {
             video_info: RefCell::default(),
             incoming_call: RefCell::new(None),
             notifications: RefCell::new(Default::default()),
+            sounds: Default::default(),
             user_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),
             typing_label,

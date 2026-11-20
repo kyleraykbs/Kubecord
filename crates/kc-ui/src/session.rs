@@ -408,6 +408,8 @@ pub enum UiEvent {
     },
     VoiceLeft {
         account: AccountId,
+        /// It ended because the connection could not be kept.
+        lost: bool,
     },
     VoiceSpeaking {
         account: AccountId,
@@ -428,6 +430,9 @@ pub enum UiEvent {
         account: AccountId,
         channel_id: Snowflake,
         ringing: bool,
+        /// Whether the call is ringing anyone at all (when we call, our
+        /// ring stops once nobody is rung any more).
+        anyone: bool,
     },
     StreamStarted {
         account: AccountId,
@@ -775,6 +780,7 @@ fn spawn_account(
             user_volumes: HashMap::new(),
             voice_retries: 0,
             relocating: false,
+            call_lost: false,
             stream_retries: 0,
             stream_carry: None,
         };
@@ -879,6 +885,7 @@ fn spawn_account(
                                                 account,
                                                 channel_id,
                                                 ringing: ringing.contains(&me) && !in_call,
+                                                anyone: !ringing.is_empty(),
                                             })
                                             .await;
                                     }
@@ -892,6 +899,7 @@ fn spawn_account(
                                                 account,
                                                 channel_id,
                                                 ringing: false,
+                                                anyone: false,
                                             })
                                             .await;
                                     }
@@ -974,6 +982,9 @@ fn spawn_account(
 
 /// Live voice state for one account, owned by its account loop.
 struct VoiceRuntime {
+    /// The call is ending because it could not be kept (for the "call
+    /// disconnected" sound rather than the leave sound).
+    call_lost: bool,
     handle: GatewayHandle,
     self_user_id: Option<Snowflake>,
     pending_join: Option<(Option<Snowflake>, Snowflake)>,
@@ -2544,6 +2555,7 @@ async fn give_up_call(
     voice
         .handle
         .update_voice_state(guild_id, None, voice.muted, voice.deafened, false);
+    voice.call_lost = true;
     teardown_voice(voice, account, ui, true, why).await;
     let _ = ui
         .send(UiEvent::VoiceError {
@@ -3286,8 +3298,9 @@ async fn teardown_voice(
     voice.deafened = false;
     voice.camera = false;
     voice.generation = voice.generation.wrapping_add(1);
+    let lost = std::mem::take(&mut voice.call_lost);
     if notify && had_connection {
-        let _ = ui.send(UiEvent::VoiceLeft { account }).await;
+        let _ = ui.send(UiEvent::VoiceLeft { account, lost }).await;
     }
 }
 
@@ -3386,6 +3399,7 @@ mod tests {
             user_volumes: HashMap::new(),
             voice_retries: 0,
             relocating: false,
+            call_lost: false,
             stream_retries: 0,
             stream_carry: None,
         }

@@ -319,6 +319,7 @@ impl AppState {
                 .unwrap_or(false);
             if !others_in_call {
                 self.spawn(async move { http.ring_call(channel_id).await }, |_, _| {});
+                self.start_ring(channel_id, true);
             }
         }
         self.render_voice_view(channel_id);
@@ -1240,11 +1241,15 @@ impl AppState {
                 let mut current = app.incoming_call.borrow_mut();
                 if current.as_ref().is_some_and(|(_, dialog)| dialog == closed) {
                     current.take();
+                    app.stop_ring(false);
                 }
             }
         });
         dialog.present(Some(&self.window));
         *self.incoming_call.borrow_mut() = Some((channel_id, dialog));
+        if !self.do_not_disturb() {
+            self.start_ring(channel_id, false);
+        }
     }
 
     /// Takes the ringing card for `channel_id` away, if it shows.
@@ -1252,6 +1257,7 @@ impl AppState {
         use libadwaita::prelude::*;
 
         self.withdraw_call_notification(channel_id);
+        self.stop_ring(false);
         let dialog = {
             let mut current = self.incoming_call.borrow_mut();
             if current

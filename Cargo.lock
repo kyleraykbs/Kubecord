@@ -2042,6 +2042,7 @@ dependencies = [
  "kc-state",
  "kc-voice",
  "libadwaita",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

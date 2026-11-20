@@ -11,6 +11,7 @@ pub mod portal;
 pub mod processing;
 pub mod receive;
 pub mod share_audio;
+pub mod sound;
 pub mod video;
 
 pub use error::{Error, Result};

@@ -171,6 +171,12 @@ pub struct CapturePreferences {
     /// Show the number of new notifications in the window title until the
     /// window is looked at again.
     pub notify_mark_window: bool,
+    /// Play interface sounds at all.
+    pub sounds_enabled: bool,
+    /// Their volume, 0.0 to 1.0.
+    pub sound_volume: f32,
+    /// Sounds switched off, by [`crate::sounds::SoundEvent::key`].
+    pub sounds_off: Vec<String>,
 }
 
 pub const NOISE_SUPPRESSION: [&str; 3] = ["Off", "Standard", "Strong"];
@@ -248,6 +254,9 @@ impl Default for CapturePreferences {
             notify_roles: true,
             notify_calls: true,
             notify_mark_window: true,
+            sounds_enabled: true,
+            sound_volume: 0.6,
+            sounds_off: Vec::new(),
         }
     }
 }
@@ -517,6 +526,9 @@ impl CapturePreferences {
         }
         if !VOLUME_BOOST_CAPS.contains(&self.volume_boost_cap) {
             self.volume_boost_cap = 3;
+        }
+        if !self.sound_volume.is_finite() || !(0.0..=1.0).contains(&self.sound_volume) {
+            self.sound_volume = 0.6;
         }
         if self.noise_suppression > 2 {
             self.noise_suppression = 0;
