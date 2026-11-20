@@ -20,7 +20,8 @@
 //! looping GIF.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use gtk::gdk;
@@ -32,6 +33,55 @@ use gtk::prelude::*;
 /// small) delay; browsers clamp to about this, so a "0 ms" GIF animates at a
 /// sane rate instead of spinning the timer.
 const MIN_DELAY: Duration = Duration::from_millis(20);
+
+/// Whether the window is focused. GIFs pause when it is not, to save work.
+static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
+/// Whether to keep animating even when the window is unfocused (a setting,
+/// off by default).
+static ANIMATE_UNFOCUSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether animated GIFs should be running right now.
+fn awake() -> bool {
+    WINDOW_FOCUSED.load(Ordering::Relaxed) || ANIMATE_UNFOCUSED.load(Ordering::Relaxed)
+}
+
+thread_local! {
+    /// Every live GIF player, so a focus or setting change can pause or
+    /// resume them all at once.
+    static PLAYERS: RefCell<Vec<Weak<GifPlayer>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Re-evaluates every GIF player against the current awake state, pruning
+/// dropped ones.
+fn refresh_all() {
+    let live: Vec<Rc<GifPlayer>> = PLAYERS.with_borrow_mut(|players| {
+        players.retain(|weak| weak.upgrade().is_some());
+        players.iter().filter_map(Weak::upgrade).collect()
+    });
+    for player in live {
+        player.refresh();
+    }
+}
+
+/// Called when the window gains or loses focus; pauses or resumes GIFs unless
+/// [`set_animate_unfocused`] keeps them running.
+pub(crate) fn set_window_focused(focused: bool) {
+    if WINDOW_FOCUSED.swap(focused, Ordering::Relaxed) != focused {
+        refresh_all();
+    }
+}
+
+/// Sets whether GIFs animate while the window is unfocused.
+pub(crate) fn set_animate_unfocused(on: bool) {
+    if ANIMATE_UNFOCUSED.swap(on, Ordering::Relaxed) != on {
+        refresh_all();
+    }
+}
+
+/// Whether GIF-style media should animate while the window is unfocused.
+pub(crate) fn animate_unfocused() -> bool {
+    ANIMATE_UNFOCUSED.load(Ordering::Relaxed)
+}
 
 /// Decodes `bytes` as a GIF animation. Returns `None` if the bytes are not a
 /// multi-frame animated GIF (not a GIF at all, a single still frame, or
@@ -109,12 +159,16 @@ impl GifPlayer {
             running: Cell::new(false),
         });
 
-        // Run only while mapped: an offscreen gif (collapsed, scrolled away,
-        // in a closed popover) stops its timer.
+        // So a focus or setting change can pause/resume it.
+        PLAYERS.with_borrow_mut(|players| players.push(Rc::downgrade(&player)));
+
+        // Run only while mapped and awake: an offscreen gif (collapsed,
+        // scrolled away, in a closed popover) or an unfocused window (unless
+        // the setting keeps it going) stops its timer.
         let weak = Rc::downgrade(&player);
         picture.connect_map(move |_| {
             if let Some(player) = weak.upgrade() {
-                player.start();
+                player.refresh();
             }
         });
         let weak = Rc::downgrade(&player);
@@ -129,10 +183,22 @@ impl GifPlayer {
         picture.connect_destroy(move |_| {
             keep.stop();
         });
-        if picture.is_mapped() {
-            player.start();
-        }
+        player.refresh();
         Some(player)
+    }
+
+    /// Runs the timer when the picture is mapped and GIFs are awake (window
+    /// focused, or the unfocused-animation setting is on); otherwise stops it.
+    fn refresh(self: &Rc<Self>) {
+        let mapped = self
+            .picture
+            .upgrade()
+            .is_some_and(|picture| picture.is_mapped());
+        if mapped && awake() {
+            self.start();
+        } else {
+            self.stop();
+        }
     }
 
     fn start(self: &Rc<Self>) {
@@ -178,7 +244,13 @@ impl GifPlayer {
         {
             picture.set_paintable(Some(&texture));
         }
-        self.schedule_next();
+        // Stop if the window went unfocused since the last frame; a focus or
+        // setting change resumes it via `refresh`.
+        if awake() {
+            self.schedule_next();
+        } else {
+            self.stop();
+        }
     }
 }
 

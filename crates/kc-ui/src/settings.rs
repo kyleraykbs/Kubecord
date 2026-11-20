@@ -160,6 +160,10 @@ pub struct CapturePreferences {
     /// view. On by default.
     #[serde(default = "default_true")]
     pub unload_distant_messages: bool,
+    /// Keep GIFs animating even when the window is not focused. Off by default
+    /// (GIFs pause when unfocused, to save work).
+    #[serde(default)]
+    pub animate_gifs_unfocused: bool,
     /// Noise suppression: 0 off, 1 standard (WebRTC), 2 strong (RNNoise).
     pub noise_suppression: u32,
     pub echo_cancellation: bool,
@@ -259,6 +263,7 @@ impl Default for CapturePreferences {
             log_diagnostics: false,
             use_24_hour: false,
             unload_distant_messages: true,
+            animate_gifs_unfocused: false,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,
@@ -423,6 +428,7 @@ impl CapturePreferences {
         crate::session::set_self_preview(self.self_preview);
         crate::content::set_24_hour(self.use_24_hour);
         kc_state::set_unload_distant(self.unload_distant_messages);
+        crate::animation::set_animate_unfocused(self.animate_gifs_unfocused);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         crate::logging::set_diagnostics(self.log_diagnostics);
         kc_media::devices::set_input_gain(self.input_volume);

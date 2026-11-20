@@ -579,8 +579,10 @@ impl AppState {
         // channel.
         let app = self.clone();
         self.window.connect_is_active_notify(move |window| {
-            // GIFs play only while the window is focused.
+            // GIFs (looping videos and animated gifs) play only while the
+            // window is focused, unless the setting keeps them running.
             app.queue_players_update();
+            crate::animation::set_window_focused(window.is_active());
             if window.is_active() && app.chat.borrow().at_bottom {
                 let channel = app.chat.borrow().channel;
                 if let Some(channel) = channel {

@@ -559,6 +559,25 @@ impl AppState {
         });
         history.add(&unload);
         page.append(&history);
+
+        let gifs = adw::PreferencesGroup::new();
+        gifs.set_title("GIFs");
+        let unfocused = adw::SwitchRow::new();
+        unfocused.set_title("Animate GIFs While Unfocused");
+        unfocused.set_subtitle(
+            "Keep GIFs moving when kylecord is not the focused window. Off by default; GIFs pause when unfocused to save work.",
+        );
+        unfocused.set_subtitle_lines(0);
+        unfocused.set_active(self.capture.borrow().animate_gifs_unfocused);
+        let app = self.clone();
+        unfocused.connect_active_notify(move |row| {
+            let on = row.is_active();
+            // Apply live (update_prefs only re-applies device settings).
+            crate::animation::set_animate_unfocused(on);
+            app.update_prefs(|prefs| prefs.animate_gifs_unfocused = on);
+        });
+        gifs.add(&unfocused);
+        page.append(&gifs);
         page
     }
 

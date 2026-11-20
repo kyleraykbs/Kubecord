@@ -150,7 +150,9 @@ impl AppState {
     }
 
     fn update_players(&self) {
-        let active = self.window.is_active();
+        // Unfocused windows pause looping videos too, unless the setting keeps
+        // GIF-style media running.
+        let active = self.window.is_active() || crate::animation::animate_unfocused();
         self.players.borrow_mut().retain(|(widget, player)| {
             let (Some(widget), Some(player)) = (widget.upgrade(), player.upgrade()) else {
                 return false;
