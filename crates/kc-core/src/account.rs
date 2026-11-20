@@ -137,6 +137,14 @@ impl AccountStore {
         Ok(self.accounts.remove(index))
     }
 
+    /// Removes the account with this exact token, whether or not its
+    /// `user_id` is known yet. Returns `true` if one was removed.
+    pub fn remove_by_token(&mut self, token: &Token) -> bool {
+        let before = self.accounts.len();
+        self.accounts.retain(|account| &account.token != token);
+        self.accounts.len() != before
+    }
+
     pub fn get(&self, user_id: Snowflake) -> Option<&Account> {
         self.accounts
             .iter()
@@ -177,6 +185,30 @@ mod tests {
         assert_eq!(loaded.accounts()[0].token.expose(), "abc");
 
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn remove_by_token_drops_only_the_matching_account() {
+        let mut store = AccountStore::load_from(temp_path("remove-token")).unwrap();
+        store.upsert(Account {
+            user_id: Some(Snowflake(7)),
+            token: Token::new("keep"),
+            label: None,
+        });
+        // A second account whose id is not known yet (never reached READY).
+        store.upsert(Account {
+            user_id: None,
+            token: Token::new("pending"),
+            label: Some("pending".into()),
+        });
+        assert_eq!(store.accounts().len(), 2);
+        // Removing a token that is not present changes nothing.
+        assert!(!store.remove_by_token(&Token::new("absent")));
+        assert_eq!(store.accounts().len(), 2);
+        // The pending account (no user_id) is removable by token.
+        assert!(store.remove_by_token(&Token::new("pending")));
+        assert_eq!(store.accounts().len(), 1);
+        assert_eq!(store.accounts()[0].token.expose(), "keep");
     }
 
     #[test]

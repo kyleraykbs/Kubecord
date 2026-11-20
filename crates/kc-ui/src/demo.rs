@@ -44,6 +44,10 @@
 //! - `dm-hover` (both DM rows drawn as hovered, showing their ×),
 //!   `dm-leave` (the group's × clicked: the confirmation), `dm-deleted`
 //!   (the open DM is closed elsewhere: CHANNEL_DELETE arrives).
+//! - `accounts` (the account menu with two accounts, each with a Log Out
+//!   button, saved to `<screenshot>.popover.png`), `accounts-logout`
+//!   (the Log Out confirmation dialog) and `accounts-done` (the active
+//!   account logged out; prints the resulting session/account/page state).
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -350,6 +354,16 @@ impl AppState {
 
         {
             let mut model = self.model.borrow_mut();
+            // List the demo account (and, for the account-menu demos, a
+            // second one) so the account menu and its Log Out buttons show.
+            model.accounts.upsert(session.account.clone());
+            if mode.starts_with("accounts") {
+                model.accounts.upsert(Account {
+                    user_id: Some(Snowflake::new(ADA)),
+                    token: Token::new("kylecord-demo-second"),
+                    label: Some("Ada".to_owned()),
+                });
+            }
             model.sessions.insert(account, session);
             model.active = Some(account);
         }
@@ -575,6 +589,51 @@ impl AppState {
                 let mode = mode.to_owned();
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     app.demo_moderation(&mode);
+                });
+            }
+            // The account menu with its per-account Log Out buttons
+            // (saved to `<screenshot>.popover.png`), or the Log Out
+            // confirmation dialog (an in-window dialog, in the main shot).
+            "accounts" | "accounts-logout" | "accounts-done" => {
+                self.open_channel(general);
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                    app.render_account_controls();
+                    if mode == "accounts-done" {
+                        // Actually log the active account out and report the
+                        // resulting state, to check the teardown path.
+                        app.log_out_account(account);
+                        let (sessions, accounts, page) = {
+                            let model = app.model.borrow();
+                            (
+                                model.sessions.len(),
+                                model.accounts.accounts().len(),
+                                app.stack.visible_child_name(),
+                            )
+                        };
+                        eprintln!(
+                            "demo: after logout sessions={sessions} accounts={accounts} page={page:?}"
+                        );
+                        return;
+                    }
+                    if mode == "accounts-logout" {
+                        app.confirm_log_out(account, "Demo User");
+                        return;
+                    }
+                    if let Some(popover) = app.account_button.popover() {
+                        popover.set_autohide(false);
+                        popover.popup();
+                        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                            glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                                let _ = crate::app::save_window_png(
+                                    &popover,
+                                    std::path::Path::new(&format!("{path}.popover.png")),
+                                )
+                                .map_err(|error| eprintln!("demo: account popover: {error}"));
+                            });
+                        }
+                    }
                 });
             }
             "chat-sending" => {

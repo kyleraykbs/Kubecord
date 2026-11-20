@@ -284,6 +284,11 @@ pub enum Command {
         token: Token,
         store: Store,
     },
+    /// Stops the account loop: its voice/stream are torn down and its
+    /// gateway socket and task are closed. Used when logging an account out.
+    StopAccount {
+        account: AccountId,
+    },
     FetchHistory {
         account: AccountId,
         http: HttpClient,
@@ -545,6 +550,18 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             token,
             store,
         } => spawn_account(account, token, store, ui),
+        Command::StopAccount { account } => {
+            // Dropping the voice sender closes the account loop's command
+            // channel, so the loop ends, tears down any call and aborts the
+            // gateway task. Removing the gateway handle too stops any
+            // further gateway sends immediately.
+            if let Ok(mut registry) = VOICE_COMMANDS.lock() {
+                registry.remove(&account);
+            }
+            if let Ok(mut registry) = GATEWAYS.lock() {
+                registry.remove(&account);
+            }
+        }
         Command::FetchHistory {
             account,
             http,
@@ -778,7 +795,7 @@ fn spawn_account(
     }
 
     tokio::spawn(async move {
-        let (handle, mut gateway_rx, _gateway_task) = Gateway::new(token).start();
+        let (handle, mut gateway_rx, gateway_task) = Gateway::new(token).start();
         if let Ok(mut registry) = GATEWAYS.lock() {
             registry.insert(account, handle.clone());
         }
@@ -1015,6 +1032,10 @@ fn spawn_account(
         if let Ok(mut registry) = GATEWAYS.lock() {
             registry.remove(&account);
         }
+        // The gateway reconnects on its own after a drop, so dropping its
+        // handle is not enough: abort the task so a stopped account leaves
+        // no socket or heartbeat behind.
+        gateway_task.abort();
     });
 }
 

@@ -827,6 +827,99 @@ impl AppState {
         self.render_all();
     }
 
+    /// Confirms logging an account out (it drops the saved token) before
+    /// doing it, in an in-window dialog.
+    pub(crate) fn confirm_log_out(self: &Rc<Self>, id: AccountId, name: &str) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Log out of {name}?")),
+            Some(
+                "This removes the saved login from this device. You will need to sign in again to use it.",
+            ),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("log-out", "Log Out")]);
+        dialog.set_response_appearance("log-out", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let app = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "log-out" {
+                app.log_out_account(id);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// Logs an account out: stops its running session (gateway + any voice),
+    /// removes it from the on-disk store, and if it was active switches to
+    /// another signed-in account or shows the login page.
+    pub(crate) fn log_out_account(self: &Rc<Self>, id: AccountId) {
+        // Find the account's token (to remove it from the store and stop its
+        // loop) and whether it is the active one. The token is only used to
+        // identify the account; it is never printed.
+        let (token, was_active, next_active) = {
+            let mut model = self.model.borrow_mut();
+            let token = model
+                .accounts
+                .accounts()
+                .iter()
+                .find(|account| session::account_id(&account.token) == id)
+                .map(|account| account.token.clone())
+                .or_else(|| {
+                    model
+                        .sessions
+                        .get(&id)
+                        .map(|session| session.account.token.clone())
+                });
+            let was_active = model.active == Some(id);
+            // Stop and drop the session.
+            model.sessions.remove(&id);
+            // Remove from the store by token (works even before READY).
+            if let Some(token) = &token {
+                model.accounts.remove_by_token(token);
+            }
+            // If it was active, fall back to any remaining session.
+            let next_active = if was_active {
+                let next = model.sessions.keys().next().copied();
+                model.active = next;
+                next
+            } else {
+                None
+            };
+            (token, was_active, next_active)
+        };
+
+        // Tear down the account's gateway and voice loop.
+        if token.is_some() {
+            let _ = self.cmd_tx.try_send(Command::StopAccount { account: id });
+        }
+
+        // Persist the smaller store.
+        if let Some(error) = {
+            let model = self.model.borrow();
+            model.accounts.save().err()
+        } {
+            self.set_status(&format!("could not save accounts: {error}"));
+        }
+
+        if was_active {
+            match next_active {
+                Some(_) => {
+                    self.chat.borrow_mut().channel = None;
+                    self.render_all();
+                }
+                None => {
+                    // No accounts left running: go back to the login page.
+                    self.account_button.set_visible(false);
+                    self.show_login();
+                }
+            }
+        } else {
+            // Only the account list changed; refresh the menu.
+            self.render_account_controls();
+        }
+        self.set_status("Logged out");
+    }
+
     pub(crate) fn account_name(&self, account: &Account) -> String {
         let id = session::account_id(&account.token);
         let from_session = {
@@ -1322,10 +1415,14 @@ impl AppState {
 
         for account in &accounts {
             let id = session::account_id(&account.token);
+            let account_name = self.account_name(account);
+            // The row: a wide switch button and a trailing Log Out button.
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let button = gtk::Button::new();
             button.add_css_class("flat");
+            button.set_hexpand(true);
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let name = label(&self.account_name(account), &[]);
+            let name = label(&account_name, &[]);
             name.set_hexpand(true);
             row.append(&name);
             if active == Some(id) {
@@ -1338,7 +1435,21 @@ impl AppState {
                 popover.popdown();
                 app.switch_account(id);
             });
-            self.account_popover_box.append(&button);
+            line.append(&button);
+
+            let log_out = gtk::Button::from_icon_name("system-log-out-symbolic");
+            log_out.add_css_class("flat");
+            log_out.set_tooltip_text(Some("Log Out"));
+            log_out.set_valign(gtk::Align::Center);
+            let app = self.clone();
+            let popover = self.account_popover.clone();
+            let name = account_name.clone();
+            log_out.connect_clicked(move |_| {
+                popover.popdown();
+                app.confirm_log_out(id, &name);
+            });
+            line.append(&log_out);
+            self.account_popover_box.append(&line);
         }
 
         let add = menu_item("Add Account…");
