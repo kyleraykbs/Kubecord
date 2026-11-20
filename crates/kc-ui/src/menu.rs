@@ -223,6 +223,12 @@ impl AppState {
         if ctx.in_voice && !ctx.is_me {
             separator();
             menu.append(&self.volume_control(account, user_id));
+            // A second slider for their shared stream's sound, offered while
+            // they are screen-sharing (their stream rides a separate mixer
+            // entry from their voice).
+            if ctx.streaming {
+                menu.append(&self.stream_volume_control(account, user_id));
+            }
             let muted = self
                 .user_volumes
                 .borrow()
@@ -365,28 +371,63 @@ impl AppState {
         Some(popover)
     }
 
-    /// A labelled slider for one person's local playback volume, from
+    /// A labelled slider for one person's local voice playback volume, from
     /// silent up to the boost allowed in Settings → Features.
     fn volume_control(
         self: &Rc<Self>,
         account: crate::session::AccountId,
         user_id: Snowflake,
     ) -> gtk::Box {
+        let start = self
+            .user_volumes
+            .borrow()
+            .get(&user_id)
+            .copied()
+            .unwrap_or(1.0);
+        let app = self.clone();
+        self.playback_slider("User Volume", start, move |volume| {
+            app.set_user_volume(account, user_id, volume);
+        })
+    }
+
+    /// A labelled slider for the sound of one person's shared stream, on the
+    /// same scale as the voice slider but a separate, remembered value.
+    fn stream_volume_control(
+        self: &Rc<Self>,
+        account: crate::session::AccountId,
+        user_id: Snowflake,
+    ) -> gtk::Box {
+        let start = self
+            .stream_volumes
+            .borrow()
+            .get(&user_id)
+            .copied()
+            .unwrap_or(1.0);
+        let app = self.clone();
+        self.playback_slider("Stream Volume", start, move |volume| {
+            app.set_stream_volume(account, user_id, volume);
+        })
+    }
+
+    /// Builds one playback-volume slider: `start` is the current value
+    /// (1.0 = unchanged); `on_change` is called with the new fraction. The
+    /// top is the boost allowed in Settings → Features.
+    fn playback_slider(
+        self: &Rc<Self>,
+        caption: &str,
+        start: f32,
+        on_change: impl Fn(f64) + 'static,
+    ) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
         row.set_margin_start(8);
         row.set_margin_end(8);
         row.set_margin_top(4);
-        row.append(&label("User Volume", &["caption", "dim-label"]));
+        row.append(&label(caption, &["caption", "dim-label"]));
         let most = f64::from(self.capture.borrow().volume_boost_cap) * 100.0;
         let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, most, 1.0);
         scale.set_hexpand(true);
         scale.set_draw_value(false);
-        let current = self
-            .user_volumes
-            .borrow()
-            .get(&user_id)
-            .map(|volume| (*volume as f64 * 100.0).clamp(0.0, most))
-            .unwrap_or(100.0);
+        let current = (f64::from(start) * 100.0).clamp(0.0, most);
         scale.set_value(current);
         let percent = gtk::Label::new(Some(&format!("{current:.0}%")));
         percent.add_css_class("caption");
@@ -401,16 +442,16 @@ impl AppState {
         scale.connect_value_changed(move |scale| {
             shown.set_label(&format!("{:.0}%", scale.value()));
         });
-        let app = self.clone();
         scale.connect_value_changed(move |scale| {
-            app.set_user_volume(account, user_id, scale.value() / 100.0);
+            on_change(scale.value() / 100.0);
         });
         row.append(&scale);
         row.append(&percent);
         row
     }
 
-    /// Records and applies a per-user playback volume (1.0 = unchanged).
+    /// Records and applies a per-user voice playback volume (1.0 =
+    /// unchanged).
     pub(crate) fn set_user_volume(
         self: &Rc<Self>,
         account: crate::session::AccountId,
@@ -421,6 +462,24 @@ impl AppState {
             .borrow_mut()
             .insert(user_id, volume as f32);
         let _ = self.cmd_tx.try_send(Command::SetUserVolume {
+            account,
+            user_id,
+            volume: volume as f32,
+        });
+    }
+
+    /// Records and applies a per-user stream (screen-share sound) playback
+    /// volume (1.0 = unchanged), kept apart from their voice.
+    pub(crate) fn set_stream_volume(
+        self: &Rc<Self>,
+        account: crate::session::AccountId,
+        user_id: Snowflake,
+        volume: f64,
+    ) {
+        self.stream_volumes
+            .borrow_mut()
+            .insert(user_id, volume as f32);
+        let _ = self.cmd_tx.try_send(Command::SetStreamVolume {
             account,
             user_id,
             volume: volume as f32,

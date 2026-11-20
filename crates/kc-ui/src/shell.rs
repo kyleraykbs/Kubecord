@@ -121,9 +121,12 @@ pub(crate) struct AppState {
     pub notifications: RefCell<crate::notifications::Shown>,
     /// Interface sounds: Discord's, downloaded, and what is ringing.
     pub sounds: crate::sounds::Sounds,
-    /// Remembered per-user playback volumes (1.0 = unchanged), for the menu
-    /// slider to reopen at the chosen level.
+    /// Remembered per-user voice playback volumes (1.0 = unchanged), for the
+    /// menu slider to reopen at the chosen level.
     pub user_volumes: RefCell<HashMap<Snowflake, f32>>,
+    /// Remembered per-user stream (screen-share sound) playback volumes
+    /// (1.0 = unchanged), kept apart from their voice.
+    pub stream_volumes: RefCell<HashMap<Snowflake, f32>>,
     /// The last voice channel clicked and when, to recognise double-clicks.
     pub last_channel_click: Cell<Option<(Snowflake, std::time::Instant)>>,
     pub typing_label: gtk::Label,
@@ -792,6 +795,7 @@ impl AppState {
             notifications: RefCell::new(Default::default()),
             sounds: Default::default(),
             user_volumes: RefCell::new(HashMap::new()),
+            stream_volumes: RefCell::new(HashMap::new()),
             last_channel_click: Cell::new(None),
             typing_label,
             composer_area,

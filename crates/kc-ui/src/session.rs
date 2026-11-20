@@ -204,9 +204,15 @@ pub enum VoiceCommand {
     Leave,
     SetMute(bool),
     SetDeafen(bool),
-    /// Local playback volume for one participant (and their stream audio):
-    /// `0.0` silences them, `1.0` is unchanged.
+    /// Local playback volume for one participant's voice: `0.0` silences
+    /// them, `1.0` is unchanged.
     SetUserVolume {
+        user_id: Snowflake,
+        volume: f32,
+    },
+    /// Local playback volume for one participant's shared stream sound,
+    /// kept apart from their voice.
+    SetStreamVolume {
         user_id: Snowflake,
         volume: f32,
     },
@@ -305,6 +311,11 @@ pub enum Command {
         deafened: bool,
     },
     SetUserVolume {
+        account: AccountId,
+        user_id: Snowflake,
+        volume: f32,
+    },
+    SetStreamVolume {
         account: AccountId,
         user_id: Snowflake,
         volume: f32,
@@ -586,6 +597,18 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         } => {
             forward_voice(account, VoiceCommand::SetUserVolume { user_id, volume }, ui).await;
         }
+        Command::SetStreamVolume {
+            account,
+            user_id,
+            volume,
+        } => {
+            forward_voice(
+                account,
+                VoiceCommand::SetStreamVolume { user_id, volume },
+                ui,
+            )
+            .await;
+        }
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
@@ -778,6 +801,7 @@ fn spawn_account(
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
+            stream_volumes: HashMap::new(),
             voice_retries: 0,
             relocating: false,
             call_lost: false,
@@ -1017,8 +1041,12 @@ struct VoiceRuntime {
     /// Someone else's stream being watched.
     watch: Option<Watch>,
     watch_generation: u64,
-    /// Local per-user playback volumes, re-applied after each (re)connect.
+    /// Local per-user voice playback volumes, re-applied after each
+    /// (re)connect.
     user_volumes: HashMap<Snowflake, f32>,
+    /// Local per-user stream (screen-share sound) playback volumes, kept
+    /// apart from their voice and re-applied after each (re)connect.
+    stream_volumes: HashMap<Snowflake, f32>,
     /// Reconnects of the call since it was last ready.
     voice_retries: u32,
     /// The call lost its voice server and waits for the gateway to name
@@ -2231,6 +2259,8 @@ async fn maybe_connect(
                 // Re-apply any per-user volumes chosen before this connect.
                 for (user_id, volume) in &voice.user_volumes {
                     audio.set_volume(user_id.get(), *volume);
+                }
+                for (user_id, volume) in &voice.stream_volumes {
                     audio.set_volume(stream_audio_key(*user_id), *volume);
                 }
             }
@@ -2754,6 +2784,11 @@ async fn apply_voice_command(
             voice.user_volumes.insert(user_id, volume);
             if let Some(audio) = voice.connection.as_ref().and_then(|c| c.audio.as_ref()) {
                 audio.set_volume(user_id.get(), volume);
+            }
+        }
+        VoiceCommand::SetStreamVolume { user_id, volume } => {
+            voice.stream_volumes.insert(user_id, volume);
+            if let Some(audio) = voice.connection.as_ref().and_then(|c| c.audio.as_ref()) {
                 // The same person's shared stream sound rides a separate key.
                 audio.set_volume(stream_audio_key(user_id), volume);
             }
@@ -3078,6 +3113,9 @@ async fn maybe_start_watch(
     let audio = connection.audio.clone();
     let owner = watch.owner;
     let generation = watch.generation;
+    // The stream's playback volume chosen for this person, to set on the
+    // mixer entry once its first packet has created it.
+    let stream_volume = voice.stream_volumes.get(&owner).copied();
     let params = VoiceParams {
         server_id: rtc_id,
         channel_id: connection.channel_id,
@@ -3102,6 +3140,9 @@ async fn maybe_start_watch(
             let control = control_tx.clone();
             tokio::spawn(async move {
                 let mut videos = VideoFeeds::new(account, true, ui.clone());
+                // Apply the saved stream volume once its first packet has
+                // created the mixer entry (new entries default to 100%).
+                let mut volume_pending = stream_volume;
                 while let Some(event) = event_rx.recv().await {
                     match event {
                         VoiceEvent::Video {
@@ -3119,7 +3160,11 @@ async fn maybe_start_watch(
                             ..
                         } => {
                             if let Some(audio) = &audio {
-                                audio.push_remote(stream_audio_key(user_id), sequence, &opus);
+                                let key = stream_audio_key(user_id);
+                                audio.push_remote(key, sequence, &opus);
+                                if let Some(volume) = volume_pending.take() {
+                                    audio.set_volume(key, volume);
+                                }
                             }
                         }
                         VoiceEvent::Ready { .. } => tracing::info!("watched stream connected"),
@@ -3397,6 +3442,7 @@ mod tests {
             watch: None,
             watch_generation: 0,
             user_volumes: HashMap::new(),
+            stream_volumes: HashMap::new(),
             voice_retries: 0,
             relocating: false,
             call_lost: false,
@@ -3588,6 +3634,51 @@ mod tests {
         };
         assert_eq!(voice.own_flags(Snowflake(12)), Some((true, true)));
         assert_eq!(voice.own_flags(Snowflake(13)), None);
+    }
+
+    #[test]
+    fn a_users_voice_and_stream_audio_ride_separate_keys() {
+        // The mixer keeps a person's voice and their shared stream sound on
+        // different keys, so turning one down must not move the other.
+        let user = Snowflake(7);
+        assert_ne!(user.get(), stream_audio_key(user));
+    }
+
+    #[tokio::test]
+    async fn voice_and_stream_volumes_are_stored_independently() {
+        let (handle, _sent) = GatewayHandle::detached();
+        let mut voice = runtime(handle);
+        let (ui_tx, _ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let user = Snowflake(7);
+        // Setting the voice volume leaves the stream volume at its default.
+        apply_voice_command(
+            &mut voice,
+            VoiceCommand::SetUserVolume {
+                user_id: user,
+                volume: 0.3,
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.user_volumes.get(&user), Some(&0.3));
+        assert_eq!(voice.stream_volumes.get(&user), None);
+        // Setting the stream volume does not disturb the voice one.
+        apply_voice_command(
+            &mut voice,
+            VoiceCommand::SetStreamVolume {
+                user_id: user,
+                volume: 1.8,
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.user_volumes.get(&user), Some(&0.3));
+        assert_eq!(voice.stream_volumes.get(&user), Some(&1.8));
     }
 
     /// A voice runtime in a call in channel 12 of guild 5, its connection

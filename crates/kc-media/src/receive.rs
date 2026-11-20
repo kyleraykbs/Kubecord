@@ -631,6 +631,31 @@ mod tests {
     }
 
     #[test]
+    fn voice_and_stream_keys_hold_independent_volumes() {
+        // A person's voice and their shared stream sound ride separate mixer
+        // keys (the UI derives one from the other), so each keeps its own
+        // volume: silencing one leaves the other untouched.
+        const VOICE: u64 = 1;
+        const STREAM: u64 = 1 | 1 << 63;
+        let packets = tone_packets(6, false);
+        let mut mixer = Mixer::new();
+        for (index, packet) in packets.iter().enumerate() {
+            mixer.push(VOICE, index as u16, packet).unwrap();
+            mixer.push(STREAM, index as u16, packet).unwrap();
+        }
+        // Setting one key's volume must not change the other's.
+        mixer.speakers.get_mut(&VOICE).unwrap().volume = 0.25;
+        mixer.speakers.get_mut(&STREAM).unwrap().volume = 2.0;
+        assert_eq!(mixer.speakers[&VOICE].volume, 0.25);
+        assert_eq!(mixer.speakers[&STREAM].volume, 2.0);
+
+        // Silence the stream: the voice is still heard.
+        mixer.speakers.get_mut(&STREAM).unwrap().volume = 0.0;
+        mixer.speakers.get_mut(&VOICE).unwrap().volume = 1.0;
+        assert!((0..6).any(|_| loud(&mixer.mix())));
+    }
+
+    #[test]
     fn garbage_does_not_stop_playback() {
         let packets = tone_packets(8, false);
         let mut mixer = Mixer::new();
