@@ -10,7 +10,7 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use kc_core::{Account, AccountStore, Snowflake, Token};
+use kc_core::{Account, AccountStore, Snowflake};
 use kc_media::portal::{CameraAccess, CameraChoice};
 use kc_state::{Channel, StoreEvent};
 
@@ -447,19 +447,7 @@ pub(crate) fn save_window_png(
 
 impl AppState {
     pub(crate) fn connect_signals(self: &Rc<Self>) {
-        let app = self.clone();
-        self.login_button
-            .connect_clicked(move |_| app.submit_login());
-        let app = self.clone();
-        self.token_entry
-            .connect_activate(move |_| app.submit_login());
-        let app = self.clone();
-        self.label_entry
-            .connect_activate(move |_| app.submit_login());
-        let app = self.clone();
-        self.login_cancel.connect_clicked(move |_| {
-            app.stack.set_visible_child_name("chat");
-        });
+        self.connect_login();
         // The banner's button is only offered for a signed-out account.
         let app = self.clone();
         self.banner.connect_button_clicked(move |_| {
@@ -708,9 +696,8 @@ impl AppState {
     pub(crate) fn start_existing(self: &Rc<Self>) {
         let accounts = self.model.borrow().accounts.accounts().to_vec();
         if accounts.is_empty() {
-            self.stack.set_visible_child_name("login");
             self.account_button.set_visible(false);
-            self.token_entry.grab_focus();
+            self.show_login();
             return;
         }
 
@@ -785,37 +772,6 @@ impl AppState {
             .save()
             .err()
             .map(|error| format!("could not save accounts: {error}"))
-    }
-
-    pub(crate) fn submit_login(self: &Rc<Self>) {
-        let token_text = self.token_entry.text();
-        let token_text = token_text.trim();
-        if token_text.is_empty() {
-            self.login_error.set_label("Enter a token");
-            self.login_error.set_visible(true);
-            return;
-        }
-        let label = {
-            let text = self.label_entry.text();
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_owned())
-        };
-        self.login_error.set_visible(false);
-        self.login_button.set_sensitive(false);
-        let _ = self.cmd_tx.try_send(Command::Login {
-            token: Token::new(token_text),
-            label,
-        });
-    }
-
-    pub(crate) fn show_login(self: &Rc<Self>) {
-        self.login_error.set_visible(false);
-        self.login_button.set_sensitive(true);
-        self.stack.set_visible_child_name("login");
-        self.token_entry.grab_focus();
-        // Going back is only possible when an account is already signed in.
-        let has_accounts = !self.model.borrow().accounts.is_empty();
-        self.login_cancel.set_visible(has_accounts);
     }
 
     // -- navigation ------------------------------------------------------
@@ -1320,8 +1276,6 @@ impl AppState {
         match event {
             UiEvent::Run(work) => work(self),
             UiEvent::LoginSuccess { user, token, label } => {
-                self.login_button.set_sensitive(true);
-                self.login_error.set_visible(false);
                 let account = Account {
                     user_id: Some(user.id),
                     token: token.clone(),
@@ -1337,19 +1291,14 @@ impl AppState {
                 }
                 let save_error = self.persist_account(account.clone());
                 let id = self.start_account(account);
-                self.token_entry.set_text("");
-                self.label_entry.set_text("");
+                self.login.reset();
                 self.stack.set_visible_child_name("chat");
                 self.switch_account(id);
                 if let Some(error) = save_error {
                     self.set_status(&error);
                 }
             }
-            UiEvent::LoginFailed { message } => {
-                self.login_button.set_sensitive(true);
-                self.login_error.set_label(&message);
-                self.login_error.set_visible(true);
-            }
+            UiEvent::LoginFailed { message } => self.login_failed(&message),
             UiEvent::Connected { account } | UiEvent::Resumed { account } => {
                 let changed = {
                     let mut model = self.model.borrow_mut();

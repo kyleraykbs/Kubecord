@@ -143,7 +143,7 @@ impl AppState {
                 (
                     "Enter New Token",
                     false,
-                    Box::new(move || token.show_login()),
+                    Box::new(move || token.show_login_with(true)),
                 ),
                 (
                     "Open Discord",
@@ -151,7 +151,7 @@ impl AppState {
                     Box::new(move || {
                         open_uri(Some(web.window.upcast_ref()), LOGIN_URL);
                         // The new token is wanted next.
-                        web.show_login();
+                        web.show_login_with(true);
                     }),
                 ),
             ],

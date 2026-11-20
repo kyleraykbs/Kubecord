@@ -33,6 +33,7 @@
 //! - `channel-menu` (saved like the user menu), `channel-create`,
 //!   `channel-edit` (a voice channel), `channel-text` (a text channel),
 //!   `channel-perms`.
+//! - `login-<state>`: the login page offline (see `show_login_demo`).
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -240,6 +241,10 @@ fn message(id: u64, author: u64, content: &str) -> Value {
 
 impl AppState {
     pub(crate) fn show_demo(self: &Rc<Self>, mode: &str) {
+        if let Some(what) = mode.strip_prefix("login") {
+            self.show_login_demo(what.trim_start_matches('-'));
+            return;
+        }
         let token = Token::new("kylecord-demo-account");
         let account = session::account_id(&token);
         let mut session = Session::new(Account {

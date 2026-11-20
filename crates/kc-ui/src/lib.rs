@@ -13,6 +13,7 @@ mod image_viewer;
 mod images;
 mod live;
 pub mod logging;
+mod login;
 mod markdown;
 mod members;
 mod menu;

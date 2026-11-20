@@ -31,12 +31,8 @@ pub(crate) struct AppState {
     /// Notices at the top of the window (see [`AppState::notify`]).
     pub notices: gtk::Box,
 
-    // Login.
-    pub token_entry: gtk::PasswordEntry,
-    pub label_entry: gtk::Entry,
-    pub login_button: gtk::Button,
-    pub login_error: gtk::Label,
-    pub login_cancel: gtk::Button,
+    /// The login page (also for adding an account).
+    pub login: crate::login::LoginPage,
 
     // Server rail and channel sidebar.
     pub guild_box: gtk::Box,
@@ -193,56 +189,8 @@ impl AppState {
         stack.set_transition_type(gtk::StackTransitionType::Crossfade);
 
         // -- login -------------------------------------------------------
-        let login_clamp = adw::Clamp::new();
-        login_clamp.set_maximum_size(380);
-        login_clamp.set_valign(gtk::Align::Center);
-        let login_form = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        login_form.set_margin_start(24);
-        login_form.set_margin_end(24);
-
-        let login_title = gtk::Label::new(Some("kylecord"));
-        login_title.add_css_class("title-1");
-        let login_subtitle = gtk::Label::new(Some("Sign in with a Discord user token"));
-        login_subtitle.add_css_class("dim-label");
-        login_subtitle.set_wrap(true);
-        login_subtitle.set_margin_bottom(12);
-
-        let token_entry = gtk::PasswordEntry::new();
-        token_entry.set_show_peek_icon(true);
-        token_entry.set_placeholder_text(Some("User token"));
-
-        let label_entry = gtk::Entry::new();
-        label_entry.set_placeholder_text(Some("Label (optional)"));
-
-        let login_button = gtk::Button::with_label("Add account");
-        login_button.add_css_class("suggested-action");
-        login_button.add_css_class("pill");
-        login_button.set_halign(gtk::Align::Center);
-        login_button.set_margin_top(6);
-
-        let login_cancel = gtk::Button::with_label("Cancel");
-        login_cancel.add_css_class("flat");
-        login_cancel.set_halign(gtk::Align::Center);
-        login_cancel.set_visible(false);
-
-        let login_error = gtk::Label::new(None);
-        login_error.add_css_class("error");
-        login_error.set_wrap(true);
-        login_error.set_visible(false);
-
-        login_form.append(&login_title);
-        login_form.append(&login_subtitle);
-        login_form.append(&token_entry);
-        login_form.append(&label_entry);
-        login_form.append(&login_button);
-        login_form.append(&login_cancel);
-        login_form.append(&login_error);
-        login_clamp.set_child(Some(&login_form));
-
-        let login_page = adw::ToolbarView::new();
-        login_page.add_top_bar(&adw::HeaderBar::new());
-        login_page.set_content(Some(&login_clamp));
-        stack.add_named(&login_page, Some("login"));
+        let login = crate::login::LoginPage::new();
+        stack.add_named(&login.page, Some("login"));
 
         // -- server rail -------------------------------------------------
         let guild_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -785,11 +733,7 @@ impl AppState {
             window,
             stack,
             notices,
-            token_entry,
-            label_entry,
-            login_button,
-            login_error,
-            login_cancel,
+            login,
             guild_box,
             guild_name_label,
             guild_menu,
