@@ -355,6 +355,27 @@ button.kc-dm-create {
     margin-right: 4px;
 }
 
+/* A DM row's close button: there only while the row is hovered. */
+button.kc-dm-close {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+    opacity: 0;
+}
+
+button.kc-dm-close image {
+    -gtk-icon-size: 12px;
+}
+
+button.kc-channel:hover button.kc-dm-close,
+button.kc-dm-close:focus-visible {
+    opacity: 0.7;
+}
+
+button.kc-channel:hover button.kc-dm-close:hover {
+    opacity: 1;
+}
+
 .kc-menu-sep {
     margin: 4px 6px;
     opacity: 0.5;

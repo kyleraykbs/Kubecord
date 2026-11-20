@@ -39,6 +39,9 @@
 //!   `group-menu` (its right-click menu, saved like the user menu),
 //!   `group-members` (the open group with its member list), `group-rename`,
 //!   `group-leave`.
+//! - `dm-hover` (both DM rows drawn as hovered, showing their ×),
+//!   `dm-leave` (the group's × clicked: the confirmation), `dm-deleted`
+//!   (the open DM is closed elsewhere: CHANNEL_DELETE arrives).
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -431,6 +434,50 @@ impl AppState {
                 let mode = mode.to_owned();
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     app.demo_channels(&mode);
+                });
+            }
+            mode if mode.starts_with("dm-") => {
+                if let Some(dm) = channel(DM) {
+                    self.open_channel(dm);
+                }
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let closes: Vec<gtk::Button> =
+                        descendants::<gtk::Button>(&app.channel_box.clone().upcast())
+                            .into_iter()
+                            .filter(|button| button.has_css_class("kc-dm-close"))
+                            .collect();
+                    eprintln!("demo: DM close buttons={}", closes.len());
+                    match mode.as_str() {
+                        "dm-hover" => {
+                            for close in &closes {
+                                if let Some(row) =
+                                    close.parent().and_then(|content| content.parent())
+                                {
+                                    row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+                                }
+                            }
+                        }
+                        // The group is listed first (it is newer).
+                        "dm-leave" => {
+                            if let Some(close) = closes.first() {
+                                close.emit_clicked();
+                            }
+                        }
+                        _ => {
+                            app.with_session(|session| {
+                                session.store.apply(
+                                    "CHANNEL_DELETE",
+                                    &json!({"id": DM.to_string(), "type": 1}),
+                                )
+                            });
+                            let selected = app
+                                .with_session(|session| session.selected_channel)
+                                .flatten();
+                            eprintln!("demo: after delete selected={selected:?}");
+                        }
+                    }
                 });
             }
             mode if mode.starts_with("group-") => {

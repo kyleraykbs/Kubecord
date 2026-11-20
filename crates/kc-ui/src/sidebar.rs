@@ -249,10 +249,14 @@ impl AppState {
             text.set_hexpand(true);
             text.append(&label(&row.title, &["kc-channel-name"]));
             if !row.subtitle.is_empty() {
-                text.append(&label(&row.subtitle, &["caption", "dim-label"]));
+                let subtitle = label(&row.subtitle, &["caption", "dim-label"]);
+                // The line is ellipsised, so hovering shows the full status.
+                subtitle.set_tooltip_text(Some(&row.subtitle));
+                text.append(&subtitle);
             }
             content.append(&text);
             content.append(&badge(row.mentions));
+            content.append(&self.dm_close_button(&row.channel));
             button.set_child(Some(&content));
             let app = self.clone();
             let channel = row.channel.clone();
@@ -557,6 +561,29 @@ impl AppState {
             popover.popup();
         });
         widget.add_controller(gesture);
+    }
+
+    /// The small × shown on a DM row while it is hovered: closes a DM, or
+    /// (after asking) leaves a group. Its click does not reach the row.
+    fn dm_close_button(self: &Rc<Self>, channel: &Channel) -> gtk::Button {
+        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.add_css_class("flat");
+        close.add_css_class("circular");
+        close.add_css_class("kc-dm-close");
+        close.set_valign(gtk::Align::Center);
+        close.set_focus_on_click(false);
+        let group = channel.kind == ChannelType::GroupDm;
+        close.set_tooltip_text(Some(if group { "Leave Group" } else { "Close DM" }));
+        let app = self.clone();
+        let id = channel.id;
+        close.connect_clicked(move |_| {
+            if group {
+                app.confirm_leave_group(id);
+            } else {
+                app.close_private_channel(id);
+            }
+        });
+        close
     }
 
     /// Right-click on a group DM: add friends, rename, leave.

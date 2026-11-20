@@ -638,3 +638,8 @@ dispatch; contains account data).
 - Group DM row right-click (and the member panel's "Add Friends to Group" button): add friends (`PUT /channels/{id}/recipients/{user}` each, applied locally as CHANNEL_RECIPIENT_ADD), rename (`PATCH /channels/{id} {"name"}`, empty → null = members' names), leave (`DELETE /channels/{id}` after an AlertDialog; applied as CHANNEL_DELETE, goes to Friends if open). The member menu shows "Remove From Group" (`DELETE /channels/{id}/recipients/{user}`) in a group you own.
 - CHANNEL_RECIPIENT_ADD/REMOVE were already handled by the reducer (replace-by-id, so local + gateway copies don't duplicate).
 - None of these endpoints has been exercised against Discord (no live writes); bodies are unit-tested. `KYLECORD_DEMO=group-create|group-picked|group-search|group-full|group-add|group-menu|group-members|group-rename|group-leave` shows the UI offline (the demo now has ten more friends and a group DM you own).
+
+## DM list: hover close button and full-status tooltip (2026-11-20)
+
+- Each DM row has a small circular `window-close-symbolic` button (`kc-dm-close`), shown only while the row is hovered (CSS `button.kc-channel:hover`), with `focus-on-click` off so its click does not select the row. A 1:1 DM closes (`close_private_channel`, DELETE /channels/{id}); a group asks first (`confirm_leave_group`). Demo: `KYLECORD_DEMO=dm-hover|dm-leave|dm-deleted`.
+- The DM row's status/subtitle line is ellipsised, so it now carries a tooltip of the full `row.subtitle` (the presence summary). The demo account has no custom status, so the tooltip text itself was not shown in a screenshot.
