@@ -117,28 +117,14 @@ impl HttpClient {
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, format!("{}{}", self.base, path))
-            .header("authorization", self.token.expose())
-            .header("user-agent", USER_AGENT)
-            .header("accept", "*/*")
-            .header("accept-language", "en-US")
-            .header("priority", "u=1, i")
-            .header("referer", "https://discord.com/channels/@me")
-            .header(
-                "sec-ch-ua",
-                "\"Not:A-Brand\";v=\"24\", \"Chromium\";v=\"134\"",
-            )
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"Windows\"")
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-origin")
-            .header("x-discord-locale", &self.locale)
-            .header("x-discord-timezone", &self.timezone)
-            .header("x-super-properties", &self.super_properties)
-            .header("origin", "https://discord.com")
-            .header("x-debug-options", "bugReporterEnabled")
+        browser_headers(
+            self.http.request(method, format!("{}{}", self.base, path)),
+            "https://discord.com/channels/@me",
+            &self.locale,
+            &self.timezone,
+            &self.super_properties,
+        )
+        .header("authorization", self.token.expose())
     }
 
     async fn request_json(
@@ -1280,6 +1266,37 @@ impl HttpClient {
     fn build_request(&self, method: Method, path: &str) -> reqwest::Request {
         self.request(method, path).build().expect("request builds")
     }
+}
+
+/// The headers the web client's browser sends with every API request (all
+/// but `authorization`). `referer` is the page the request comes from.
+pub(crate) fn browser_headers(
+    request: reqwest::RequestBuilder,
+    referer: &str,
+    locale: &str,
+    timezone: &str,
+    super_properties: &str,
+) -> reqwest::RequestBuilder {
+    request
+        .header("user-agent", USER_AGENT)
+        .header("accept", "*/*")
+        .header("accept-language", "en-US")
+        .header("priority", "u=1, i")
+        .header("referer", referer)
+        .header(
+            "sec-ch-ua",
+            "\"Not:A-Brand\";v=\"24\", \"Chromium\";v=\"134\"",
+        )
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", "\"Windows\"")
+        .header("sec-fetch-dest", "empty")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-site", "same-origin")
+        .header("x-discord-locale", locale)
+        .header("x-discord-timezone", timezone)
+        .header("x-super-properties", super_properties)
+        .header("origin", "https://discord.com")
+        .header("x-debug-options", "bugReporterEnabled")
 }
 
 async fn parse_retry_after(headers: &HeaderMap, response: reqwest::Response) -> f64 {

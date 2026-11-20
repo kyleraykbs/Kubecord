@@ -1,5 +1,6 @@
 //! Discord REST v9 client.
 
+pub mod auth;
 pub mod cdn;
 pub mod client;
 pub mod error;
