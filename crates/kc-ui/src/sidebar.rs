@@ -209,6 +209,8 @@ impl AppState {
 
     fn render_guild_channels(self: &Rc<Self>, guild_id: Snowflake, selected: Option<Snowflake>) {
         let Some((name, sections, collapsed)) = self.with_session(|session| {
+            let me = session.user.as_ref().map(|user| user.id);
+            let own_flags = session.voice.as_ref();
             session.store.read(|state| {
                 let name = state
                     .guilds
@@ -230,6 +232,10 @@ impl AppState {
                                         .filter(|voice| voice.channel_id == Some(channel.id))
                                         .filter_map(|voice| {
                                             let user = state.users.get(&voice.user_id)?;
+                                            let (self_mute, self_deaf) = own_flags
+                                                .filter(|_| Some(user.id) == me)
+                                                .and_then(|own| own.own_flags(channel.id))
+                                                .unwrap_or((voice.self_mute, voice.self_deaf));
                                             Some(VoiceUser {
                                                 id: user.id,
                                                 name: state.display_name(Some(guild_id), user),
@@ -238,8 +244,8 @@ impl AppState {
                                                     user.avatar.as_deref(),
                                                     48,
                                                 ),
-                                                muted: voice.mute || voice.self_mute,
-                                                deafened: voice.deaf || voice.self_deaf,
+                                                muted: voice.mute || self_mute,
+                                                deafened: voice.deaf || self_deaf,
                                                 streaming: voice.self_stream,
                                                 video: voice.self_video,
                                             })

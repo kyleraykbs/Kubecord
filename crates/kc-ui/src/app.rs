@@ -820,6 +820,9 @@ impl AppState {
                 account,
                 muted: desired,
             });
+            // Your own entry shows the change at once.
+            self.queue_sidebar();
+            self.refresh_voice_view();
         }
     }
 
@@ -838,6 +841,9 @@ impl AppState {
                 account,
                 deafened: desired,
             });
+            // Your own entry shows the change at once.
+            self.queue_sidebar();
+            self.refresh_voice_view();
         }
     }
 

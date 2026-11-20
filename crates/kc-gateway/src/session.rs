@@ -59,6 +59,13 @@ pub struct GatewayHandle {
 }
 
 impl GatewayHandle {
+    /// A handle attached to no connection: what it sends arrives on the
+    /// returned receiver. For tests of what would be sent.
+    pub fn detached() -> (Self, mpsc::UnboundedReceiver<Value>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
     pub fn send(&self, payload: Value) {
         let _ = self.tx.send(payload);
     }

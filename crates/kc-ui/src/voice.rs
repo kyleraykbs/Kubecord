@@ -357,12 +357,16 @@ impl AppState {
                                 .unwrap_or_else(|| {
                                     cdn::user_avatar(user.id, user.avatar.as_deref(), 160)
                                 });
+                            let (self_mute, self_deaf) = here
+                                .filter(|_| Some(user.id) == me)
+                                .and_then(|own| own.own_flags(channel_id))
+                                .unwrap_or((voice.self_mute, voice.self_deaf));
                             Some(Participant {
                                 id: user.id,
                                 name: state.display_name(guild, user),
                                 avatar,
-                                muted: voice.mute || voice.self_mute,
-                                deafened: voice.deaf || voice.self_deaf,
+                                muted: voice.mute || self_mute,
+                                deafened: voice.deaf || self_deaf,
                                 streaming: voice.self_stream,
                                 is_self: Some(user.id) == me,
                             })

@@ -86,6 +86,15 @@ pub struct VoiceUiState {
     pub watching: Option<Snowflake>,
 }
 
+impl VoiceUiState {
+    /// How the account's own entry in `channel_id` shows mute and deafen:
+    /// what was chosen here, without waiting for Discord's echo. `None`
+    /// when the account is not in that channel.
+    pub fn own_flags(&self, channel_id: Snowflake) -> Option<(bool, bool)> {
+        (self.channel_id == channel_id).then_some((self.muted || self.deafened, self.deafened))
+    }
+}
+
 /// Everything one account owns on the GTK side.
 pub struct Session {
     pub account: Account,
@@ -2138,15 +2147,9 @@ async fn apply_voice_command(
             voice.endpoint = None;
             // Do not announce a camera on join; Discord shows a camera tile
             // for `self_video: true` even before any frames exist, and it
-            // fails with 2015 if no track follows.
-            let self_video = voice.camera;
-            voice.handle.update_voice_state(
-                guild_id,
-                Some(channel_id),
-                voice.muted,
-                voice.deafened,
-                self_video,
-            );
+            // fails with 2015 if no track follows. `voice.camera` is only
+            // set while a camera runs.
+            announce_voice_state(voice);
             maybe_connect(voice, account, ui, control_tx).await;
         }
         VoiceCommand::Leave => {
@@ -2174,6 +2177,8 @@ async fn apply_voice_command(
                     audio.set_mic_enabled(!muted && !voice.deafened);
                 }
             }
+            // Others see the muted icon only from the gateway voice state.
+            announce_voice_state(voice);
         }
         VoiceCommand::SetUserVolume { user_id, volume } => {
             voice.user_volumes.insert(user_id, volume);
@@ -2194,6 +2199,7 @@ async fn apply_voice_command(
                     connection.handle.set_speaking(0);
                 }
             }
+            announce_voice_state(voice);
         }
         VoiceCommand::SetCameraDevice {
             access,
@@ -2201,6 +2207,7 @@ async fn apply_voice_command(
             settings,
         } => {
             voice.camera = true;
+            let (self_mute, self_deaf) = self_flags(voice.muted, voice.deafened);
             let gateway = voice.handle.clone();
             let (guild_id, channel_id) = match &voice.connection {
                 Some(connection) => (connection.guild_id, connection.channel_id),
@@ -2214,8 +2221,8 @@ async fn apply_voice_command(
                             gateway.update_voice_state(
                                 guild_id,
                                 Some(channel_id),
-                                voice.muted,
-                                voice.deafened,
+                                self_mute,
+                                self_deaf,
                                 true,
                             );
                             let _ = ui.send(UiEvent::CameraStarted { account }).await;
@@ -2232,8 +2239,8 @@ async fn apply_voice_command(
                             gateway.update_voice_state(
                                 guild_id,
                                 Some(channel_id),
-                                voice.muted,
-                                voice.deafened,
+                                self_mute,
+                                self_deaf,
                                 false,
                             );
                         }
@@ -2253,6 +2260,7 @@ async fn apply_voice_command(
         }
         VoiceCommand::SetCamera(enabled) => {
             voice.camera = enabled;
+            let (self_mute, self_deaf) = self_flags(voice.muted, voice.deafened);
             let gateway = voice.handle.clone();
             let (guild_id, channel_id) = match &voice.connection {
                 Some(connection) => (connection.guild_id, connection.channel_id),
@@ -2285,8 +2293,8 @@ async fn apply_voice_command(
                     gateway.update_voice_state(
                         guild_id,
                         Some(channel_id),
-                        voice.muted,
-                        voice.deafened,
+                        self_mute,
+                        self_deaf,
                         started,
                     );
                     let event = if started {
@@ -2443,7 +2451,34 @@ async fn apply_voice_command(
     }
 }
 
-/// Ends a Go Live stream, deleting it on Discord when a key is known.
+/// The `self_mute` / `self_deaf` pair Discord shows for these choices.
+/// Deafening also mutes, as the official client reports it.
+fn self_flags(muted: bool, deafened: bool) -> (bool, bool) {
+    (muted || deafened, deafened)
+}
+
+/// Sends the account's main-gateway voice state (op 4) for the call it is
+/// in or joining: the channel, self mute and deafen, and the camera. This
+/// is what other people see; the voice server's speaking flags are not.
+fn announce_voice_state(voice: &VoiceRuntime) {
+    let target = voice
+        .connection
+        .as_ref()
+        .map(|connection| (connection.guild_id, connection.channel_id))
+        .or(voice.pending_join);
+    let Some((guild_id, channel_id)) = target else {
+        return;
+    };
+    let (self_mute, self_deaf) = self_flags(voice.muted, voice.deafened);
+    voice.handle.update_voice_state(
+        guild_id,
+        Some(channel_id),
+        self_mute,
+        self_deaf,
+        voice.camera,
+    );
+}
+
 /// Connects to the watched stream once the gateway has sent everything
 /// needed (its server id, token and endpoint).
 async fn maybe_start_watch(
@@ -2869,6 +2904,93 @@ mod tests {
         .await;
         assert_eq!(told(&ui_rx), ["error", "stopped"]);
         assert!(!voice.stream_pending);
+    }
+
+    /// The `(channel_id, self_mute, self_deaf, self_video)` of each voice
+    /// state (op 4) sent so far.
+    fn voice_states_sent(
+        rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
+    ) -> Vec<(serde_json::Value, bool, bool, bool)> {
+        let mut sent = Vec::new();
+        while let Ok(payload) = rx.try_recv() {
+            if payload["op"] == 4 {
+                let d = &payload["d"];
+                sent.push((
+                    d["channel_id"].clone(),
+                    d["self_mute"].as_bool().unwrap(),
+                    d["self_deaf"].as_bool().unwrap(),
+                    d["self_video"].as_bool().unwrap(),
+                ));
+            }
+        }
+        sent
+    }
+
+    #[tokio::test]
+    async fn mute_and_deafen_are_announced_to_discord() {
+        let (handle, mut sent) = GatewayHandle::detached();
+        let (ui_tx, _ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let mut voice = runtime(handle);
+        voice.pending_join = None;
+
+        // Not in a call: nothing to tell anyone.
+        apply_voice_command(
+            &mut voice,
+            VoiceCommand::SetMute(true),
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert!(voice_states_sent(&mut sent).is_empty());
+
+        // Joining carries the current choice.
+        apply_voice_command(
+            &mut voice,
+            VoiceCommand::Join {
+                guild_id: Some(Snowflake(5)),
+                channel_id: Snowflake(12),
+            },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(
+            voice_states_sent(&mut sent),
+            [(json!(Snowflake(12)), true, false, false)]
+        );
+
+        // Each toggle while in the call is sent; deafening also mutes.
+        let steps = [
+            (VoiceCommand::SetMute(false), (false, false)),
+            (VoiceCommand::SetDeafen(true), (true, true)),
+            (VoiceCommand::SetMute(false), (true, true)),
+            (VoiceCommand::SetDeafen(false), (false, false)),
+        ];
+        for (command, (mute, deaf)) in steps {
+            apply_voice_command(&mut voice, command, 0, &ui_tx, &control_tx).await;
+            assert_eq!(
+                voice_states_sent(&mut sent),
+                [(json!(Snowflake(12)), mute, deaf, false)]
+            );
+        }
+    }
+
+    #[test]
+    fn own_entry_shows_the_local_choice() {
+        let voice = VoiceUiState {
+            guild_id: None,
+            channel_id: Snowflake(12),
+            muted: false,
+            deafened: true,
+            camera: false,
+            streaming: false,
+            watching: None,
+        };
+        assert_eq!(voice.own_flags(Snowflake(12)), Some((true, true)));
+        assert_eq!(voice.own_flags(Snowflake(13)), None);
     }
 
     #[tokio::test]

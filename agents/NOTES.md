@@ -546,3 +546,9 @@ dispatch; contains account data).
 - When encryption fails for a frame that does not fit, the connection now warns `video frame is in too many slices to be encrypted` instead of the debug line about waiting for DAVE.
 - Lesson: read the log of the failing attempt before theorising. The SPS rewrite (previous note) is real and still needed, but it was not what stopped the stream.
 - Ending a stream paused the user's YouTube video: WirePlumber 0.5's `linking/mpris-pause.lua` (`linking.pause-playback`, on by default) pauses MPRIS players whose streams are linked, directly or through other nodes, to an Audio/Sink that is removed. Removing the Go Live null sink with browser streams still linked triggered it. `VirtualOutput::drop` now removes every link into the sink (`pw-link --disconnect`), waits 250 ms, then removes the sink. Checked live with a throwaway silent pw-cat stream: links reach 0 while the node is still present. Not covered: kylecord being killed (PDEATHSIG removes the sink with links in place).
+
+## Mute and deafen shown to others (2026-11-19)
+
+- Mute and deafen only changed the local microphone and the voice server's speaking flag; nobody else saw them. Others see `self_mute` / `self_deaf` from the main-gateway voice state (op 4). `announce_voice_state` (session.rs) sends it for the call being joined or in, on join and on every toggle; deafening also sends `self_mute: true`, as the official client does. Camera updates use the same flags.
+- Your own entry in the sidebar and the call tiles uses the local choice (`VoiceUiState::own_flags`) instead of waiting for Discord's echo.
+- `GatewayHandle::detached()` gives a handle whose payloads land on a receiver, for tests of what is sent.
