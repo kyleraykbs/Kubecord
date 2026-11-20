@@ -142,6 +142,9 @@ pub struct CapturePreferences {
     pub log_to_file: bool,
     /// Also log every media and voice event; far larger.
     pub log_detailed: bool,
+    /// Show times on a 24-hour clock (`17:58`) instead of `5:58 PM`.
+    #[serde(rename = "use_24_hour_time")]
+    pub use_24_hour: bool,
 }
 
 pub const CAMERA_FORMATS: [&str; 3] = ["Automatic", "MJPEG (compressed)", "Raw (uncompressed)"];
@@ -200,6 +203,7 @@ impl Default for CapturePreferences {
             volume_boost_cap: 3,
             log_to_file: true,
             log_detailed: false,
+            use_24_hour: false,
         }
     }
 }
@@ -319,6 +323,7 @@ impl CapturePreferences {
             (!self.output_device.is_empty()).then(|| self.output_device.clone()),
         );
         crate::session::set_self_preview(self.self_preview);
+        crate::content::set_24_hour(self.use_24_hour);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         kc_media::devices::set_input_gain(self.input_volume);
         kc_media::devices::set_output_gain(self.output_volume);
@@ -507,10 +512,20 @@ mod tests {
         // The processor encodes: every viewer can play what x264 makes.
         assert!(prefs.cpu_encoder);
         assert!(prefs.log_to_file && !prefs.log_detailed);
+        assert!(!prefs.use_24_hour);
         // Automatic bitrate stays within what Discord carries for a stream.
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1280, 720, 30), 1935);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 30), 4354);
         assert_eq!(VideoSettings::automatic_bitrate_kbps(1920, 1080, 60), 6000);
+    }
+
+    #[test]
+    fn saved_settings_without_the_clock_get_twelve_hours() {
+        let old: CapturePreferences = serde_json::from_str(r#"{"fps": 24}"#).unwrap();
+        assert!(!old.use_24_hour);
+        let set: CapturePreferences =
+            serde_json::from_str(r#"{"use_24_hour_time": true}"#).unwrap();
+        assert!(set.use_24_hour);
     }
 
     #[test]

@@ -244,6 +244,20 @@ impl AppState {
         typing.add(&show);
         page.append(&typing);
 
+        let time = adw::PreferencesGroup::new();
+        time.set_title("Time");
+        let clock = adw::SwitchRow::new();
+        clock.set_title("Use 24-Hour Time");
+        clock.set_subtitle("Show times as 17:58 instead of 5:58 PM.");
+        clock.set_active(self.capture.borrow().use_24_hour);
+        let app = self.clone();
+        clock.connect_active_notify(move |row| {
+            app.update_prefs(|prefs| prefs.use_24_hour = row.is_active());
+            app.redraw_times();
+        });
+        time.add(&clock);
+        page.append(&time);
+
         let voice = adw::PreferencesGroup::new();
         voice.set_title("Voice");
         let names: Vec<String> = crate::settings::VOLUME_BOOST_CAPS

@@ -569,3 +569,9 @@ dispatch; contains account data).
 ## Join Voice on the voice channel page (2026-11-19)
 
 - A voice channel you are not in shows a Join Voice button (pill, suggested-action): under "No One Is Here" ("Nobody is in this voice channel yet.") when it is empty, and under the tiles when others are there. DM calls keep their Join Call button; both come from `voice::join_button`, which disables itself once clicked. Seen with `KYLECORD_DEMO=voice-empty|voice-people`; joining itself was not exercised (no account in the demo).
+
+## 12-hour clock by default (2026-11-19)
+
+- Times of day are `5:58 PM` unless Settings → Features → Time → "Use 24-Hour Time" (pref `use_24_hour_time`, default off, so existing settings files get 12-hour). `content::clock_of` / `clock_text` build every clock: message headers, "Yesterday at", edited tooltips, Discord `<t:…>` timestamps (t, T, f, F, s, S), and the ping graph's minute labels. AM/PM is spelled out, not taken from the locale's `%p` (empty in some locales).
+- The time beside a grouped message has only the avatar's 40 px: it drops AM/PM (`gutter_time`) and carries the full time as its tooltip; with the suffix it pushed the message text right.
+- Switching the setting redraws the open channel (`redraw_times`); other times update as they are next drawn. Seen with `KYLECORD_DEMO=chat` in both modes (24-hour via a sandbox settings.json); the live switch itself was not watched on screen.

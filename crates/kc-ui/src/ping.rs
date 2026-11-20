@@ -282,9 +282,8 @@ fn draw_graph(
     ink(0.6);
     let mut minute = last - last.rem_euclid(60);
     while x_of(minute) >= 0.0 {
-        if let Ok(time) = gtk::glib::DateTime::from_unix_local(minute)
-            && let Ok(text) = time.format("%-I:%M %p")
-        {
+        if let Ok(time) = gtk::glib::DateTime::from_unix_local(minute) {
+            let text = crate::content::clock_of(&time, false);
             let x = x_of(minute);
             if x >= 24.0 && x <= plot_width - 24.0 {
                 cairo.move_to(x - 22.0, height - 4.0);

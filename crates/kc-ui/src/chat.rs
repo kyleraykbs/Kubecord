@@ -11,7 +11,7 @@ use kc_core::Snowflake;
 use kc_http::cdn;
 use kc_state::{Message, Reaction, State, permissions};
 
-use crate::content::{clock_time, day_key, format_time, long_date};
+use crate::content::{day_key, format_time, gutter_time, long_date};
 use crate::rich;
 use crate::shell::AppState;
 use crate::widgets::{clear_box, clear_list, empty_state, hex_color, icon_button, label, snippet};
@@ -195,6 +195,15 @@ impl AppState {
             return;
         }
         self.rebuild_messages(channel_id);
+    }
+
+    /// Redraws the open channel's messages, so their times follow a
+    /// changed clock setting.
+    pub(crate) fn redraw_times(self: &Rc<Self>) {
+        if self.chat.borrow().channel.is_some() {
+            self.chat.borrow_mut().channel = None;
+            self.render_messages();
+        }
     }
 
     fn show_placeholder(&self, icon: &str, title: &str, description: &str) {
@@ -779,7 +788,8 @@ impl AppState {
             column.append(&header);
         } else {
             // Grouped rows keep the avatar gutter; the time shows on hover.
-            let time = gtk::Label::new(Some(&clock_time(&message.timestamp)));
+            let time = gtk::Label::new(Some(&gutter_time(&message.timestamp)));
+            time.set_tooltip_text(Some(&format_time(&message.timestamp)));
             time.add_css_class("kc-gutter-time");
             time.set_width_request(40);
             time.set_valign(gtk::Align::Start);

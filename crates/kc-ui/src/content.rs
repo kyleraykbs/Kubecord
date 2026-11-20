@@ -2,6 +2,7 @@
 //! custom emoji, attachments, embeds and stickers.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gtk::prelude::*;
 use libadwaita as adw;
@@ -72,21 +73,63 @@ impl rich::Resolver for StateResolver<'_> {
         let Ok(time) = glib::DateTime::from_unix_local(unix) else {
             return unix.to_string();
         };
-        let pattern = match format {
-            't' => "%H:%M",
-            'T' => "%H:%M:%S",
-            'd' => "%x",
-            'D' => "%e %B %Y",
-            'F' => "%A, %e %B %Y %H:%M",
-            's' => "%x %H:%M",
-            'S' => "%x %H:%M:%S",
+        // The date part, and whether the time follows with seconds.
+        let (date, clock) = match format {
+            't' => (None, Some(false)),
+            'T' => (None, Some(true)),
+            'd' => (Some("%x"), None),
+            'D' => (Some("%e %B %Y"), None),
+            'F' => (Some("%A, %e %B %Y"), Some(false)),
+            's' => (Some("%x"), Some(false)),
+            'S' => (Some("%x"), Some(true)),
             'R' => return relative_time(unix),
-            _ => "%e %B %Y %H:%M",
+            _ => (Some("%e %B %Y"), Some(false)),
         };
-        time.format(pattern)
-            .map(|text| text.trim().to_owned())
-            .unwrap_or_else(|_| unix.to_string())
+        let date = date.map(|pattern| {
+            time.format(pattern)
+                .map(|text| text.trim().to_owned())
+                .unwrap_or_default()
+        });
+        let clock = clock.map(|seconds| clock_of(&time, seconds));
+        match (date, clock) {
+            (Some(date), Some(clock)) => format!("{date} {clock}"),
+            (Some(text), None) | (None, Some(text)) => text,
+            (None, None) => unix.to_string(),
+        }
     }
+}
+
+/// Times of day are shown on a 24-hour clock (`17:58`) instead of the
+/// 12-hour default (`5:58 PM`). Set from the preferences.
+static USE_24_HOUR: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_24_hour(enabled: bool) {
+    USE_24_HOUR.store(enabled, Ordering::Relaxed);
+}
+
+/// A time of day as the clock setting shows it: `5:58 PM` or `17:58`
+/// (with `seconds`, `5:58:07 PM` or `17:58:07`).
+fn clock_text(hour: u32, minute: u32, second: Option<u32>, use_24_hour: bool) -> String {
+    let seconds = second
+        .map(|second| format!(":{second:02}"))
+        .unwrap_or_default();
+    if use_24_hour {
+        format!("{hour:02}:{minute:02}{seconds}")
+    } else {
+        let suffix = if hour < 12 { "AM" } else { "PM" };
+        let hour = (hour + 11) % 12 + 1;
+        format!("{hour}:{minute:02}{seconds} {suffix}")
+    }
+}
+
+/// The time of day of a local time, as the clock setting shows it.
+pub(crate) fn clock_of(time: &glib::DateTime, seconds: bool) -> String {
+    clock_text(
+        time.hour() as u32,
+        time.minute() as u32,
+        seconds.then_some(time.second() as u32),
+        USE_24_HOUR.load(Ordering::Relaxed),
+    )
 }
 
 fn relative_time(unix: i64) -> String {
@@ -108,13 +151,13 @@ fn relative_time(unix: i64) -> String {
     }
 }
 
-/// A message timestamp in local time: `14:03` today, `Yesterday at 14:03`,
-/// otherwise the date and time.
+/// A message timestamp in local time: `2:03 PM` today, `Yesterday at
+/// 2:03 PM`, otherwise the date and time (24-hour when so set).
 pub(crate) fn format_time(iso: &str) -> String {
     let Some(time) = local_time(iso) else {
         return String::new();
     };
-    let clock = time.format("%H:%M").map(String::from).unwrap_or_default();
+    let clock = clock_of(&time, false);
     let Ok(now) = glib::DateTime::now_local() else {
         return clock;
     };
@@ -132,10 +175,20 @@ pub(crate) fn format_time(iso: &str) -> String {
     }
 }
 
+/// The time beside a grouped message, in the avatar's width: the clock
+/// without AM/PM, which the full time in its tooltip carries.
+pub(crate) fn gutter_time(iso: &str) -> String {
+    let clock = clock_time(iso);
+    clock
+        .strip_suffix(" AM")
+        .or_else(|| clock.strip_suffix(" PM"))
+        .unwrap_or(&clock)
+        .to_owned()
+}
+
 pub(crate) fn clock_time(iso: &str) -> String {
     local_time(iso)
-        .and_then(|time| time.format("%H:%M").ok())
-        .map(String::from)
+        .map(|time| clock_of(&time, false))
         .unwrap_or_default()
 }
 
@@ -783,5 +836,44 @@ mod tests {
             "a <span underline=\"single\">link</span> b"
         );
         assert_eq!(without_anchors("plain <b>bold</b>"), "plain <b>bold</b>");
+    }
+
+    #[test]
+    fn clock_is_twelve_hour_unless_asked() {
+        assert_eq!(clock_text(17, 58, None, false), "5:58 PM");
+        assert_eq!(clock_text(0, 5, None, false), "12:05 AM");
+        assert_eq!(clock_text(12, 0, None, false), "12:00 PM");
+        assert_eq!(clock_text(9, 7, Some(3), false), "9:07:03 AM");
+        assert_eq!(clock_text(17, 58, None, true), "17:58");
+        assert_eq!(clock_text(0, 5, Some(9), true), "00:05:09");
+    }
+
+    #[test]
+    fn discord_timestamps_follow_the_clock_setting() {
+        let state = State::default();
+        let resolver = StateResolver {
+            state: &state,
+            guild: None,
+        };
+        let unix = 1_700_000_000;
+        let local = glib::DateTime::from_unix_local(unix).unwrap();
+        let (hour, minute) = (local.hour() as u32, local.minute() as u32);
+        use rich::Resolver;
+        set_24_hour(false);
+        assert_eq!(
+            resolver.timestamp(unix, 't'),
+            clock_text(hour, minute, None, false)
+        );
+        assert!(
+            resolver
+                .timestamp(unix, 'f')
+                .ends_with(&clock_text(hour, minute, None, false))
+        );
+        set_24_hour(true);
+        assert_eq!(
+            resolver.timestamp(unix, 't'),
+            clock_text(hour, minute, None, true)
+        );
+        set_24_hour(false);
     }
 }
