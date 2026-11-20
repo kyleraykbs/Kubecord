@@ -3,6 +3,7 @@
 mod account_notice;
 pub mod app;
 mod captcha;
+mod channel_settings;
 mod chat;
 mod composer;
 mod content;

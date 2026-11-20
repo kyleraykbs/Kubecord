@@ -20,6 +20,9 @@
 //! - `settings-<page>` (`overview`, `roles`, `members`, `invites`, `bans`,
 //!   `audit`), `settings-role` (the role editor), `settings-error` (bans
 //!   page without made-up data: the load fails) and `invite`.
+//! - `channel-menu` (saved like the user menu), `channel-create`,
+//!   `channel-edit` (a voice channel), `channel-text` (a text channel),
+//!   `channel-perms`.
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
@@ -65,7 +68,9 @@ fn iso_of(id: u64) -> String {
 fn ready() -> Value {
     let mut channels = vec![
         json!({"id": "600", "type": 4, "name": "Text Channels", "position": 0}),
-        json!({"id": GENERAL.to_string(), "type": 0, "name": "general", "position": 0, "parent_id": "600"}),
+        json!({"id": GENERAL.to_string(), "type": 0, "name": "general", "position": 0, "parent_id": "600",
+               "topic": "Anything goes", "rate_limit_per_user": 10,
+               "permission_overwrites": [{"id": "104", "type": 0, "allow": EMBED_LINKS.to_string(), "deny": ATTACH_FILES.to_string()}]}),
     ];
     for index in 0..18 {
         channels.push(json!({
@@ -80,7 +85,8 @@ fn ready() -> Value {
             "position": index, "parent_id": "650"
         }));
     }
-    channels.push(json!({"id": LOUNGE.to_string(), "type": 2, "name": "Lounge", "position": 10, "parent_id": "650"}));
+    channels.push(json!({"id": LOUNGE.to_string(), "type": 2, "name": "Lounge", "position": 10, "parent_id": "650",
+                         "bitrate": 64000, "user_limit": 8}));
     channels.push(json!({"id": EMPTY_VOICE.to_string(), "type": 2, "name": "Quiet Room", "position": 11, "parent_id": "650"}));
     let everyone = VIEW_CHANNEL
         | SEND_MESSAGES
@@ -346,6 +352,14 @@ impl AppState {
                     }
                 });
             }
+            mode if mode.starts_with("channel-") => {
+                self.open_channel(general);
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    app.demo_channels(&mode);
+                });
+            }
             mode if mode.starts_with("mod-") => {
                 if let Some(lounge) = channel(LOUNGE) {
                     self.open_channel(lounge);
@@ -359,6 +373,47 @@ impl AppState {
             _ => {
                 self.open_channel(general);
                 self.demo_chat(&store);
+            }
+        }
+    }
+
+    fn demo_channels(self: &Rc<Self>, mode: &str) {
+        let guild = Snowflake::new(GUILD);
+        match mode {
+            "channel-create" => self.create_channel_dialog(guild, Some(Snowflake::new(600)), false),
+            "channel-edit" => self.edit_channel_dialog(Snowflake::new(LOUNGE)),
+            "channel-text" => self.edit_channel_dialog(Snowflake::new(GENERAL)),
+            "channel-perms" => self.channel_permissions_dialog(Snowflake::new(GENERAL)),
+            _ => {
+                let Some(channel) = self
+                    .with_session(|session| {
+                        session
+                            .store
+                            .read(|state| state.channels.get(&Snowflake::new(GENERAL)).cloned())
+                    })
+                    .flatten()
+                else {
+                    return;
+                };
+                let popover = gtk::Popover::new();
+                self.anchor_popover(&popover, &self.window, 120.0, 100.0);
+                let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                items.add_css_class("kc-menu");
+                items.set_width_request(200);
+                items.append(&crate::menu::menu_item("Mark As Read", false));
+                self.add_channel_items(&items, &popover, &channel);
+                popover.set_child(Some(&items));
+                popover.popup();
+                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        let path = format!("{path}.menu.png");
+                        if let Err(error) =
+                            crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                        {
+                            eprintln!("demo: could not save the menu: {error}");
+                        }
+                    });
+                }
             }
         }
     }

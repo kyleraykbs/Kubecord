@@ -357,6 +357,7 @@ impl AppState {
                 name.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 content.append(&name);
                 header.set_child(Some(&content));
+                self.attach_channel_menu(&header, category);
                 let app = self.clone();
                 let id = category.id;
                 header.connect_clicked(move |_| {
@@ -470,6 +471,9 @@ impl AppState {
         menu.connect_pressed(move |_, _, x, y| {
             let popover = gtk::Popover::new();
             app.anchor_popover(&popover, &anchor, x, y);
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            items.add_css_class("kc-menu");
+            items.set_width_request(200);
             let item = if voice {
                 let connected = app
                     .with_session(|session| {
@@ -479,11 +483,14 @@ impl AppState {
                             .is_some_and(|voice| voice.channel_id == target.id)
                     })
                     .unwrap_or(false);
-                let item = gtk::Button::with_label(if connected {
-                    "Disconnect"
-                } else {
-                    "Join Voice"
-                });
+                let item = crate::menu::menu_item(
+                    if connected {
+                        "Disconnect"
+                    } else {
+                        "Join Voice"
+                    },
+                    false,
+                );
                 let app = app.clone();
                 let inner = popover.clone();
                 let target = target.clone();
@@ -497,7 +504,7 @@ impl AppState {
                 });
                 item
             } else {
-                let item = gtk::Button::with_label("Mark As Read");
+                let item = crate::menu::menu_item("Mark As Read", false);
                 let app = app.clone();
                 let inner = popover.clone();
                 let id = target.id;
@@ -507,12 +514,34 @@ impl AppState {
                 });
                 item
             };
-            item.add_css_class("flat");
-            popover.set_child(Some(&item));
+            items.append(&item);
+            app.add_channel_items(&items, &popover, &target);
+            popover.set_child(Some(&items));
             popover.popup();
         });
         button.add_controller(menu);
         button
+    }
+
+    /// Right-click on a category header: create, edit, permissions, delete.
+    fn attach_channel_menu(self: &Rc<Self>, widget: &gtk::Button, channel: &Channel) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let app = self.clone();
+        let anchor = widget.clone();
+        let target = channel.clone();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let popover = gtk::Popover::new();
+            app.anchor_popover(&popover, &anchor, x, y);
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            items.add_css_class("kc-menu");
+            items.set_width_request(200);
+            app.add_channel_items(&items, &popover, &target);
+            popover.set_child(Some(&items));
+            popover.popup();
+        });
+        widget.add_controller(gesture);
     }
 
     fn voice_user_row(self: &Rc<Self>, user: &VoiceUser) -> gtk::Box {

@@ -1305,7 +1305,7 @@ impl AppState {
                 } else {
                     "Message unpinned"
                 }),
-                Err(error) => app.set_status(&format!("Could not change pin: {error}")),
+                Err(error) => app.report_failure("Could not change the pin", &error),
             },
         );
     }
@@ -1328,7 +1328,7 @@ impl AppState {
                 async move { http.delete_message(channel_id, message_id).await },
                 |app, result| {
                     if let Err(error) = result {
-                        app.set_status(&format!("Could not delete: {error}"));
+                        app.report_failure("Could not delete the message", &error);
                     }
                 },
             );

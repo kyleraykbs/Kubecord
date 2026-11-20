@@ -125,13 +125,13 @@ impl AppState {
             add(
                 "Create Channel",
                 false,
-                Box::new(move |app| app.create_channel_dialog(guild_id, false)),
+                Box::new(move |app| app.create_channel_dialog(guild_id, None, false)),
                 self,
             );
             add(
                 "Create Category",
                 false,
-                Box::new(move |app| app.create_channel_dialog(guild_id, true)),
+                Box::new(move |app| app.create_channel_dialog(guild_id, None, true)),
                 self,
             );
         }
@@ -181,58 +181,6 @@ impl AppState {
 
         popover.set_child(Some(&menu));
         popover
-    }
-
-    /// Prompts for a name and creates a channel (or a category).
-    fn create_channel_dialog(self: &Rc<Self>, guild_id: Snowflake, category: bool) {
-        let title = if category {
-            "Create Category"
-        } else {
-            "Create Channel"
-        };
-        let dialog = adw::AlertDialog::new(Some(title), None);
-        dialog.add_responses(&[("cancel", "Cancel"), ("create", "Create")]);
-        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("create"));
-        dialog.set_close_response("cancel");
-
-        let entry = gtk::Entry::new();
-        entry.set_placeholder_text(Some(if category {
-            "category-name"
-        } else {
-            "new-channel"
-        }));
-        entry.set_margin_top(8);
-        dialog.set_extra_child(Some(&entry));
-
-        let app = self.clone();
-        let entry_weak = entry.downgrade();
-        dialog.connect_response(None, move |dialog, response| {
-            if response != "create" {
-                return;
-            }
-            let Some(entry) = entry_weak.upgrade() else {
-                return;
-            };
-            let name = entry.text().trim().to_string();
-            dialog.close();
-            if name.is_empty() {
-                return;
-            }
-            let Some((_, http, _)) = app.active() else {
-                return;
-            };
-            // 4 is a category; 0 a text channel.
-            let kind = if category { 4 } else { 0 };
-            app.spawn(
-                async move { http.create_channel(guild_id, &name, kind, None).await },
-                |app, result| match result {
-                    Ok(_) => app.set_status("Channel created"),
-                    Err(error) => app.report_failure("Could not create the channel", &error),
-                },
-            );
-        });
-        dialog.present(Some(&self.window));
     }
 
     /// Mutes or unmutes a whole server.
