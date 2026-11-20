@@ -45,6 +45,25 @@ pub fn run() -> glib::ExitCode {
         Ok(()) => tracing::info!("gstreamer pipewire plugin preloaded"),
         Err(error) => tracing::warn!(%error, "could not preload pipewire plugin"),
     }
+    // A watchdog on a plain OS thread, to compare against the main-loop one.
+    // If both stall together the whole process was starved of CPU (heavy
+    // encode/decode); if only the main-loop watchdog stalls, the main thread
+    // itself was busy (rendering) or blocked (a lock), not the machine.
+    std::thread::Builder::new()
+        .name("kc-watchdog".to_owned())
+        .spawn(|| {
+            let mut last = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let now = std::time::Instant::now();
+                let gap = now.duration_since(last);
+                last = now;
+                if gap >= Duration::from_millis(250) {
+                    tracing::warn!(millis = gap.as_millis() as u64, "off-thread watchdog stalled");
+                }
+            }
+        })
+        .expect("watchdog thread");
     let app = build_app();
 
     let runtime = std::sync::Arc::new(

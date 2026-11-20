@@ -680,3 +680,10 @@ dispatch; contains account data).
 
 - The video info panel's "N s ago" was `stats.since_keyframe / arriving_fps`, where `arriving_fps` is an instantaneous estimate over the last ~1 s sample. The frame count since the keyframe climbs steadily but the fps estimate wobbles, so the quotient jumped (e.g. 39 → 37 → 39 → 40) instead of only counting up.
 - Fix: `refresh_video_info` now records the `Instant` the keyframe count last increased (`Sample.keyframe_at`, carried forward until `stats.keyframes` goes up) and passes real elapsed seconds to `describe`; `describe` no longer divides by fps. The value now only climbs and resets to ~0 (within the 1 s sample granularity) when a new full frame arrives. `arriving` was removed as unused.
+
+## Hitch diagnosis, round 2 (2026-11-20)
+
+- The user's log (instrumented build e0fb4b2): 140× "main thread stalled" 250–300 ms in dense bursts, ZERO "a UI event blocked the main thread". Stalls begin only after joining a call with video (clean while idle/connected). So it is not kc-ui event code and not the sidebar; it is tied to in-call video. Stream was 720p30 at 17–19 Mbit/s, hardware VA-API. The self-preview re-decodes the own stream (avdec_h264) — `LocalPreview::push` feeds encoded frames to a `VideoFeed`/`VideoDecoder` into a gtk4paintablesink.
+- Switching to the software (x264) encoder did NOT help → not GPU/VA-API encoder contention.
+- Remaining hypotheses: whole-process CPU starvation (x264/avdec saturating cores), the GTK renderer repainting the window at frame rate, or main-thread lock contention (e.g. the store RwLock held by a background thread during big payloads).
+- Added an off-thread watchdog (`kc-watchdog` std::thread, 100 ms sleep, warns ≥250 ms "off-thread watchdog stalled") alongside the main-loop one. If both stall together → process-wide CPU starvation; if only the main-loop watchdog → main thread busy/blocked. Next: user reproduces, compare the two warnings in the log.
