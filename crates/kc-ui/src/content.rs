@@ -691,7 +691,7 @@ impl AppState {
 
     /// Downloads a GIF's video and, once its first frame is decoded, shows it
     /// in place of the still.
-    fn play_gif(self: &Rc<Self>, picture: &gtk::Picture, video_url: &str) {
+    pub(crate) fn play_gif(self: &Rc<Self>, picture: &gtk::Picture, video_url: &str) {
         let app = Rc::downgrade(self);
         let target = picture.downgrade();
         self.images.file(video_url, "mp4", move |path| {

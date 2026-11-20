@@ -828,3 +828,9 @@ Left (low / uncertain, noted for the user): login Cancel during an in-flight req
 - Jump-to-latest button icon changed from `go-bottom-symbolic` (arrow + bar, reads as a dot) to `go-down-symbolic` (plain down arrow).
 - Reply/edit context bar: the composer below had all four corners rounded, leaving notches where the bar's square bottom met it. `update_composer_corners` adds `kc-attached` to the composer whenever the context bar or upload tray is shown, squaring the composer's top corners so bar + composer read as one rounded box.
 - Open/unverified: a specific Klipy `.mp4` gifv in chat not animating — depends on its embed `kind` (only `"gifv"` auto-plays); needs the message's embed data / log to pin down.
+
+## Favorite GIFs are videos: play them in the picker (2026-11-20)
+
+- Favourites loaded (3 stars) but the tiles were blank. Checked the live proto: the saved `src` of each favourite is a VIDEO (`.mp4`/`.webm`) even though `format` is IMAGE (2), and favourites carry no `preview`/`gif_src`. The pixbuf GIF animator can't render a video, and there was no still fallback → blank.
+- `fill_gif_flow` now renders by media type: a `.gif` src animates via the pixbuf player; anything else (mp4/webm from favourites) plays as a looping video via `AppState::play_gif` (now `pub(crate)`, the same GStreamer path chat gifv uses), within the animate budget. Trending/search `src` is a `.gif`, so they still use the pixbuf path.
+- Unverified offline (needs the account + real media URLs): that the favourite mp4/webm actually plays in a tile; the logic matches the working chat gifv path.

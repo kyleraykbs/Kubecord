@@ -1066,15 +1066,14 @@ impl AppState {
             picture.set_size_request(180, 110);
             picture.add_css_class("kc-media");
             picture.set_overflow(gtk::Overflow::Hidden);
-            // Animate the tile from the GIF itself. The picker asks for
-            // `media_format=tinygif`, so `src` is an animated `.gif`; `gif_src`
-            // is a provider alternate that some (e.g. Klipy) serve as `.webp`,
-            // which the GIF animator can't play — so prefer `src`. A
-            // favourite's video format stays a still here (it plays as a gifv
-            // once sent). Cap how many animate so a wall of gifs does not run
-            // dozens of frame timers; the rest keep a still preview.
-            let animate = *budget > 0 && !gif.video;
-            let animated = if gif.src.is_empty() {
+            // Render the tile from its media. Trending/search give `src` as an
+            // animated `.gif` (the picker asks for `media_format=tinygif`);
+            // favourites saved on the official client give `src` as a video
+            // (`.mp4`/`.webm`) even for the "image" format, and have no
+            // preview. So: a `.gif` animates via the pixbuf player; anything
+            // else plays as a looping video (like a chat gifv). Cap how many
+            // run at once; the rest show a still preview if there is one.
+            let media = if gif.src.is_empty() {
                 &gif.gif_src
             } else {
                 &gif.src
@@ -1084,10 +1083,15 @@ impl AppState {
             } else {
                 &gif.preview
             };
-            if animate && !animated.is_empty() {
+            if *budget > 0 && !media.is_empty() {
                 *budget -= 1;
-                self.images.set_animated_picture(&picture, animated);
-            } else {
+                if media.ends_with(".gif") {
+                    self.images.set_animated_picture(&picture, media);
+                } else {
+                    self.play_gif(&picture, media);
+                }
+            } else if !preview.is_empty() {
+                // Over the animate budget: a still if there is an image one.
                 self.images.set_picture(&picture, preview);
             }
 
