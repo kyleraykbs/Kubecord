@@ -9,6 +9,7 @@ mod composer;
 mod content;
 mod demo;
 mod friends;
+mod image_viewer;
 mod images;
 mod live;
 pub mod logging;
@@ -34,5 +35,6 @@ mod video_info;
 mod video_setup;
 mod voice;
 mod widgets;
+mod windows;
 
 pub use app::{build_app, run};

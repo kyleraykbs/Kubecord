@@ -109,6 +109,8 @@ pub(crate) struct AppState {
     pub focused_video: Cell<Option<(Snowflake, bool)>>,
     /// Cameras and streams moved into windows of their own.
     pub popouts: RefCell<HashMap<crate::voice::VideoKey, crate::voice::Popout>>,
+    /// Separate non-modal windows (image viewers) by key.
+    pub aux_windows: RefCell<HashMap<String, crate::windows::AuxWindow>>,
     /// With a video enlarged: the row of other tiles under it is hidden.
     pub members_hidden: Cell<bool>,
     /// A made-up call shown by `KYLECORD_VIDEO_DEMO`.
@@ -832,6 +834,7 @@ impl AppState {
             videos: RefCell::new(HashMap::new()),
             focused_video: Cell::new(None),
             popouts: RefCell::new(HashMap::new()),
+            aux_windows: RefCell::new(HashMap::new()),
             members_hidden: Cell::new(false),
             voice_demo: RefCell::new(None),
             video_info: RefCell::default(),

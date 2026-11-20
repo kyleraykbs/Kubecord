@@ -16,7 +16,7 @@ use crate::markdown::format_size;
 use crate::player::LoopingVideo;
 use crate::rich::{self, Piece};
 use crate::shell::AppState;
-use crate::widgets::{hex_color, icon_button, label, max_width, open_uri};
+use crate::widgets::{hex_color, label, max_width, open_uri};
 
 /// What a media preview shows, and what clicking it does.
 pub(crate) enum MediaKind {
@@ -570,55 +570,6 @@ impl AppState {
                 None => tracing::debug!("gif playback unavailable; showing the still"),
             }
         });
-    }
-
-    /// Opens an image at full size in its own window.
-    pub(crate) fn show_image(self: &Rc<Self>, url: &str, preview_url: &str) {
-        let picture = gtk::Picture::new();
-        picture.set_can_shrink(true);
-        picture.set_content_fit(gtk::ContentFit::Contain);
-        // Show the preview already in memory while the original downloads.
-        self.images.set_picture(&picture, preview_url);
-        self.images.set_picture(&picture, url);
-
-        let header = adw::HeaderBar::new();
-        let open = icon_button("web-browser-symbolic", "Open in Browser");
-        let link = url.to_owned();
-        let parent = self.window.clone();
-        open.connect_clicked(move |_| open_uri(Some(parent.upcast_ref()), &link));
-        header.pack_start(&open);
-        let copy = icon_button("edit-copy-symbolic", "Copy Link");
-        let link = url.to_owned();
-        let app = self.clone();
-        copy.connect_clicked(move |button| {
-            button.clipboard().set_text(&link);
-            app.set_status("Link copied");
-        });
-        header.pack_start(&copy);
-
-        let view = adw::ToolbarView::new();
-        view.add_top_bar(&header);
-        view.set_content(Some(&picture));
-
-        let window = adw::Window::builder()
-            .transient_for(&self.window)
-            .modal(true)
-            .default_width((self.window.width() as f64 * 0.85) as i32)
-            .default_height((self.window.height() as f64 * 0.85) as i32)
-            .title("Image")
-            .content(&view)
-            .build();
-        let keys = gtk::EventControllerKey::new();
-        let target = window.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape {
-                target.close();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        window.add_controller(keys);
-        window.present();
     }
 
     pub(crate) fn sticker_widget(self: &Rc<Self>, sticker: &StickerItem) -> gtk::Widget {

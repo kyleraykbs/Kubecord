@@ -567,6 +567,7 @@ impl AppState {
         let leaving = Rc::new(std::cell::Cell::new(false));
         self.window.connect_close_request(move |window| {
             app.close_popouts();
+            app.close_aux_windows();
             if leaving.get() {
                 return glib::Propagation::Proceed;
             }

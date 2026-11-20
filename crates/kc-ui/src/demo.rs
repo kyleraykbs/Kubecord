@@ -20,6 +20,8 @@
 //! - `settings-<page>` (`overview`, `roles`, `members`, `invites`, `bans`,
 //!   `audit`), `settings-role` (the role editor), `settings-error` (bans
 //!   page without made-up data: the load fails) and `invite`.
+//! - `viewer`: the image viewer (a default avatar, the only download),
+//!   zoomed in; saved to `<screenshot>.viewer.png`.
 //! - `channel-menu` (saved like the user menu), `channel-create`,
 //!   `channel-edit` (a voice channel), `channel-text` (a text channel),
 //!   `channel-perms`.
@@ -350,6 +352,30 @@ impl AppState {
                             app.show_server_settings(guild, other.strip_prefix("settings-"));
                         }
                     }
+                });
+            }
+            "viewer" => {
+                self.open_channel(general);
+                let url = "https://cdn.discordapp.com/embed/avatars/2.png?size=1024";
+                self.show_image(url, url);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                    app.demo_zoom_viewer(url, 4.0);
+                    let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") else {
+                        return;
+                    };
+                    let app = app.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        if let Some(window) = app.window_of(&format!("image:{url}")) {
+                            eprintln!("demo: viewer modal={}", window.is_modal());
+                            let path = format!("{path}.viewer.png");
+                            if let Err(error) =
+                                crate::app::save_window_png(&window, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the viewer: {error}");
+                            }
+                        }
+                    });
                 });
             }
             mode if mode.starts_with("channel-") => {
