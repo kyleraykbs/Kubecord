@@ -662,6 +662,20 @@ impl AppState {
         });
         group.add(&detailed);
 
+        let diagnostics = adw::SwitchRow::new();
+        diagnostics.set_title("Performance Diagnostics");
+        diagnostics.set_subtitle(
+            "Logs when the interface stalls and how long the sidebar takes to redraw, to track down a hitch. Harmless and off by default.",
+        );
+        diagnostics.set_subtitle_lines(0);
+        diagnostics.set_active(self.capture.borrow().log_diagnostics);
+        let app = self.clone();
+        diagnostics.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.log_diagnostics = active);
+        });
+        group.add(&diagnostics);
+
         let size = adw::ActionRow::builder().title("This Run's Log").build();
         let show_size = {
             let size = size.clone();

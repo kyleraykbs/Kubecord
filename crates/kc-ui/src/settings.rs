@@ -148,6 +148,10 @@ pub struct CapturePreferences {
     pub log_to_file: bool,
     /// Also log every media and voice event; far larger.
     pub log_detailed: bool,
+    /// Log performance diagnostics (main-thread stalls and sidebar rebuild
+    /// timings), to investigate a hitch. Off by default.
+    #[serde(default)]
+    pub log_diagnostics: bool,
     /// Show times on a 24-hour clock (`17:58`) instead of `5:58 PM`.
     #[serde(rename = "use_24_hour_time")]
     pub use_24_hour: bool,
@@ -247,6 +251,7 @@ impl Default for CapturePreferences {
             volume_boost_cap: 3,
             log_to_file: true,
             log_detailed: false,
+            log_diagnostics: false,
             use_24_hour: false,
             noise_suppression: 0,
             echo_cancellation: false,
@@ -412,6 +417,7 @@ impl CapturePreferences {
         crate::session::set_self_preview(self.self_preview);
         crate::content::set_24_hour(self.use_24_hour);
         crate::logging::configure(self.log_to_file, self.log_detailed);
+        crate::logging::set_diagnostics(self.log_diagnostics);
         kc_media::devices::set_input_gain(self.input_volume);
         kc_media::devices::set_output_gain(self.output_volume);
         kc_media::portal::set_share_sources(match self.share_source {

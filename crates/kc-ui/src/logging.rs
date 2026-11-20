@@ -24,8 +24,22 @@ pub const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 static FILE_ENABLED: AtomicBool = AtomicBool::new(true);
 static DETAILED: AtomicBool = AtomicBool::new(false);
+static DIAGNOSTICS: AtomicBool = AtomicBool::new(false);
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 static FILE: Mutex<Option<File>> = Mutex::new(None);
+
+/// Whether to log performance diagnostics: the main-thread watchdogs and the
+/// sidebar/member rebuild timings. Off by default; turned on in Advanced to
+/// investigate a hitch. Checked before the warning is built, so it costs
+/// nothing when off.
+pub fn diagnostics() -> bool {
+    DIAGNOSTICS.load(Ordering::Relaxed)
+}
+
+/// Turns the performance diagnostics on or off.
+pub fn set_diagnostics(on: bool) {
+    DIAGNOSTICS.store(on, Ordering::Relaxed);
+}
 
 /// Where the log file is.
 pub fn path() -> Option<PathBuf> {

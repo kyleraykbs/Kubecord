@@ -714,3 +714,8 @@ dispatch; contains account data).
 - Fix: `cached_guild_slot` memoizes each guild tile by a hash of its drawn state (name, icon, unread, mentions, selected) in `AppState::guild_slots`. A rebuild (triggered by one server's unread changing) reuses the other tiles — and their already-loaded avatars — instead of recreating them; only changed/added tiles are built. `clear_box` unparents the cached tiles first, so a reused one re-appends cleanly; stale ids are evicted each rebuild. Measured 150 servers 45 → 14 ms, and in reality more since reused tiles skip `set_custom_image` entirely.
 - Remaining cost is `clear_box` + re-append of all tiles (GTK reparenting), ~0.1 ms/server. A true in-place update (no reparent when order is unchanged) would cut it further but needs widget-order diffing; deferred.
 - The rail rebuild timing is now split (`rail_ms` / `channels_ms`) in the queue_sidebar log line.
+
+## Performance diagnostics behind a setting (2026-11-20)
+
+- The main-thread watchdogs (main-loop + off-thread), the per-event timer, and the sidebar/member rebuild timings now log only when `crate::logging::diagnostics()` is on (checked before building the warning, so free when off).
+- New setting `CapturePreferences.log_diagnostics` (serde default false), applied via `crate::logging::set_diagnostics` in `apply()`, with a "Performance Diagnostics" switch in Settings → Advanced → Log File. Off by default, so release logs stay clean; turn on to investigate a hitch.

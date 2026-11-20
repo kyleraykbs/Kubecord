@@ -83,7 +83,9 @@ impl AppState {
             let t1 = std::time::Instant::now();
             app.render_channels();
             let channels = t1.elapsed();
-            if (rail + channels) >= std::time::Duration::from_millis(16) {
+            if (rail + channels) >= std::time::Duration::from_millis(16)
+                && crate::logging::diagnostics()
+            {
                 tracing::warn!(
                     rail_ms = rail.as_millis() as u64,
                     channels_ms = channels.as_millis() as u64,

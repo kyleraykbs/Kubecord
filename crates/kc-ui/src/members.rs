@@ -259,7 +259,7 @@ impl AppState {
         let started = std::time::Instant::now();
         self.render_members_inner();
         let elapsed = started.elapsed();
-        if elapsed >= std::time::Duration::from_millis(16) {
+        if elapsed >= std::time::Duration::from_millis(16) && crate::logging::diagnostics() {
             tracing::warn!(
                 millis = elapsed.as_millis() as u64,
                 "rebuilding the member list blocked the main thread"

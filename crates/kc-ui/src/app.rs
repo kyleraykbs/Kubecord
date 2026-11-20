@@ -58,7 +58,7 @@ pub fn run() -> glib::ExitCode {
                 let now = std::time::Instant::now();
                 let gap = now.duration_since(last);
                 last = now;
-                if gap >= Duration::from_millis(250) {
+                if gap >= Duration::from_millis(250) && crate::logging::diagnostics() {
                     tracing::warn!(
                         millis = gap.as_millis() as u64,
                         "off-thread watchdog stalled"
@@ -136,7 +136,7 @@ pub fn run() -> glib::ExitCode {
                 let started = std::time::Instant::now();
                 ui_state.handle_event(event);
                 let elapsed = started.elapsed();
-                if elapsed >= Duration::from_millis(16) {
+                if elapsed >= Duration::from_millis(16) && crate::logging::diagnostics() {
                     tracing::warn!(
                         event = label,
                         millis = elapsed.as_millis() as u64,
@@ -153,7 +153,7 @@ pub fn run() -> glib::ExitCode {
             let now = std::time::Instant::now();
             let gap = now.duration_since(last_tick);
             last_tick = now;
-            if gap >= Duration::from_millis(250) {
+            if gap >= Duration::from_millis(250) && crate::logging::diagnostics() {
                 tracing::warn!(millis = gap.as_millis() as u64, "main thread stalled");
             }
             glib::ControlFlow::Continue
