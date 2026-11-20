@@ -9,7 +9,7 @@ use libadwaita::prelude::*;
 
 use kc_core::Snowflake;
 use kc_http::cdn;
-use kc_state::{Message, Reaction, State, permissions};
+use kc_state::{Message, Reaction, SendState, State, permissions};
 
 use crate::content::{day_key, format_time, gutter_time, long_date};
 use crate::rich;
@@ -60,11 +60,23 @@ pub(crate) struct ChatView {
     older_queued: bool,
     /// [`AppState::queue_scroll_settle`] is scheduled for the next idle.
     settle_queued: bool,
+    /// Drafts of messages shown optimistically, by nonce, kept so a failed
+    /// send can be retried.
+    pub(crate) pending_sends: std::collections::HashMap<String, crate::composer::OutgoingDraft>,
     /// A page of newer messages is being fetched for a window that stops
     /// short of the present.
     newer_loading: bool,
     /// "Jump to Present", shown while the window stops short of the present.
     present: Option<gtk::Button>,
+}
+
+/// A small flat text button used for inline actions like Retry / Delete.
+fn link_button(text: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(text);
+    button.add_css_class("flat");
+    button.add_css_class("kc-link-button");
+    button.set_focus_on_click(false);
+    button
 }
 
 /// Whether `message` continues the group started by `previous`.
@@ -298,7 +310,7 @@ impl AppState {
     }
 
     /// Whether the open channel's window stops short of the present.
-    fn detached(&self, channel_id: Snowflake) -> bool {
+    pub(crate) fn detached(&self, channel_id: Snowflake) -> bool {
         self.active().is_some_and(|(_, _, store)| {
             store.read(|state| {
                 state
@@ -985,6 +997,42 @@ impl AppState {
         }
         if !message.reactions.is_empty() {
             column.append(&self.reactions_row(message));
+        }
+
+        // A message shown before Discord confirms it: greyed while sending,
+        // or offering Retry / Delete if it failed.
+        match message.send_state {
+            SendState::Sending => {
+                body.add_css_class("kc-sending");
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let spinner = gtk::Spinner::new();
+                spinner.set_valign(gtk::Align::Center);
+                spinner.start();
+                footer.append(&spinner);
+                footer.append(&label("Sending…", &["caption", "dim-label"]));
+                column.append(&footer);
+            }
+            SendState::Failed => {
+                body.add_css_class("kc-sending");
+                let nonce = message.nonce.as_ref().and_then(|value| value.as_str());
+                let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                footer.append(&label("Couldn't send.", &["caption", "kc-send-failed"]));
+                if let Some(nonce) = nonce {
+                    let channel = message.channel_id;
+                    let retry = link_button("Retry");
+                    let app = self.clone();
+                    let key = nonce.to_owned();
+                    retry.connect_clicked(move |_| app.retry_send(channel, &key));
+                    footer.append(&retry);
+                    let delete = link_button("Delete");
+                    let app = self.clone();
+                    let key = nonce.to_owned();
+                    delete.connect_clicked(move |_| app.discard_send(channel, &key));
+                    footer.append(&delete);
+                }
+                column.append(&footer);
+            }
+            SendState::Sent => {}
         }
 
         row.append(&column);

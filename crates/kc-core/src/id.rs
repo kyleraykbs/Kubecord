@@ -26,6 +26,14 @@ impl Snowflake {
         (self.0 >> 22) + Self::DISCORD_EPOCH
     }
 
+    /// A snowflake for a given Unix time in milliseconds, with the given low
+    /// bits. Used to give a not-yet-sent message an id that sorts after every
+    /// real one, so it shows at the bottom while sending.
+    pub const fn from_unix_millis(unix_ms: u64, low: u32) -> Self {
+        let ms = unix_ms.saturating_sub(Self::DISCORD_EPOCH);
+        Self((ms << 22) | (low as u64 & 0x3F_FFFF))
+    }
+
     const DISCORD_EPOCH: u64 = 1_420_070_400_000;
 }
 

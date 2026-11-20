@@ -204,6 +204,22 @@ pub struct Message {
     /// Forwarded messages carry their content here.
     #[serde(default)]
     pub message_snapshots: Vec<MessageSnapshot>,
+    /// Local send progress for a message shown before Discord confirms it.
+    /// Never sent by Discord; always [`SendState::Sent`] for its messages.
+    #[serde(skip)]
+    pub send_state: SendState,
+}
+
+/// Where a message the user just sent is in its journey to Discord.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SendState {
+    /// Confirmed by Discord (every message it sends us).
+    #[default]
+    Sent,
+    /// Shown optimistically; the send request is in flight.
+    Sending,
+    /// The send request failed; the user can retry or discard it.
+    Failed,
 }
 
 /// A sticker reference on a message.
@@ -235,6 +251,43 @@ pub struct MessageSnapshot {
 }
 
 impl Message {
+    /// A message shown optimistically, before Discord confirms it. `nonce`
+    /// is echoed back by the gateway, matching this to its confirmation.
+    pub fn pending(
+        id: Snowflake,
+        channel_id: Snowflake,
+        author: User,
+        content: String,
+        nonce: String,
+    ) -> Self {
+        Message {
+            id,
+            channel_id,
+            guild_id: None,
+            author,
+            content,
+            timestamp: crate::time::now_iso(),
+            edited_timestamp: None,
+            tts: false,
+            mention_everyone: false,
+            mentions: Vec::new(),
+            mention_roles: Vec::new(),
+            attachments: Vec::new(),
+            embeds: Vec::new(),
+            reactions: Vec::new(),
+            pinned: false,
+            kind: Self::DEFAULT,
+            message_reference: None,
+            referenced_message: None,
+            sticker_items: Vec::new(),
+            flags: 0,
+            webhook_id: None,
+            nonce: Some(serde_json::Value::String(nonce)),
+            message_snapshots: Vec::new(),
+            send_state: SendState::Sending,
+        }
+    }
+
     /// Discord message type 19 is a reply.
     pub const REPLY: u8 = 19;
     pub const CHAT_INPUT_COMMAND: u8 = 20;

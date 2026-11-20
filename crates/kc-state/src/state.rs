@@ -10,11 +10,21 @@ use tracing::warn;
 use crate::channel::Channel;
 use crate::guild::{Emoji, Guild, Member, Presence, Relationship, Role, Stream, VoiceState};
 use crate::member_list::MemberList;
-use crate::message::{Message, Reaction};
+use crate::message::{Message, Reaction, SendState};
 use crate::settings::{CustomStatus, GuildFolder, GuildSettings, ReadState};
 use crate::user::User;
 
 const MESSAGE_WINDOW: usize = 300;
+
+/// A nonce as a plain string, whether Discord echoed it as a string or a
+/// number, for matching an optimistic message to its confirmation.
+fn nonce_str(nonce: &Option<Value>) -> Option<String> {
+    match nonce.as_ref()? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
 
 /// A per-channel, id-ordered window of the most recent messages.
 #[derive(Debug)]
@@ -91,6 +101,32 @@ impl MessageBuffer {
             let excess = self.messages.len() - self.limit;
             self.messages.drain(..excess);
         }
+    }
+
+    /// Adds a message shown before Discord confirms it. Its synthetic id
+    /// sorts after every real message, so it appears at the bottom.
+    pub fn insert_pending(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
+    /// Removes and returns the id of the optimistic message with this nonce,
+    /// if one is still pending.
+    pub fn take_pending(&mut self, nonce: &str) -> Option<Snowflake> {
+        let index = self.messages.iter().position(|message| {
+            message.send_state != SendState::Sent
+                && nonce_str(&message.nonce).as_deref() == Some(nonce)
+        })?;
+        Some(self.messages.remove(index).id)
+    }
+
+    /// Sets the send progress of a pending message, found by nonce.
+    pub fn set_send_state(&mut self, nonce: &str, state: SendState) -> Option<Snowflake> {
+        let message = self.messages.iter_mut().find(|message| {
+            message.send_state != SendState::Sent
+                && nonce_str(&message.nonce).as_deref() == Some(nonce)
+        })?;
+        message.send_state = state;
+        Some(message.id)
     }
 
     /// Merges a page of history, deduplicating by id.
@@ -926,8 +962,18 @@ impl State {
         }
 
         let buffer = self.messages.entry(channel_id).or_default();
+        // The real message replaces the optimistic one shown while it sent.
+        let replaced = nonce_str(&message.nonce)
+            .and_then(|nonce| buffer.take_pending(&nonce))
+            .filter(|pending| *pending != id);
         if !buffer.is_detached() {
             buffer.insert(message);
+        }
+        if let Some(pending) = replaced {
+            events.push(StoreEvent::MessageDeleted {
+                channel_id,
+                message_id: pending,
+            });
         }
         if let Some(channel) = self.channels.get_mut(&channel_id) {
             channel.last_message_id = Some(id);
@@ -1480,6 +1526,59 @@ impl Store {
     pub fn mark_read(&self, channel_id: Snowflake, message_id: Snowflake) {
         self.inner.write().mark_read(channel_id, message_id);
     }
+
+    /// Shows a message optimistically, before Discord confirms it. Does
+    /// nothing while the channel's window is on older messages, since the
+    /// pending row would sit below a gap.
+    pub fn add_pending(&self, channel_id: Snowflake, message: Message) {
+        let id = message.id;
+        {
+            let mut state = self.inner.write();
+            let buffer = state.messages.entry(channel_id).or_default();
+            if buffer.is_detached() {
+                return;
+            }
+            buffer.insert_pending(message);
+        }
+        let _ = self.tx.send(StoreEvent::MessageAdded {
+            channel_id,
+            message_id: id,
+        });
+    }
+
+    /// Marks the optimistic message with this nonce as failed (or another
+    /// send state). Emits an update so the row redraws.
+    pub fn set_send_state(&self, channel_id: Snowflake, nonce: &str, state: SendState) {
+        let id = self
+            .inner
+            .write()
+            .messages
+            .get_mut(&channel_id)
+            .and_then(|buffer| buffer.set_send_state(nonce, state));
+        if let Some(message_id) = id {
+            let _ = self.tx.send(StoreEvent::MessageUpdated {
+                channel_id,
+                message_id,
+            });
+        }
+    }
+
+    /// Drops the optimistic message with this nonce (a failed send the user
+    /// discards, or a retry about to re-add it).
+    pub fn drop_pending(&self, channel_id: Snowflake, nonce: &str) {
+        let id = self
+            .inner
+            .write()
+            .messages
+            .get_mut(&channel_id)
+            .and_then(|buffer| buffer.take_pending(nonce));
+        if let Some(message_id) = id {
+            let _ = self.tx.send(StoreEvent::MessageDeleted {
+                channel_id,
+                message_id,
+            });
+        }
+    }
 }
 
 fn snowflake(value: &Value, key: &str) -> Option<Snowflake> {
@@ -1566,6 +1665,55 @@ mod tests {
         store.apply("MESSAGE_CREATE", &message(20, 10, "newest"));
         store.write(|state| state.load_around(Snowflake(10), vec![parsed(10, 10), parsed(20, 10)]));
         assert!(!store.read(|state| state.messages[&Snowflake(10)].is_detached()));
+    }
+
+    #[test]
+    fn an_optimistic_message_is_replaced_by_its_confirmation() {
+        let store = Store::new();
+        store.apply(
+            "CHANNEL_CREATE",
+            &json!({"id": "10", "type": 0, "guild_id": "5", "name": "general", "position": 1}),
+        );
+        let mut pending = parsed(1_000_000, 10);
+        pending.send_state = SendState::Sending;
+        pending.nonce = Some(json!("abc"));
+        store.add_pending(Snowflake(10), pending);
+        store.read(|state| {
+            let messages = state.messages(Snowflake(10));
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].send_state, SendState::Sending);
+        });
+
+        // The gateway echo carries the same nonce but the real id.
+        let mut confirmed = message(42, 10, "hi");
+        confirmed["nonce"] = json!("abc");
+        store.apply("MESSAGE_CREATE", &confirmed);
+        store.read(|state| {
+            let messages = state.messages(Snowflake(10));
+            assert_eq!(messages.len(), 1, "the pending row was replaced, not kept");
+            assert_eq!(messages[0].id, Snowflake(42));
+            assert_eq!(messages[0].send_state, SendState::Sent);
+        });
+    }
+
+    #[test]
+    fn a_failed_send_can_be_marked_and_dropped() {
+        let store = Store::new();
+        store.apply(
+            "CHANNEL_CREATE",
+            &json!({"id": "10", "type": 0, "guild_id": "5", "name": "general", "position": 1}),
+        );
+        let mut pending = parsed(1_000_000, 10);
+        pending.send_state = SendState::Sending;
+        pending.nonce = Some(json!("n"));
+        store.add_pending(Snowflake(10), pending);
+        store.set_send_state(Snowflake(10), "n", SendState::Failed);
+        assert_eq!(
+            store.read(|state| state.messages(Snowflake(10))[0].send_state),
+            SendState::Failed
+        );
+        store.drop_pending(Snowflake(10), "n");
+        assert!(store.read(|state| state.messages(Snowflake(10)).is_empty()));
     }
 
     #[test]

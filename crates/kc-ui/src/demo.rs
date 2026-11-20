@@ -557,6 +557,34 @@ impl AppState {
                     app.demo_moderation(&mode);
                 });
             }
+            "chat-sending" => {
+                self.open_channel(general);
+                self.demo_chat(&store);
+                // One message still sending, one that failed, as a user would
+                // see just after pressing Enter and after a send failed.
+                if let Some(me) = store.read(|state| state.me.clone()) {
+                    let general_id = Snowflake::new(GENERAL);
+                    let mut sending = kc_state::Message::pending(
+                        Snowflake::from_unix_millis(unix_millis_now(), 1),
+                        general_id,
+                        me.clone(),
+                        "sending this one…".to_owned(),
+                        "demo-sending".to_owned(),
+                    );
+                    sending.guild_id = Some(Snowflake::new(GUILD));
+                    store.add_pending(general_id, sending);
+                    let mut failed = kc_state::Message::pending(
+                        Snowflake::from_unix_millis(unix_millis_now(), 2),
+                        general_id,
+                        me,
+                        "this one did not go through".to_owned(),
+                        "demo-failed".to_owned(),
+                    );
+                    failed.guild_id = Some(Snowflake::new(GUILD));
+                    store.add_pending(general_id, failed);
+                    store.set_send_state(general_id, "demo-failed", kc_state::SendState::Failed);
+                }
+            }
             _ => {
                 self.open_channel(general);
                 self.demo_chat(&store);

@@ -25,6 +25,23 @@ const PICKER_EMOJI: usize = 400;
 /// A guild name and its `(id, name, animated)` emoji, for the picker.
 type EmojiGroup = (String, Vec<(Snowflake, String, bool)>);
 
+/// Everything needed to send a message, kept so a failed one can be retried.
+#[derive(Clone)]
+pub(crate) struct OutgoingDraft {
+    pub content: String,
+    pub reply_to: Option<Snowflake>,
+    pub mention_reply: bool,
+    pub uploads: Vec<Upload>,
+}
+
+/// Low bits for an optimistic message's id, so two sent in the same
+/// millisecond still sort in send order and never collide.
+fn next_low() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed) & 0x3F_FFFF
+}
+
 /// One autocomplete suggestion.
 struct Completion {
     /// Shown in the list.
@@ -273,9 +290,6 @@ impl AppState {
             self.set_status("Messages are limited to 2000 characters");
             return;
         }
-        if editing.is_none() {
-            self.follow_sent_message(channel);
-        }
 
         let mention_reply = self.context_ping.is_active();
         self.composer.buffer().set_text("");
@@ -301,6 +315,73 @@ impl AppState {
             return;
         }
 
+        self.dispatch_send(
+            channel,
+            OutgoingDraft {
+                content,
+                reply_to,
+                mention_reply,
+                uploads,
+            },
+        );
+    }
+
+    /// Sends a message, showing it at once as a greyed-out "sending" row that
+    /// the gateway's confirmation (matched by nonce) replaces. A failed send
+    /// stays as a row offering Retry or Delete; retry calls back here.
+    pub(crate) fn dispatch_send(self: &Rc<Self>, channel: Snowflake, draft: OutgoingDraft) {
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        // Text (even with attachments) shows optimistically; an
+        // attachments-only send would be an empty bubble, so it does not,
+        // and neither does a send while the view is on older messages (it
+        // jumps to the present below, where the real message lands).
+        let nonce = (!draft.content.is_empty() && !self.detached(channel))
+            .then(|| store.read(|state| state.me.clone()))
+            .flatten()
+            .map(|me| {
+                let id = Snowflake::from_unix_millis(kc_state::time::unix_millis_now(), next_low());
+                let nonce = id.get().to_string();
+                let mut message = kc_state::Message::pending(
+                    id,
+                    channel,
+                    me,
+                    draft.content.clone(),
+                    nonce.clone(),
+                );
+                if let Some(target) = draft.reply_to {
+                    message.kind = kc_state::Message::REPLY;
+                    message.message_reference = Some(kc_state::MessageReference {
+                        message_id: Some(target),
+                        channel_id: Some(channel),
+                        guild_id: None,
+                    });
+                    message.referenced_message = store
+                        .read(|state| {
+                            state
+                                .messages
+                                .get(&channel)
+                                .and_then(|b| b.get(target).cloned())
+                        })
+                        .map(Box::new);
+                }
+                store.add_pending(channel, message);
+                self.chat
+                    .borrow_mut()
+                    .pending_sends
+                    .insert(nonce.clone(), draft.clone());
+                nonce
+            });
+        self.follow_sent_message(channel);
+
+        let OutgoingDraft {
+            content,
+            reply_to,
+            mention_reply,
+            uploads,
+        } = draft;
+        let send_nonce = nonce.clone();
         self.spawn(
             async move {
                 let mut attachments = Vec::with_capacity(uploads.len());
@@ -322,18 +403,56 @@ impl AppState {
                         reply_to,
                         mention_reply,
                         attachments,
+                        nonce: send_nonce,
                         ..Outgoing::default()
                     },
                 )
                 .await
             },
-            move |app, result| {
-                if let Err(error) = result {
-                    app.restore_draft(&typed);
-                    app.set_status(&format!("Message not sent: {error}"));
+            move |app, result| match result {
+                Ok(message) => {
+                    // Reconcile at once (the gateway echo, if it also comes,
+                    // is idempotent); drop the retry draft.
+                    if let (Some(nonce), Some((_, _, store))) = (&nonce, app.active()) {
+                        app.chat.borrow_mut().pending_sends.remove(nonce);
+                        if let Ok(value) = serde_json::to_value(&message) {
+                            store.apply("MESSAGE_CREATE", &value);
+                        }
+                    }
                 }
+                Err(error) => match &nonce {
+                    // The row stays, now marked failed with Retry / Delete.
+                    Some(nonce) => {
+                        if let Some((_, _, store)) = app.active() {
+                            store.set_send_state(channel, nonce, kc_state::SendState::Failed);
+                        }
+                        app.set_status(&format!("Message not sent: {error}"));
+                    }
+                    // No optimistic row (an attachments-only or
+                    // jumped-to-present send); just report it.
+                    None => app.set_status(&format!("Message not sent: {error}")),
+                },
             },
         );
+    }
+
+    /// Re-sends a message whose send failed, dropping the failed row first.
+    pub(crate) fn retry_send(self: &Rc<Self>, channel: Snowflake, nonce: &str) {
+        let draft = self.chat.borrow_mut().pending_sends.remove(nonce);
+        if let Some((_, _, store)) = self.active() {
+            store.drop_pending(channel, nonce);
+        }
+        if let Some(draft) = draft {
+            self.dispatch_send(channel, draft);
+        }
+    }
+
+    /// Discards a failed message the user chose not to resend.
+    pub(crate) fn discard_send(self: &Rc<Self>, channel: Snowflake, nonce: &str) {
+        self.chat.borrow_mut().pending_sends.remove(nonce);
+        if let Some((_, _, store)) = self.active() {
+            store.drop_pending(channel, nonce);
+        }
     }
 
     /// Puts unsent text back unless the user has already typed something new.

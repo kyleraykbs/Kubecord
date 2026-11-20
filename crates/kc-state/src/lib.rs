@@ -22,7 +22,7 @@ pub use guild::{Emoji, Guild, Member, Presence, Relationship, Role, VoiceState};
 pub use member_list::{MemberList, MemberListItem};
 pub use message::{
     Attachment, Embed, EmbedField, EmbedMedia, Message, MessageReference, Reaction, ReactionEmoji,
-    StickerItem,
+    SendState, StickerItem,
 };
 pub use queries::ChannelSection;
 pub use settings::{CustomStatus, GuildEntry, GuildFolder, GuildSettings, ReadState};

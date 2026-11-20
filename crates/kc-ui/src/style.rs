@@ -124,6 +124,30 @@ const CSS: &str = r#"
     box-shadow: inset 2px 0 0 @warning_bg_color;
 }
 
+/* A message shown before Discord confirms it reads as half-there. */
+.kc-message.kc-sending {
+    opacity: 0.55;
+}
+
+.kc-send-failed {
+    color: @error_bg_color;
+}
+
+/* Inline text actions (Retry / Delete) sit flush, like links. */
+button.kc-link-button {
+    padding: 0 2px;
+    min-height: 0;
+    min-width: 0;
+    background: none;
+    box-shadow: none;
+    color: @accent_color;
+}
+
+button.kc-link-button:hover {
+    text-decoration: underline;
+    background: none;
+}
+
 .kc-message.kc-first {
     margin-top: 12px;
 }
