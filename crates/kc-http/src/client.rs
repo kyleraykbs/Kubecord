@@ -164,6 +164,19 @@ impl HttpClient {
             .await
     }
 
+    /// A moderation request: `reason` (if any) goes to the audit log
+    /// through the `X-Audit-Log-Reason` header.
+    async fn request_json_reason(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        reason: Option<&str>,
+    ) -> Result<Value> {
+        self.send_with_retries(method, path, body, None, None, reason)
+            .await
+    }
+
     /// A request that may carry a solved captcha, for retrying one that
     /// Discord answered with [`Error::Captcha`].
     async fn request_json_full(
@@ -174,7 +187,21 @@ impl HttpClient {
         context: Option<&Value>,
         captcha: Option<&CaptchaAnswer>,
     ) -> Result<Value> {
+        self.send_with_retries(method, path, body, context, captcha, None)
+            .await
+    }
+
+    async fn send_with_retries(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        context: Option<&Value>,
+        captcha: Option<&CaptchaAnswer>,
+        reason: Option<&str>,
+    ) -> Result<Value> {
         let route = normalise_route(method.as_str(), path);
+        let reason = reason.and_then(audit_log_reason);
 
         for attempt in 0..MAX_ATTEMPTS {
             self.limiter.acquire(&route).await;
@@ -185,6 +212,9 @@ impl HttpClient {
             }
             if let Some(context) = context {
                 request = request.header("x-context-properties", base64_json(context));
+            }
+            if let Some(reason) = &reason {
+                request = request.header("x-audit-log-reason", reason);
             }
             if let Some(captcha) = captcha {
                 request = request.header("x-captcha-key", &captcha.key);
@@ -410,21 +440,289 @@ impl HttpClient {
         Self::parse(value, StatusCode::CREATED)
     }
 
-    /// Creates an invite to a channel and returns its code.
+    /// Creates a one-day invite to a channel and returns its code.
     pub async fn create_invite(&self, channel_id: Snowflake) -> Result<String> {
+        self.create_invite_with(channel_id, 86_400, 0).await
+    }
+
+    /// Creates an invite with a chosen lifetime (seconds, 0 = never) and
+    /// use limit (0 = unlimited) and returns its code.
+    pub async fn create_invite_with(
+        &self,
+        channel_id: Snowflake,
+        max_age: u32,
+        max_uses: u32,
+    ) -> Result<String> {
         let value = self
             .request_json_in(
                 Method::POST,
                 &format!("/channels/{channel_id}/invites"),
-                Some(&json!({ "max_age": 86_400, "max_uses": 0, "unique": false })),
+                Some(&invite_body(max_age, max_uses)),
                 Some(&json!({})),
             )
             .await?;
-        Ok(value
-            .get("code")
-            .and_then(|code| code.as_str())
-            .unwrap_or_default()
-            .to_owned())
+        Ok(value["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    /// Every invite of a guild (needs Manage Server).
+    pub async fn guild_invites(&self, guild_id: Snowflake) -> Result<Vec<Invite>> {
+        let value = self.get(&format!("/guilds/{guild_id}/invites")).await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// Revokes an invite.
+    pub async fn delete_invite(&self, code: &str, reason: Option<&str>) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/invites/{}", percent_encode(code)),
+            None,
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    // -- moderation ------------------------------------------------------
+
+    /// Removes a member from a guild (they may join again).
+    pub async fn kick_member(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/guilds/{guild_id}/members/{user_id}"),
+            None,
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Bans a user, deleting their messages of the last
+    /// `delete_message_seconds` (0 to 604800).
+    pub async fn ban_member(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        delete_message_seconds: u32,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::PUT,
+            &format!("/guilds/{guild_id}/bans/{user_id}"),
+            Some(&ban_body(delete_message_seconds)),
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unban_member(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/guilds/{guild_id}/bans/{user_id}"),
+            None,
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A guild's bans (needs Ban Members), up to 1000.
+    pub async fn bans(&self, guild_id: Snowflake) -> Result<Vec<Ban>> {
+        let value = self
+            .get(&format!("/guilds/{guild_id}/bans?limit=1000"))
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    /// Changes one thing about a member: timeout, voice channel, server
+    /// mute or deafen, nickname, or their whole role list.
+    pub async fn edit_member(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        edit: &MemberEdit,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::PATCH,
+            &format!("/guilds/{guild_id}/members/{user_id}"),
+            Some(&edit.body()),
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Gives a member one role.
+    pub async fn add_member_role(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        role_id: Snowflake,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::PUT,
+            &format!("/guilds/{guild_id}/members/{user_id}/roles/{role_id}"),
+            None,
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Takes one role off a member.
+    pub async fn remove_member_role(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        role_id: Snowflake,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/guilds/{guild_id}/members/{user_id}/roles/{role_id}"),
+            None,
+            reason,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The most recent audit log entries (needs View Audit Log), with the
+    /// users they refer to.
+    pub async fn audit_log(&self, guild_id: Snowflake, limit: u8) -> Result<Value> {
+        let limit = limit.clamp(1, 100);
+        self.get(&format!("/guilds/{guild_id}/audit-logs?limit={limit}"))
+            .await
+    }
+
+    // -- roles -----------------------------------------------------------
+
+    pub async fn create_role(
+        &self,
+        guild_id: Snowflake,
+        edit: &RoleEdit,
+    ) -> Result<kc_state::Role> {
+        let value = self
+            .request_json_reason(
+                Method::POST,
+                &format!("/guilds/{guild_id}/roles"),
+                Some(&edit.body()),
+                None,
+            )
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    pub async fn edit_role(
+        &self,
+        guild_id: Snowflake,
+        role_id: Snowflake,
+        edit: &RoleEdit,
+    ) -> Result<kc_state::Role> {
+        let value = self
+            .request_json_reason(
+                Method::PATCH,
+                &format!("/guilds/{guild_id}/roles/{role_id}"),
+                Some(&edit.body()),
+                None,
+            )
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    pub async fn delete_role(&self, guild_id: Snowflake, role_id: Snowflake) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/guilds/{guild_id}/roles/{role_id}"),
+            None,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sets role positions: `(role, position)` pairs.
+    pub async fn reorder_roles(
+        &self,
+        guild_id: Snowflake,
+        positions: &[(Snowflake, i32)],
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::PATCH,
+            &format!("/guilds/{guild_id}/roles"),
+            Some(&positions_body(positions)),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    // -- channels --------------------------------------------------------
+
+    pub async fn edit_channel(&self, channel_id: Snowflake, edit: &ChannelEdit) -> Result<Channel> {
+        let value = self
+            .request_json_reason(
+                Method::PATCH,
+                &format!("/channels/{channel_id}"),
+                Some(&edit.body()),
+                None,
+            )
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
+    pub async fn delete_channel(&self, channel_id: Snowflake) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/channels/{channel_id}"),
+            None,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Sets a channel's permission overwrite for a role (`kind` 0) or a
+    /// member (1).
+    pub async fn set_overwrite(
+        &self,
+        channel_id: Snowflake,
+        target: Snowflake,
+        kind: u8,
+        allow: u64,
+        deny: u64,
+    ) -> Result<()> {
+        self.request_json_reason(
+            Method::PUT,
+            &format!("/channels/{channel_id}/permissions/{target}"),
+            Some(&overwrite_body(kind, allow, deny)),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_overwrite(&self, channel_id: Snowflake, target: Snowflake) -> Result<()> {
+        self.request_json_reason(
+            Method::DELETE,
+            &format!("/channels/{channel_id}/permissions/{target}"),
+            None,
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Leaves a guild.
@@ -1044,6 +1342,208 @@ fn encode_emoji(emoji: &str) -> String {
     out
 }
 
+/// One change to a guild member (`PATCH /guilds/{guild}/members/{user}`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MemberEdit {
+    /// `None` clears the nickname.
+    Nick(Option<String>),
+    /// Replaces the member's whole role list.
+    Roles(Vec<Snowflake>),
+    /// Times out until this ISO 8601 moment; `None` removes the timeout.
+    Timeout(Option<String>),
+    /// Moves to a voice channel; `None` disconnects.
+    Move(Option<Snowflake>),
+    Mute(bool),
+    Deafen(bool),
+}
+
+impl MemberEdit {
+    pub fn body(&self) -> Value {
+        match self {
+            Self::Nick(nick) => json!({ "nick": nick.as_deref().unwrap_or("") }),
+            Self::Roles(roles) => {
+                json!({ "roles": roles.iter().map(ToString::to_string).collect::<Vec<_>>() })
+            }
+            Self::Timeout(until) => json!({ "communication_disabled_until": until }),
+            Self::Move(channel) => json!({ "channel_id": channel.map(|id| id.to_string()) }),
+            Self::Mute(mute) => json!({ "mute": mute }),
+            Self::Deafen(deaf) => json!({ "deaf": deaf }),
+        }
+    }
+}
+
+/// Fields to set on a role; `None` leaves a field alone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoleEdit {
+    pub name: Option<String>,
+    /// RGB; 0 is no colour.
+    pub color: Option<u32>,
+    pub hoist: Option<bool>,
+    pub mentionable: Option<bool>,
+    pub permissions: Option<u64>,
+}
+
+impl RoleEdit {
+    pub fn body(&self) -> Value {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = &self.name {
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(color) = self.color {
+            body.insert("color".into(), json!(color));
+        }
+        if let Some(hoist) = self.hoist {
+            body.insert("hoist".into(), json!(hoist));
+        }
+        if let Some(mentionable) = self.mentionable {
+            body.insert("mentionable".into(), json!(mentionable));
+        }
+        if let Some(permissions) = self.permissions {
+            // A bit field wider than JSON numbers: Discord takes a string.
+            body.insert("permissions".into(), json!(permissions.to_string()));
+        }
+        Value::Object(body)
+    }
+}
+
+/// Fields to set on a guild channel; `None` leaves a field alone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelEdit {
+    pub name: Option<String>,
+    /// Empty clears the topic.
+    pub topic: Option<String>,
+    /// Slowmode in seconds (0 to 21600).
+    pub rate_limit_per_user: Option<u32>,
+    pub nsfw: Option<bool>,
+    pub bitrate: Option<u32>,
+    /// 0 is no limit.
+    pub user_limit: Option<u32>,
+}
+
+impl ChannelEdit {
+    pub fn body(&self) -> Value {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = &self.name {
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(topic) = &self.topic {
+            body.insert("topic".into(), json!(topic));
+        }
+        if let Some(seconds) = self.rate_limit_per_user {
+            body.insert("rate_limit_per_user".into(), json!(seconds));
+        }
+        if let Some(nsfw) = self.nsfw {
+            body.insert("nsfw".into(), json!(nsfw));
+        }
+        if let Some(bitrate) = self.bitrate {
+            body.insert("bitrate".into(), json!(bitrate));
+        }
+        if let Some(limit) = self.user_limit {
+            body.insert("user_limit".into(), json!(limit));
+        }
+        Value::Object(body)
+    }
+}
+
+/// A ban: who, and the reason given.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct Ban {
+    pub user: User,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// An invite of a guild, as `GET /guilds/{guild}/invites` lists it.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Invite {
+    pub code: String,
+    #[serde(default)]
+    pub inviter: Option<User>,
+    #[serde(default)]
+    pub channel: Option<InviteChannel>,
+    #[serde(default)]
+    pub uses: u32,
+    /// 0 is unlimited.
+    #[serde(default)]
+    pub max_uses: u32,
+    /// Seconds from creation; 0 never expires.
+    #[serde(default)]
+    pub max_age: u32,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct InviteChannel {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn invite_body(max_age: u32, max_uses: u32) -> Value {
+    json!({ "max_age": max_age, "max_uses": max_uses, "temporary": false, "unique": true })
+}
+
+fn ban_body(delete_message_seconds: u32) -> Value {
+    json!({ "delete_message_seconds": delete_message_seconds.min(604_800) })
+}
+
+fn positions_body(positions: &[(Snowflake, i32)]) -> Value {
+    Value::Array(
+        positions
+            .iter()
+            .map(|(id, position)| json!({ "id": id.to_string(), "position": position }))
+            .collect(),
+    )
+}
+
+fn overwrite_body(kind: u8, allow: u64, deny: u64) -> Value {
+    json!({ "type": kind, "allow": allow.to_string(), "deny": deny.to_string() })
+}
+
+/// The `X-Audit-Log-Reason` value: percent-encoded UTF-8, at most 512
+/// characters of reason. Blank reasons send no header.
+fn audit_log_reason(reason: &str) -> Option<String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    let reason: String = reason.chars().take(512).collect();
+    Some(percent_encode(&reason))
+}
+
+/// A `data:` URI for an image upload (guild icons).
+pub fn image_data_uri(bytes: &[u8]) -> String {
+    use base64::Engine;
+    let mime = match bytes {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, ..] => "image/jpeg",
+        [b'G', b'I', b'F', ..] => "image/gif",
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => "image/webp",
+        _ => "image/png",
+    };
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 /// A solved captcha: the widget's response token, and the request token
 /// from the challenge.
 #[derive(Clone, Debug)]
@@ -1068,10 +1568,17 @@ fn error_from_body(status: StatusCode, bytes: &[u8]) -> Error {
             rqtoken: text("captcha_rqtoken"),
         };
     }
+    let detail = value
+        .as_ref()
+        .and_then(|value| value.get("errors"))
+        .and_then(|errors| first_form_error(errors, ""));
     let parsed = value.and_then(|value| serde_json::from_value::<ApiErrorBody>(value).ok());
     let message = parsed
         .as_ref()
-        .map(|body| body.message.clone())
+        .map(|body| match &detail {
+            Some(detail) => format!("{} ({detail})", body.message),
+            None => body.message.clone(),
+        })
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| {
             let body = String::from_utf8_lossy(bytes);
@@ -1088,6 +1595,31 @@ fn error_from_body(status: StatusCode, bytes: &[u8]) -> Error {
         message,
         retry_after: parsed.as_ref().and_then(|body| body.retry_after),
     }
+}
+
+/// The first field error of a 50035 "Invalid Form Body", as
+/// `field.path: message`.
+fn first_form_error(errors: &Value, path: &str) -> Option<String> {
+    let object = errors.as_object()?;
+    if let Some(message) = object
+        .get("_errors")
+        .and_then(|list| list.get(0))
+        .and_then(|error| error["message"].as_str())
+    {
+        return Some(if path.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{path}: {message}")
+        });
+    }
+    object.iter().find_map(|(key, value)| {
+        let path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        first_form_error(value, &path)
+    })
 }
 
 #[cfg(test)]
@@ -1151,5 +1683,97 @@ mod tests {
         let client = HttpClient::new(Token::new("test-token"));
         let request = client.build_request(Method::POST, "/channels/10/attachments");
         assert_eq!(request.method(), Method::POST);
+    }
+
+    #[test]
+    fn audit_log_reasons_are_percent_encoded_and_bounded() {
+        assert_eq!(audit_log_reason("  "), None);
+        assert_eq!(
+            audit_log_reason("spam & raids: 2/3 ✓").as_deref(),
+            Some("spam%20%26%20raids%3A%202%2F3%20%E2%9C%93")
+        );
+        let long = "x".repeat(600);
+        assert_eq!(audit_log_reason(&long).unwrap().len(), 512);
+    }
+
+    #[test]
+    fn member_edits_build_discords_payloads() {
+        assert_eq!(
+            MemberEdit::Timeout(Some("2030-01-01T00:00:00+00:00".into())).body(),
+            json!({"communication_disabled_until": "2030-01-01T00:00:00+00:00"})
+        );
+        assert_eq!(
+            MemberEdit::Timeout(None).body(),
+            json!({"communication_disabled_until": null})
+        );
+        assert_eq!(
+            MemberEdit::Move(Some(Snowflake::new(5))).body(),
+            json!({"channel_id": "5"})
+        );
+        assert_eq!(MemberEdit::Move(None).body(), json!({"channel_id": null}));
+        assert_eq!(MemberEdit::Mute(true).body(), json!({"mute": true}));
+        assert_eq!(MemberEdit::Deafen(false).body(), json!({"deaf": false}));
+        assert_eq!(MemberEdit::Nick(None).body(), json!({"nick": ""}));
+        assert_eq!(
+            MemberEdit::Roles(vec![Snowflake::new(1), Snowflake::new(2)]).body(),
+            json!({"roles": ["1", "2"]})
+        );
+    }
+
+    #[test]
+    fn role_channel_and_overwrite_payloads() {
+        let edit = RoleEdit {
+            name: Some("Mods".into()),
+            permissions: Some(1 << 40 | 1 << 1),
+            hoist: Some(true),
+            ..RoleEdit::default()
+        };
+        assert_eq!(
+            edit.body(),
+            json!({"name": "Mods", "permissions": "1099511627778", "hoist": true})
+        );
+        assert_eq!(RoleEdit::default().body(), json!({}));
+        let edit = ChannelEdit {
+            topic: Some(String::new()),
+            rate_limit_per_user: Some(30),
+            user_limit: Some(0),
+            ..ChannelEdit::default()
+        };
+        assert_eq!(
+            edit.body(),
+            json!({"topic": "", "rate_limit_per_user": 30, "user_limit": 0})
+        );
+        assert_eq!(
+            overwrite_body(0, 1 << 10, 1 << 11),
+            json!({"type": 0, "allow": "1024", "deny": "2048"})
+        );
+        assert_eq!(
+            positions_body(&[(Snowflake::new(3), 2)]),
+            json!([{"id": "3", "position": 2}])
+        );
+        assert_eq!(
+            ban_body(9_999_999),
+            json!({"delete_message_seconds": 604800})
+        );
+        assert_eq!(
+            invite_body(0, 10),
+            json!({"max_age": 0, "max_uses": 10, "temporary": false, "unique": true})
+        );
+    }
+
+    #[test]
+    fn image_uploads_are_data_uris_with_their_type() {
+        assert!(image_data_uri(&[0x89, b'P', b'N', b'G', 1]).starts_with("data:image/png;base64,"));
+        assert!(image_data_uri(&[0xFF, 0xD8, 0xFF]).starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn form_errors_name_the_field() {
+        let body = br#"{"message":"Invalid Form Body","code":50035,"errors":{"name":{"_errors":[{"code":"BASE_TYPE_REQUIRED","message":"This field is required"}]}}}"#;
+        let error = error_from_body(StatusCode::BAD_REQUEST, body);
+        assert!(
+            error.to_string().contains("name: This field is required"),
+            "{error}"
+        );
     }
 }

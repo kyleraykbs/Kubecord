@@ -1790,7 +1790,9 @@ impl AppState {
                 self.queue_sidebar();
                 self.render_user_bar();
             }
-            StoreEvent::VoiceServerUpdated { .. } | StoreEvent::StreamUpdated(_) => {}
+            StoreEvent::VoiceServerUpdated { .. }
+            | StoreEvent::StreamUpdated(_)
+            | StoreEvent::BansUpdated(_) => {}
         }
     }
 

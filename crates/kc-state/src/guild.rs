@@ -20,6 +20,10 @@ pub struct Role {
     pub permissions: u64,
     #[serde(default)]
     pub mentionable: bool,
+    /// Owned by an integration (a bot's own role, the booster role): it
+    /// cannot be assigned or removed by hand.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// A custom guild emoji.
@@ -65,6 +69,19 @@ pub struct Member {
     pub roles: Vec<Snowflake>,
     #[serde(default)]
     pub joined_at: Option<String>,
+    /// While in the future, the member is timed out (ISO 8601).
+    #[serde(default)]
+    pub communication_disabled_until: Option<String>,
+}
+
+impl Member {
+    /// Whether a timeout is running at `now_millis` (Unix milliseconds).
+    pub fn timed_out_at(&self, now_millis: u64) -> bool {
+        self.communication_disabled_until
+            .as_deref()
+            .and_then(crate::time::iso_to_unix_millis)
+            .is_some_and(|until| until > now_millis)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -93,6 +110,17 @@ pub struct Guild {
     /// When the current user joined, as an ISO 8601 timestamp.
     #[serde(default)]
     pub joined_at: Option<String>,
+    #[serde(default)]
+    pub afk_channel_id: Option<Snowflake>,
+    /// Seconds of silence before a member is moved to the AFK channel.
+    #[serde(default)]
+    pub afk_timeout: Option<u32>,
+    /// Where join and boost messages are posted.
+    #[serde(default)]
+    pub system_channel_id: Option<Snowflake>,
+    /// 0: all messages, 1: only mentions.
+    #[serde(default)]
+    pub default_message_notifications: Option<u8>,
 }
 
 impl Guild {

@@ -178,6 +178,12 @@ pub struct Channel {
     pub rate_limit_per_user: Option<u32>,
     #[serde(default)]
     pub thread_metadata: Option<ThreadMetadata>,
+    /// Voice channels: bits per second.
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+    /// Voice channels: most people at once; 0 is no limit.
+    #[serde(default)]
+    pub user_limit: Option<u32>,
     /// Present on a thread the current user has joined.
     #[serde(default, skip_serializing)]
     pub member: Option<serde_json::Value>,

@@ -148,6 +148,9 @@ pub enum StoreEvent {
     SettingsUpdated,
     /// The lazily loaded member list of a guild changed.
     MemberListUpdated(Snowflake),
+    /// Someone was banned from or unbanned in a guild (bans are not
+    /// cached; a bans list should fetch again).
+    BansUpdated(Snowflake),
 }
 
 #[derive(Default)]
@@ -361,6 +364,11 @@ impl State {
                 }
             }
             "GUILD_MEMBER_LIST_UPDATE" => self.member_list_update(data, &mut events),
+            "GUILD_BAN_ADD" | "GUILD_BAN_REMOVE" => {
+                if let Some(guild_id) = snowflake(data, "guild_id") {
+                    events.push(StoreEvent::BansUpdated(guild_id));
+                }
+            }
             "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
                 if let (Some(guild_id), Ok(role)) = (
                     snowflake(data, "guild_id"),
@@ -794,6 +802,21 @@ impl State {
         }
         if let Some(owner) = snowflake(data, "owner_id") {
             guild.owner_id = Some(owner);
+        }
+        if let Some(description) = data.get("description") {
+            guild.description = description.as_str().map(str::to_owned);
+        }
+        if let Some(afk) = data.get("afk_channel_id") {
+            guild.afk_channel_id = afk.as_str().and_then(|id| id.parse().ok());
+        }
+        if let Some(timeout) = data["afk_timeout"].as_u64() {
+            guild.afk_timeout = Some(timeout as u32);
+        }
+        if let Some(system) = data.get("system_channel_id") {
+            guild.system_channel_id = system.as_str().and_then(|id| id.parse().ok());
+        }
+        if let Some(level) = data["default_message_notifications"].as_u64() {
+            guild.default_message_notifications = Some(level as u8);
         }
         if let Some(roles) = data.get("roles")
             && let Ok(roles) = serde_json::from_value::<Vec<Role>>(roles.clone())
@@ -2064,5 +2087,87 @@ mod tests {
                 Some(Snowflake(4_000_000_000_000_000_000))
             );
         });
+    }
+
+    #[test]
+    fn moderation_events_update_the_cache() {
+        let mut state = State::default();
+        state.apply(
+            "GUILD_CREATE",
+            &json!({"id": "1", "name": "g", "roles": [{"id": "1", "name": "@everyone", "permissions": "0"}],
+                    "channels": [], "afk_timeout": 300}),
+        );
+        // A member's roles, nickname and timeout change.
+        let events = state.apply(
+            "GUILD_MEMBER_UPDATE",
+            &json!({"guild_id": "1", "user": {"id": "9", "username": "x"}, "nick": "Nick",
+                    "roles": ["5"], "communication_disabled_until": "2030-01-01T00:00:00+00:00"}),
+        );
+        assert!(matches!(events[..], [StoreEvent::GuildMembersUpdated(_)]));
+        let member = state.member(Snowflake::new(1), Snowflake::new(9)).unwrap();
+        assert_eq!(member.nick.as_deref(), Some("Nick"));
+        assert_eq!(member.roles, [Snowflake::new(5)]);
+        assert!(member.communication_disabled_until.is_some());
+
+        // Roles are created, updated in place and deleted.
+        state.apply(
+            "GUILD_ROLE_CREATE",
+            &json!({"guild_id": "1", "role": {"id": "5", "name": "Mods", "position": 1, "permissions": "2", "managed": false}}),
+        );
+        state.apply(
+            "GUILD_ROLE_UPDATE",
+            &json!({"guild_id": "1", "role": {"id": "5", "name": "Moderators", "position": 1, "permissions": "6", "color": 255}}),
+        );
+        let roles = &state.guilds[&Snowflake::new(1)].roles;
+        assert_eq!(roles.len(), 2);
+        let role = roles
+            .iter()
+            .find(|role| role.id == Snowflake::new(5))
+            .unwrap();
+        assert_eq!(
+            (role.name.as_str(), role.permissions, role.color),
+            ("Moderators", 6, 255)
+        );
+        state.apply(
+            "GUILD_ROLE_DELETE",
+            &json!({"guild_id": "1", "role_id": "5"}),
+        );
+        assert_eq!(state.guilds[&Snowflake::new(1)].roles.len(), 1);
+
+        // Server settings arrive in GUILD_UPDATE; a null clears.
+        state.apply(
+            "GUILD_UPDATE",
+            &json!({"id": "1", "name": "renamed", "description": "about", "afk_channel_id": "7",
+                    "afk_timeout": 900, "system_channel_id": null, "default_message_notifications": 1}),
+        );
+        let guild = &state.guilds[&Snowflake::new(1)];
+        assert_eq!(guild.name, "renamed");
+        assert_eq!(guild.description.as_deref(), Some("about"));
+        assert_eq!(guild.afk_channel_id, Some(Snowflake::new(7)));
+        assert_eq!(guild.afk_timeout, Some(900));
+        assert_eq!(guild.system_channel_id, None);
+        assert_eq!(guild.default_message_notifications, Some(1));
+
+        // Channel edits keep their voice settings.
+        state.apply(
+            "CHANNEL_UPDATE",
+            &json!({"id": "7", "type": 2, "guild_id": "1", "name": "AFK", "bitrate": 96000, "user_limit": 5}),
+        );
+        let channel = &state.channels[&Snowflake::new(7)];
+        assert_eq!(
+            (channel.bitrate, channel.user_limit),
+            (Some(96000), Some(5))
+        );
+
+        let events = state.apply(
+            "GUILD_BAN_ADD",
+            &json!({"guild_id": "1", "user": {"id": "9", "username": "x"}}),
+        );
+        assert!(matches!(events[..], [StoreEvent::BansUpdated(id)] if id == Snowflake::new(1)));
+        state.apply(
+            "GUILD_MEMBER_REMOVE",
+            &json!({"guild_id": "1", "user": {"id": "9", "username": "x"}}),
+        );
+        assert!(state.member(Snowflake::new(1), Snowflake::new(9)).is_none());
     }
 }

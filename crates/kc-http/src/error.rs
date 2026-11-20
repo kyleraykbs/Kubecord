@@ -77,6 +77,45 @@ impl Error {
         self.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
     }
 
+    /// A short explanation for people, naming the usual causes of the
+    /// codes moderation runs into; anything else falls back to Discord's
+    /// own message.
+    pub fn describe(&self) -> String {
+        let Self::Api {
+            status,
+            code,
+            message,
+            ..
+        } = self
+        else {
+            return self.to_string();
+        };
+        let known = match code {
+            Some(50013) => Some(
+                "You don't have permission to do that. Discord checks both the permission and that \
+                 your highest role is above theirs",
+            ),
+            Some(50001) => Some("You don't have access to that"),
+            Some(10007) => Some("They are no longer a member of this server"),
+            Some(10011) => Some("That role no longer exists"),
+            Some(10026) => Some("That user is not banned"),
+            Some(10006) => Some("That invite no longer exists"),
+            Some(10003) => Some("That channel no longer exists"),
+            Some(40032) => Some("They are not in a voice channel"),
+            Some(30005) => Some("This server has reached the maximum number of roles (250)"),
+            Some(30013) => Some("This server has reached the maximum number of channels (500)"),
+            Some(50028) => Some("That role is managed by an integration"),
+            _ => None,
+        };
+        match known {
+            Some(text) => format!("{text}."),
+            None if *status == reqwest::StatusCode::FORBIDDEN => {
+                format!("Discord refused: {message}")
+            }
+            None => message.clone(),
+        }
+    }
+
     pub fn retry_after(&self) -> Option<f64> {
         match self {
             Self::Api { retry_after, .. } => *retry_after,
@@ -86,3 +125,26 @@ impl Error {
 }
 
 pub type ApiError = Error;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_permissions_reads_as_a_sentence() {
+        let error = Error::Api {
+            status: reqwest::StatusCode::FORBIDDEN,
+            code: Some(50013),
+            message: "Missing Permissions".into(),
+            retry_after: None,
+        };
+        assert!(error.describe().starts_with("You don't have permission"));
+        let other = Error::Api {
+            status: reqwest::StatusCode::FORBIDDEN,
+            code: Some(1),
+            message: "Nope".into(),
+            retry_after: None,
+        };
+        assert_eq!(other.describe(), "Discord refused: Nope");
+    }
+}
