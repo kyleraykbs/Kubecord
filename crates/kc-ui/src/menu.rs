@@ -17,7 +17,7 @@ use crate::shell::AppState;
 use crate::widgets::label;
 
 /// What a menu item does when chosen.
-type MenuAction = Box<dyn Fn(&Rc<AppState>)>;
+pub(crate) type MenuAction = Box<dyn Fn(&Rc<AppState>)>;
 
 /// What the menu needs to know about a user to decide which items to show.
 struct UserContext {
@@ -25,12 +25,26 @@ struct UserContext {
     bot: bool,
     relationship: Option<u8>,
     guild: Option<Snowflake>,
-    nick: Option<String>,
-    owner: bool,
     /// In a voice call together, so local volume/mute make sense.
     in_voice: bool,
     streaming: bool,
     watching: bool,
+}
+
+/// One item of a context menu: a flat button with a left-aligned label,
+/// red when it does something destructive.
+pub(crate) fn menu_item(text: &str, danger: bool) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    let text_label = label(text, &[]);
+    text_label.set_xalign(0.0);
+    text_label.set_halign(gtk::Align::Start);
+    text_label.set_hexpand(true);
+    button.set_child(Some(&text_label));
+    if danger {
+        button.add_css_class("kc-danger");
+    }
+    button
 }
 
 impl AppState {
@@ -99,17 +113,11 @@ impl AppState {
                     .voice_states
                     .values()
                     .any(|vs| vs.user_id == user_id && vs.self_stream);
-                let owner = guild
-                    .and_then(|guild| state.guilds.get(&guild))
-                    .and_then(|guild| guild.owner_id)
-                    == account_user;
                 Some(UserContext {
                     is_me: account_user == Some(user_id),
                     bot: user.bot == Some(true),
                     relationship: state.relationships.get(&user_id).map(|r| r.kind),
                     guild,
-                    nick: guild.and_then(|guild| state.member(guild, user_id)?.nick.clone()),
-                    owner,
                     in_voice,
                     streaming,
                     watching,
@@ -119,16 +127,19 @@ impl AppState {
         .flatten()
     }
 
-    fn show_user_menu(self: &Rc<Self>, user_id: Snowflake, anchor: &gtk::Widget, x: f64, y: f64) {
-        let Some((account, _, _)) = self.active() else {
-            return;
-        };
+    /// Shows the user menu at `(x, y)` of `anchor`, and returns it.
+    pub(crate) fn show_user_menu(
+        self: &Rc<Self>,
+        user_id: Snowflake,
+        anchor: &gtk::Widget,
+        x: f64,
+        y: f64,
+    ) -> Option<gtk::Popover> {
+        let (account, _, _) = self.active()?;
         let account_user = self
             .with_session(|session| session.user.as_ref().map(|u| u.id))
             .flatten();
-        let Some(ctx) = self.user_context(account_user, user_id) else {
-            return;
-        };
+        let ctx = self.user_context(account_user, user_id)?;
 
         let popover = gtk::Popover::new();
         self.anchor_popover(&popover, anchor, x, y);
@@ -142,16 +153,7 @@ impl AppState {
             let popover = popover.clone();
             let menu = menu.clone();
             move |text: &str, danger: bool, action: MenuAction, app: &Rc<AppState>| {
-                let button = gtk::Button::new();
-                button.add_css_class("flat");
-                let text_label = label(text, &[]);
-                text_label.set_xalign(0.0);
-                text_label.set_halign(gtk::Align::Start);
-                text_label.set_hexpand(true);
-                button.set_child(Some(&text_label));
-                if danger {
-                    button.add_css_class("kc-danger");
-                }
+                let button = menu_item(text, danger);
                 let popover = popover.clone();
                 let app = app.clone();
                 button.connect_clicked(move |_| {
@@ -293,20 +295,9 @@ impl AppState {
             );
         }
 
-        // -- guild nickname ----------------------------------------------
-        if let Some(guild) = ctx.guild
-            && (ctx.is_me || ctx.owner)
-        {
-            let nick = ctx.nick.clone();
-            let is_me = ctx.is_me;
-            add(
-                "Change Nickname",
-                false,
-                Box::new(move |app| {
-                    app.change_nickname(guild, user_id, is_me, nick.clone());
-                }),
-                self,
-            );
+        // -- moderation: nickname, roles, voice, timeout, kick, ban ------
+        if let Some(guild) = ctx.guild {
+            self.add_moderation_items(&menu, &popover, guild, user_id, ctx.is_me);
         }
 
         // -- relationships -----------------------------------------------
@@ -358,6 +349,7 @@ impl AppState {
 
         popover.set_child(Some(&menu));
         popover.popup();
+        Some(popover)
     }
 
     /// A labelled slider for one person's local playback volume, from
@@ -498,8 +490,8 @@ impl AppState {
         );
     }
 
-    /// Opens a small dialog to change a guild nickname (own or, for the
-    /// owner, someone else's). An empty value clears it.
+    /// Opens a small dialog to change a guild nickname (own, or someone
+    /// else's with Manage Nicknames). An empty value clears it.
     pub(crate) fn change_nickname(
         self: &Rc<Self>,
         guild: Snowflake,
@@ -537,7 +529,7 @@ impl AppState {
                 async move { http.set_nickname(guild, user_id, is_me, &nick).await },
                 |app, result| match result {
                     Ok(()) => app.set_status("Nickname updated"),
-                    Err(error) => app.set_status(&format!("Could not change nickname: {error}")),
+                    Err(error) => app.report_failure("Could not change the nickname", &error),
                 },
             );
         });

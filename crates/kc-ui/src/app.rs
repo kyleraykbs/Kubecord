@@ -426,7 +426,7 @@ pub fn run() -> glib::ExitCode {
 
 /// Renders a widget to a PNG without relying on a compositor. Used by
 /// `KYLECORD_SCREENSHOT` for visual checks of the GTK layout.
-fn save_window_png(
+pub(crate) fn save_window_png(
     window: &(impl IsA<gtk::Native> + IsA<gtk::Widget>),
     path: &std::path::Path,
 ) -> Result<(), String> {

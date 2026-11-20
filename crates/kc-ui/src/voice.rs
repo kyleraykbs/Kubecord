@@ -30,6 +30,9 @@ pub(crate) struct Participant {
     avatar: String,
     muted: bool,
     deafened: bool,
+    /// Muted or deafened by a moderator (shown red).
+    server_muted: bool,
+    server_deafened: bool,
     streaming: bool,
     is_self: bool,
 }
@@ -367,6 +370,8 @@ impl AppState {
                                 avatar,
                                 muted: voice.mute || self_mute,
                                 deafened: voice.deaf || self_deaf,
+                                server_muted: voice.mute,
+                                server_deafened: voice.deaf,
                                 streaming: voice.self_stream,
                                 is_self: Some(user.id) == me,
                             })
@@ -685,13 +690,32 @@ impl AppState {
         name.append(&text);
         if !is_stream {
             if person.muted {
-                name.append(&small_icon(
+                let icon = small_icon(
                     "microphone-sensitivity-muted-symbolic",
-                    "Muted",
-                ));
+                    if person.server_muted {
+                        "Server Muted"
+                    } else {
+                        "Muted"
+                    },
+                );
+                if person.server_muted {
+                    icon.add_css_class("kc-server-muted");
+                }
+                name.append(&icon);
             }
             if person.deafened {
-                name.append(&small_icon("audio-volume-muted-symbolic", "Deafened"));
+                let icon = small_icon(
+                    "audio-volume-muted-symbolic",
+                    if person.server_deafened {
+                        "Server Deafened"
+                    } else {
+                        "Deafened"
+                    },
+                );
+                if person.server_deafened {
+                    icon.add_css_class("kc-server-muted");
+                }
+                name.append(&icon);
             }
         }
         tile.add_overlay(&name);
@@ -979,6 +1003,8 @@ impl AppState {
             avatar: String::new(),
             muted: id.is_multiple_of(3),
             deafened: id == 6,
+            server_muted: id == 3,
+            server_deafened: false,
             streaming,
             is_self: id == 2,
         };

@@ -15,6 +15,9 @@ use crate::shell::AppState;
 use crate::voice::is_voice_only;
 use crate::widgets::{avatar_with_status, badge, clear_box, first_icon, label};
 
+/// What a dragged voice participant carries, before their user id.
+const VOICE_DRAG: &str = "kc-voice-user:";
+
 /// One sidebar row of a guild channel.
 struct ChannelRow {
     channel: Channel,
@@ -30,6 +33,8 @@ struct VoiceUser {
     avatar: String,
     muted: bool,
     deafened: bool,
+    server_muted: bool,
+    server_deafened: bool,
     streaming: bool,
     video: bool,
 }
@@ -286,6 +291,8 @@ impl AppState {
                                                 ),
                                                 muted: voice.mute || self_mute,
                                                 deafened: voice.deaf || self_deaf,
+                                                server_muted: voice.mute,
+                                                server_deafened: voice.deaf,
                                                 streaming: voice.self_stream,
                                                 video: voice.self_video,
                                             })
@@ -420,6 +427,38 @@ impl AppState {
         });
         if voice {
             button.set_tooltip_text(Some("Double-click to join"));
+            // A participant dragged here is moved (with Move Members).
+            if let Some(guild) = channel.guild_id {
+                let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::MOVE);
+                let app = self.clone();
+                let target = channel.id;
+                drop.connect_drop(move |_, value, _, _| {
+                    let Some(user) = value
+                        .get::<String>()
+                        .ok()
+                        .and_then(|text| text.strip_prefix(VOICE_DRAG)?.parse::<Snowflake>().ok())
+                    else {
+                        return false;
+                    };
+                    let allowed = app
+                        .with_session(|session| {
+                            session.store.read(|state| {
+                                state
+                                    .move_targets(guild)
+                                    .iter()
+                                    .any(|(channel, _)| *channel == target)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if !allowed {
+                        app.set_status("You can't move people into that channel");
+                        return false;
+                    }
+                    app.voice_edit(guild, user, kc_http::MemberEdit::Move(Some(target)));
+                    true
+                });
+                button.add_controller(drop);
+            }
         }
 
         // Right-click: join or leave a voice channel, mark a text channel read.
@@ -499,15 +538,31 @@ impl AppState {
             live.add_css_class("kc-badge");
             row.append(&live);
         }
-        for (shown, icon) in [
-            (user.video, "camera-video-symbolic"),
-            (user.muted, "microphone-sensitivity-muted-symbolic"),
-            (user.deafened, "audio-volume-muted-symbolic"),
+        for (shown, server, icon, tooltip) in [
+            (user.video, false, "camera-video-symbolic", "Camera"),
+            (
+                user.muted,
+                user.server_muted,
+                "microphone-sensitivity-muted-symbolic",
+                "Muted",
+            ),
+            (
+                user.deafened,
+                user.server_deafened,
+                "audio-volume-muted-symbolic",
+                "Deafened",
+            ),
         ] {
             if shown {
                 let image = gtk::Image::from_icon_name(icon);
                 image.set_pixel_size(12);
-                image.add_css_class("dim-label");
+                if server {
+                    image.add_css_class("kc-server-muted");
+                    image.set_tooltip_text(Some(&format!("Server {tooltip}")));
+                } else {
+                    image.add_css_class("dim-label");
+                    image.set_tooltip_text(Some(tooltip));
+                }
                 row.append(&image);
             }
         }
@@ -523,6 +578,23 @@ impl AppState {
         row.add_controller(click);
         row.set_cursor_from_name(Some("pointer"));
         self.attach_user_menu(&row, user.id);
+        // Dragging someone onto another voice channel moves them, when the
+        // account may (Move Members).
+        let drag = gtk::DragSource::new();
+        drag.set_actions(gtk::gdk::DragAction::MOVE);
+        let app = self.clone();
+        drag.connect_prepare(move |_, _, _| {
+            let guild = app
+                .with_session(|session| session.selected_guild.filter(|_| !session.dm_mode))
+                .flatten()?;
+            if !app.member_actions(guild, id).move_member {
+                return None;
+            }
+            Some(gtk::gdk::ContentProvider::for_value(
+                &format!("{VOICE_DRAG}{id}").to_value(),
+            ))
+        });
+        row.add_controller(drag);
         row
     }
 

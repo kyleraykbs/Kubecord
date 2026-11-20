@@ -11,6 +11,16 @@
 //! - `voice-empty`: the page of a voice channel nobody is in.
 //! - `voice-people`: the page of a voice channel others are in.
 //! - `voice-joined`: in a voice channel, muted and deafened.
+//! - `mod-menu`, `mod-menu-higher`, `mod-move`: the user menu (saved to
+//!   `<screenshot>.menu.png`, as popovers are not part of the window
+//!   picture) for a member below you, a member above you, and the Move To
+//!   list.
+//! - `mod-kick`, `mod-ban`, `mod-timeout`, `mod-roles`: the dialogs.
+//! - `mod-error`: a kick that fails, to see the failure shown.
+//!
+//! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
+//! above you, Linus an Artist and Member. The REST client points at an
+//! address nothing listens on, so nothing is ever sent to Discord.
 //!
 //! Scroll positions are printed to stderr (`demo:` lines) so a run can be
 //! checked without looking at the screenshot.
@@ -22,6 +32,7 @@ use gtk::prelude::*;
 use serde_json::{Value, json};
 
 use kc_core::{Account, Snowflake, Token};
+use kc_state::permissions::*;
 use kc_state::time::{millis_to_iso, unix_millis_now};
 
 use crate::session::{self, ConnState, Session, VoiceUiState};
@@ -32,6 +43,9 @@ const GUILD: u64 = 500;
 const GENERAL: u64 = 601;
 const LOUNGE: u64 = 690;
 const EMPTY_VOICE: u64 = 691;
+const OWNER: u64 = 9;
+const ADA: u64 = 2;
+const GRACE: u64 = 3;
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
 /// A snowflake minted `ago` milliseconds before now, so the times read as
@@ -64,20 +78,60 @@ fn ready() -> Value {
     }
     channels.push(json!({"id": LOUNGE.to_string(), "type": 2, "name": "Lounge", "position": 10, "parent_id": "650"}));
     channels.push(json!({"id": EMPTY_VOICE.to_string(), "type": 2, "name": "Quiet Room", "position": 11, "parent_id": "650"}));
+    let everyone = VIEW_CHANNEL
+        | SEND_MESSAGES
+        | SEND_MESSAGES_IN_THREADS
+        | READ_MESSAGE_HISTORY
+        | ADD_REACTIONS
+        | EMBED_LINKS
+        | ATTACH_FILES
+        | CREATE_INSTANT_INVITE
+        | CHANGE_NICKNAME
+        | CONNECT
+        | SPEAK
+        | STREAM
+        | USE_VAD;
+    let moderator = KICK_MEMBERS
+        | BAN_MEMBERS
+        | MODERATE_MEMBERS
+        | MANAGE_NICKNAMES
+        | MANAGE_ROLES
+        | MANAGE_CHANNELS
+        | MANAGE_GUILD
+        | MANAGE_MESSAGES
+        | VIEW_AUDIT_LOG
+        | MOVE_MEMBERS
+        | MUTE_MEMBERS
+        | DEAFEN_MEMBERS;
     json!({
         "user": {"id": ME.to_string(), "username": "demo", "global_name": "Demo User"},
         "users": [
             {"id": "2", "username": "ada", "global_name": "Ada"},
             {"id": "3", "username": "grace", "global_name": "Grace"},
-            {"id": "4", "username": "linus", "global_name": "Linus"}
+            {"id": "4", "username": "linus", "global_name": "Linus"},
+            {"id": OWNER.to_string(), "username": "owner", "global_name": "Server Owner"}
         ],
         "guilds": [{
-            "id": GUILD.to_string(), "name": "Demo Server", "owner_id": ME.to_string(),
+            "id": GUILD.to_string(), "name": "Demo Server", "owner_id": OWNER.to_string(),
             "joined_at": "2024-01-01T00:00:00+00:00",
-            "roles": [{"id": GUILD.to_string(), "name": "@everyone", "permissions": "1099511627775", "position": 0}],
+            "afk_timeout": 300,
+            "roles": [
+                {"id": GUILD.to_string(), "name": "@everyone", "permissions": everyone.to_string(), "position": 0},
+                {"id": "100", "name": "Admin", "permissions": ADMINISTRATOR.to_string(), "position": 5, "color": 0xe74c3c, "hoist": true},
+                {"id": "101", "name": "Moderator", "permissions": moderator.to_string(), "position": 4, "color": 0x3498db, "hoist": true},
+                {"id": "102", "name": "Music Bot", "permissions": "0", "position": 3, "color": 0x2ecc71, "managed": true},
+                {"id": "103", "name": "Artist", "permissions": "0", "position": 2, "color": 0xf1c40f, "mentionable": true},
+                {"id": "104", "name": "Member", "permissions": "0", "position": 1}
+            ],
             "channels": channels
         }],
-        "merged_members": [[{"user_id": ME.to_string(), "roles": []}]],
+        "merged_members": [[
+            {"user_id": ME.to_string(), "roles": ["101"]},
+            {"user_id": ADA.to_string(), "roles": ["104"]},
+            {"user_id": GRACE.to_string(), "roles": ["100"]},
+            {"user_id": "4", "roles": ["103", "104"]},
+            {"user_id": OWNER.to_string(), "roles": []}
+        ]],
         "private_channels": [],
         "relationships": [],
         "read_state": {"entries": []},
@@ -106,13 +160,25 @@ impl AppState {
             label: Some("Demo".to_owned()),
         });
         session.connection = ConnState::Ready;
+        // Nothing in the demo may reach Discord: requests go nowhere and
+        // fail, which also shows how failures look.
+        session.http = kc_http::HttpClient::with_base(
+            Token::new("kylecord-demo-account"),
+            "https://127.0.0.1:9/api/v9",
+        );
         let store = session.store.clone();
         store.apply("READY", &ready());
-        for (user, channel, mute) in [(2u64, LOUNGE, false), (3, LOUNGE, true), (4, 680, false)] {
+        // Grace is server muted (red), Ada muted herself.
+        for (user, channel, mute, server_mute) in [
+            (ADA, LOUNGE, true, false),
+            (GRACE, LOUNGE, false, true),
+            (4, 680, false, false),
+        ] {
             store.apply(
                 "VOICE_STATE_UPDATE",
                 &json!({"user_id": user.to_string(), "channel_id": channel.to_string(),
-                        "guild_id": GUILD.to_string(), "session_id": "x", "self_mute": mute}),
+                        "guild_id": GUILD.to_string(), "session_id": "x", "self_mute": mute,
+                        "mute": server_mute}),
             );
         }
         session.user = store.read(|state| state.me.clone());
@@ -187,10 +253,70 @@ impl AppState {
                 }
                 self.render_voice_panel();
             }
+            mode if mode.starts_with("mod-") => {
+                if let Some(lounge) = channel(LOUNGE) {
+                    self.open_channel(lounge);
+                }
+                let app = self.clone();
+                let mode = mode.to_owned();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    app.demo_moderation(&mode);
+                });
+            }
             _ => {
                 self.open_channel(general);
                 self.demo_chat(&store);
             }
+        }
+    }
+
+    fn demo_moderation(self: &Rc<Self>, mode: &str) {
+        let guild = Snowflake::new(GUILD);
+        let ada = Snowflake::new(ADA);
+        let anchor = self.window.clone().upcast::<gtk::Widget>();
+        let menu = match mode {
+            "mod-menu" | "mod-move" => self.show_user_menu(ada, &anchor, 420.0, 120.0),
+            "mod-menu-higher" => self.show_user_menu(Snowflake::new(GRACE), &anchor, 420.0, 120.0),
+            "mod-kick" => {
+                self.kick_dialog(guild, ada, "Ada");
+                None
+            }
+            "mod-ban" => {
+                self.ban_dialog(guild, ada, "Ada");
+                None
+            }
+            "mod-timeout" => {
+                self.timeout_dialog(guild, ada, "Ada");
+                None
+            }
+            "mod-roles" => {
+                self.roles_dialog(guild, Snowflake::new(4));
+                None
+            }
+            "mod-error" => {
+                if let Some((_, http, _)) = self.active() {
+                    self.moderate("Could not kick", "kicked".into(), async move {
+                        http.kick_member(guild, ada, Some("demo")).await
+                    });
+                }
+                None
+            }
+            _ => None,
+        };
+        if mode == "mod-move"
+            && let Some(popover) = &menu
+        {
+            self.show_move_targets(popover, guild, ada);
+        }
+        if let (Some(popover), Ok(path)) = (menu, std::env::var("KYLECORD_SCREENSHOT")) {
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                let path = format!("{path}.menu.png");
+                if let Err(error) =
+                    crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                {
+                    eprintln!("demo: could not save the menu: {error}");
+                }
+            });
         }
     }
 

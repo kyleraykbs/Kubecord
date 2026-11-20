@@ -347,6 +347,20 @@ const CSS: &str = r#"
     opacity: 0.5;
 }
 
+/* A role's colour, before its name. */
+.kc-role-dot {
+    min-width: 12px;
+    min-height: 12px;
+    border-radius: 999px;
+    background-color: alpha(@window_fg_color, 0.35);
+}
+
+/* Server mute and deafen: set by a moderator, shown red as Discord does. */
+image.kc-server-muted {
+    color: @error_color;
+    opacity: 1;
+}
+
 .kc-guild-menu {
     padding: 2px 8px;
 }
