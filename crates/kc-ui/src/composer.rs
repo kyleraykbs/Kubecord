@@ -1045,7 +1045,6 @@ impl AppState {
     /// Favorites and Trending results (the demo REST points nowhere, so real
     /// favourites/trending cannot load). Returns the picker popover so the
     /// demo can save it.
-    #[cfg(debug_assertions)]
     pub(crate) fn demo_gif_picker(self: &Rc<Self>) -> Option<gtk::Popover> {
         let url =
             "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
