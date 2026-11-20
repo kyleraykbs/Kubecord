@@ -27,7 +27,12 @@ pub struct AudioDevice {
 /// Sets the microphone to capture from (`None` for the default).
 pub fn set_input_device(name: Option<String>) {
     if let Ok(mut guard) = INPUT_DEVICE.write() {
-        *guard = name.filter(|name| !name.is_empty());
+        let name = name.filter(|name| !name.is_empty());
+        if *guard != name {
+            *guard = name;
+            // A running microphone moves to the new device.
+            crate::processing::rebuild();
+        }
     }
 }
 

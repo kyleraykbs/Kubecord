@@ -595,7 +595,7 @@ impl AppState {
         test_row.append(&meter);
         page.append(&test_row);
         let voice_note = gtk::Label::new(Some(
-            "Mic Test plays your microphone back to you. Device changes take effect the next time you join a call; volume changes apply right away.",
+            "Mic Test plays your microphone back to you as a call would send it. Microphone and volume changes apply right away, also in a call; a new speaker is used from the next call.",
         ));
         voice_note.set_xalign(0.0);
         voice_note.set_wrap(true);
@@ -648,11 +648,181 @@ impl AppState {
             start_mic_test(&app, &state, button, &meter);
         });
 
+        page.append(&self.sensitivity_group(panel));
+        page.append(&self.processing_group());
+
         let people = adw::PreferencesGroup::new();
         people.set_title("Other People");
         people.add(&self.volume_boost_row());
         page.append(&people);
         page
+    }
+
+    /// Input sensitivity: automatic, or a threshold slider drawn over a
+    /// live level meter, so you can see where your voice sits.
+    fn sensitivity_group(self: &Rc<Self>, panel: &Rc<Panel>) -> adw::PreferencesGroup {
+        let current = self.capture.borrow().clone();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Input Sensitivity");
+        group.set_description(Some(
+            "Only sound above the line is sent; your speaking ring lights with it. The bar shows your microphone while you talk in a call or during Mic Test: green is sent, amber is not.",
+        ));
+
+        let auto = adw::SwitchRow::new();
+        auto.set_title("Automatically Determine Input Sensitivity");
+        auto.set_subtitle("kylecord learns how loud your room is and sends what rises above it.");
+        auto.set_subtitle_lines(0);
+        auto.set_active(current.auto_input_sensitivity);
+        group.add(&auto);
+
+        let meter = gtk::DrawingArea::new();
+        meter.set_content_height(SENSITIVITY_HEIGHT);
+        meter.set_hexpand(true);
+        meter.set_valign(gtk::Align::Center);
+        let scale = gtk::Scale::with_range(
+            gtk::Orientation::Horizontal,
+            f64::from(crate::settings::THRESHOLD_MIN_DB),
+            f64::from(crate::settings::THRESHOLD_MAX_DB),
+            1.0,
+        );
+        scale.add_css_class("kc-sensitivity");
+        scale.set_value(f64::from(current.input_threshold_db));
+        scale.set_draw_value(true);
+        scale.set_value_pos(gtk::PositionType::Right);
+        scale.set_format_value_func(|_, value| format!("{value:.0} dB"));
+        scale.set_hexpand(true);
+        scale.set_tooltip_text(Some("Sound quieter than this is not sent"));
+        scale.set_sensitive(!current.auto_input_sensitivity);
+        // The meter is drawn under the slider, lined up with its track.
+        let stack = gtk::Overlay::new();
+        stack.set_child(Some(&meter));
+        stack.add_overlay(&scale);
+        stack.set_measure_overlay(&scale, true);
+        let hint = gtk::Label::new(Some(
+            "Start Mic Test above, or join a call, to see your level.",
+        ));
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+        hint.add_css_class("dim-label");
+        hint.add_css_class("caption");
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.set_margin_top(10);
+        column.set_margin_bottom(10);
+        column.set_margin_start(12);
+        column.set_margin_end(12);
+        column.append(&stack);
+        column.append(&hint);
+        let row = adw::PreferencesRow::new();
+        row.set_activatable(false);
+        row.set_child(Some(&column));
+        group.add(&row);
+
+        let shown = Rc::new(Cell::new(MeterShown::default()));
+        {
+            let shown = shown.clone();
+            let scale = scale.clone();
+            let auto = auto.clone();
+            meter.set_draw_func(move |area, cr, width, height| {
+                draw_sensitivity(
+                    area,
+                    cr,
+                    width,
+                    height,
+                    shown.get(),
+                    &scale,
+                    auto.is_active(),
+                );
+            });
+        }
+        let app = self.clone();
+        let redraw = meter.clone();
+        scale.connect_value_changed(move |scale| {
+            let threshold = scale.value() as f32;
+            app.update_prefs(|prefs| prefs.input_threshold_db = threshold);
+            redraw.queue_draw();
+        });
+        let app = self.clone();
+        let target = scale.clone();
+        let redraw = meter.clone();
+        auto.connect_active_notify(move |row| {
+            let active = row.is_active();
+            target.set_sensitive(!active);
+            app.update_prefs(|prefs| prefs.auto_input_sensitivity = active);
+            redraw.queue_draw();
+        });
+
+        // Follow the microphone while the panel is open.
+        let alive = Rc::downgrade(panel);
+        let meter = meter.downgrade();
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            let (Some(_panel), Some(meter)) = (alive.upgrade(), meter.upgrade()) else {
+                return glib::ControlFlow::Break;
+            };
+            let level = demo_level().or_else(kc_media::processing::input_level);
+            hint.set_visible(level.is_none());
+            let mut now = shown.get();
+            now.follow(level);
+            shown.set(now);
+            meter.queue_draw();
+            glib::ControlFlow::Continue
+        });
+        group
+    }
+
+    /// Noise suppression, echo cancellation and automatic gain.
+    fn processing_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let current = self.capture.borrow().clone();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Voice Processing");
+        group.set_description(Some(
+            "Applied to your microphone before it is sent, and in Mic Test. Changes apply at once, also in a call.",
+        ));
+
+        let noise = adw::ComboRow::new();
+        noise.set_title("Noise Suppression");
+        noise.set_subtitle(
+            "Removes steady background noise. Standard keeps your voice natural; Strong (RNNoise) also takes out keyboards and fans and costs a little more processor time.",
+        );
+        noise.set_subtitle_lines(0);
+        noise.set_model(Some(&gtk::StringList::new(
+            &crate::settings::NOISE_SUPPRESSION,
+        )));
+        noise.set_selected(current.noise_suppression.min(2));
+        let app = self.clone();
+        noise.connect_selected_notify(move |row| {
+            let level = row.selected();
+            app.update_prefs(|prefs| prefs.noise_suppression = level);
+        });
+        group.add(&noise);
+
+        let echo = adw::SwitchRow::new();
+        echo.set_title("Echo Cancellation");
+        echo.set_subtitle(
+            "Keeps others from hearing themselves when you use speakers. Not needed with headphones. Works in calls (it listens to the call's sound).",
+        );
+        echo.set_subtitle_lines(0);
+        echo.set_active(current.echo_cancellation);
+        let app = self.clone();
+        echo.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.echo_cancellation = active);
+        });
+        group.add(&echo);
+
+        let gain = adw::SwitchRow::new();
+        gain.set_title("Automatic Gain Control");
+        gain.set_subtitle(
+            "Evens out your volume when you move closer to or away from the microphone.",
+        );
+        gain.set_subtitle_lines(0);
+        gain.set_active(current.auto_gain_control);
+        let app = self.clone();
+        gain.connect_active_notify(move |row| {
+            let active = row.is_active();
+            app.update_prefs(|prefs| prefs.auto_gain_control = active);
+        });
+        group.add(&gain);
+        group
     }
 
     fn video_page(
@@ -911,6 +1081,149 @@ fn start_screen_test(app: &Rc<AppState>, panel: &Rc<Panel>) {
     start_screen_preview(app, &panel.screen, ShareSources::current(), settings);
 }
 
+// -- input sensitivity -------------------------------------------------------
+
+/// Height of the input sensitivity meter.
+const SENSITIVITY_HEIGHT: i32 = 14;
+
+/// What the sensitivity meter shows, smoothed for the eye.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct MeterShown {
+    /// The level drawn (dBFS), or `None` with nothing to show.
+    level: Option<f32>,
+    open: bool,
+    /// Where automatic sensitivity currently draws its line.
+    auto_threshold: Option<f32>,
+}
+
+impl MeterShown {
+    /// Rises at once, falls back gently, so speech is easy to follow.
+    fn follow(&mut self, sample: Option<kc_media::processing::InputLevel>) {
+        let Some(sample) = sample else {
+            *self = Self::default();
+            return;
+        };
+        let fallen = self.level.map_or(sample.level_db, |level| level - 1.5);
+        self.level = Some(sample.level_db.max(fallen));
+        self.open = sample.open;
+        self.auto_threshold = Some(sample.threshold_db);
+    }
+}
+
+/// Where `db` falls across the meter, from 0 to 1.
+fn meter_fraction(db: f32) -> f64 {
+    let min = crate::settings::THRESHOLD_MIN_DB;
+    let max = crate::settings::THRESHOLD_MAX_DB;
+    f64::from(((db - min) / (max - min)).clamp(0.0, 1.0))
+}
+
+/// Draws the level under the slider's track: amber up to the threshold,
+/// green past it, with a line at the threshold in use.
+fn draw_sensitivity(
+    area: &gtk::DrawingArea,
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    shown: MeterShown,
+    scale: &gtk::Scale,
+    automatic: bool,
+) {
+    // Line the meter up with the slider's trough.
+    let mut trough = scale.first_child();
+    while let Some(child) = &trough {
+        if child.css_name() == "trough" {
+            break;
+        }
+        trough = child.next_sibling();
+    }
+    let (left, track) = trough
+        .and_then(|trough| {
+            let bounds = trough.compute_bounds(area)?;
+            Some((f64::from(bounds.x()), f64::from(bounds.width())))
+        })
+        .unwrap_or((0.0, f64::from(width)));
+    let top = (f64::from(height) - f64::from(SENSITIVITY_HEIGHT)) / 2.0;
+    let bar = f64::from(SENSITIVITY_HEIGHT);
+    let foreground = area.color();
+    rounded(cr, left, top, track, bar);
+    cr.set_source_rgba(
+        f64::from(foreground.red()),
+        f64::from(foreground.green()),
+        f64::from(foreground.blue()),
+        0.12,
+    );
+    let _ = cr.fill();
+
+    let threshold = if automatic {
+        shown.auto_threshold
+    } else {
+        Some(scale.value() as f32)
+    };
+    if let Some(level) = shown.level {
+        let reach = meter_fraction(level) * track;
+        let cut = threshold.map_or(0.0, |threshold| meter_fraction(threshold) * track);
+        let _ = cr.save();
+        rounded(cr, left, top, track, bar);
+        cr.clip();
+        // Below the threshold: amber; above it: green (sent).
+        cr.set_source_rgb(0.98, 0.65, 0.10);
+        cr.rectangle(left, top, reach.min(cut), bar);
+        let _ = cr.fill();
+        if reach > cut {
+            if shown.open {
+                cr.set_source_rgb(0.23, 0.65, 0.36);
+            } else {
+                cr.set_source_rgb(0.55, 0.55, 0.55);
+            }
+            cr.rectangle(left + cut, top, reach - cut, bar);
+            let _ = cr.fill();
+        }
+        let _ = cr.restore();
+    }
+    if automatic && let Some(threshold) = threshold {
+        let x = left + meter_fraction(threshold) * track;
+        cr.set_source_rgba(
+            f64::from(foreground.red()),
+            f64::from(foreground.green()),
+            f64::from(foreground.blue()),
+            0.8,
+        );
+        cr.rectangle(x - 1.0, top - 2.0, 2.0, bar + 4.0);
+        let _ = cr.fill();
+    }
+}
+
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64) {
+    let radius = height / 2.0;
+    cr.new_sub_path();
+    cr.arc(
+        x + width - radius,
+        y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        std::f64::consts::FRAC_PI_2,
+    );
+    cr.arc(
+        x + radius,
+        y + radius,
+        radius,
+        std::f64::consts::FRAC_PI_2,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
+    cr.close_path();
+}
+
+/// Development aid: `KYLECORD_DEMO_LEVEL=<dB>` shows a made-up microphone
+/// level on the sensitivity meter, for screenshots without a microphone.
+fn demo_level() -> Option<kc_media::processing::InputLevel> {
+    let level: f32 = std::env::var("KYLECORD_DEMO_LEVEL").ok()?.parse().ok()?;
+    Some(kc_media::processing::InputLevel {
+        level_db: level,
+        open: level >= -50.0,
+        threshold_db: -50.0,
+    })
+}
+
 // -- widgets -----------------------------------------------------------------
 
 fn page_box() -> gtk::Box {
@@ -1075,6 +1388,27 @@ mod tests {
         }
         // Every page group starts with a heading.
         assert_eq!(page_heading(PAGES[0].0), Some("User Settings"));
+    }
+
+    #[test]
+    fn the_meter_rises_at_once_and_falls_gently() {
+        let sample = |level_db| kc_media::processing::InputLevel {
+            level_db,
+            open: true,
+            threshold_db: -50.0,
+        };
+        let mut shown = MeterShown::default();
+        shown.follow(Some(sample(-20.0)));
+        assert_eq!(shown.level, Some(-20.0));
+        shown.follow(Some(sample(-80.0)));
+        assert_eq!(shown.level, Some(-21.5));
+        shown.follow(Some(sample(-10.0)));
+        assert_eq!(shown.level, Some(-10.0));
+        shown.follow(None);
+        assert_eq!(shown, MeterShown::default());
+        assert_eq!(meter_fraction(-100.0), 0.0);
+        assert_eq!(meter_fraction(-50.0), 0.5);
+        assert_eq!(meter_fraction(10.0), 1.0);
     }
 
     #[test]

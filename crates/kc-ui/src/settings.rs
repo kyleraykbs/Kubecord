@@ -145,7 +145,21 @@ pub struct CapturePreferences {
     /// Show times on a 24-hour clock (`17:58`) instead of `5:58 PM`.
     #[serde(rename = "use_24_hour_time")]
     pub use_24_hour: bool,
+    /// Noise suppression: 0 off, 1 standard (WebRTC), 2 strong (RNNoise).
+    pub noise_suppression: u32,
+    pub echo_cancellation: bool,
+    pub auto_gain_control: bool,
+    /// Let kylecord decide which microphone frames are speech; when off,
+    /// `input_threshold_db` does.
+    pub auto_input_sensitivity: bool,
+    /// Microphone frames quieter than this (dBFS) are not sent.
+    pub input_threshold_db: f32,
 }
+
+pub const NOISE_SUPPRESSION: [&str; 3] = ["Off", "Standard", "Strong"];
+/// The input sensitivity slider's range, in dBFS.
+pub const THRESHOLD_MIN_DB: f32 = -100.0;
+pub const THRESHOLD_MAX_DB: f32 = 0.0;
 
 pub const CAMERA_FORMATS: [&str; 3] = ["Automatic", "MJPEG (compressed)", "Raw (uncompressed)"];
 
@@ -204,6 +218,11 @@ impl Default for CapturePreferences {
             log_to_file: true,
             log_detailed: false,
             use_24_hour: false,
+            noise_suppression: 0,
+            echo_cancellation: false,
+            auto_gain_control: false,
+            auto_input_sensitivity: true,
+            input_threshold_db: kc_media::processing::DEFAULT_THRESHOLD_DB,
         }
     }
 }
@@ -314,8 +333,25 @@ impl CapturePreferences {
         }
     }
 
+    /// The microphone processing these settings ask for.
+    pub fn voice_processing(&self) -> kc_media::processing::VoiceProcessing {
+        use kc_media::processing::{NoiseSuppression, VoiceProcessing};
+        VoiceProcessing {
+            noise_suppression: match self.noise_suppression {
+                1 => NoiseSuppression::Standard,
+                2 => NoiseSuppression::Strong,
+                _ => NoiseSuppression::Off,
+            },
+            echo_cancellation: self.echo_cancellation,
+            auto_gain: self.auto_gain_control,
+            auto_sensitivity: self.auto_input_sensitivity,
+            threshold_db: self.input_threshold_db,
+        }
+    }
+
     /// Pushes the chosen devices and volumes into the media pipelines.
     pub fn apply_devices(&self) {
+        kc_media::processing::set(self.voice_processing());
         kc_media::devices::set_input_device(
             (!self.input_device.is_empty()).then(|| self.input_device.clone()),
         );
@@ -447,6 +483,14 @@ impl CapturePreferences {
         if !VOLUME_BOOST_CAPS.contains(&self.volume_boost_cap) {
             self.volume_boost_cap = 3;
         }
+        if self.noise_suppression > 2 {
+            self.noise_suppression = 0;
+        }
+        if !self.input_threshold_db.is_finite()
+            || !(THRESHOLD_MIN_DB..=THRESHOLD_MAX_DB).contains(&self.input_threshold_db)
+        {
+            self.input_threshold_db = kc_media::processing::DEFAULT_THRESHOLD_DB;
+        }
         if self.camera_format > 2 {
             self.camera_format = 0;
         }
@@ -526,6 +570,40 @@ mod tests {
         let set: CapturePreferences =
             serde_json::from_str(r#"{"use_24_hour_time": true}"#).unwrap();
         assert!(set.use_24_hour);
+    }
+
+    #[test]
+    fn old_settings_get_the_voice_defaults() {
+        let mut old: CapturePreferences = serde_json::from_str(r#"{"fps": 30}"#).unwrap();
+        old.normalize();
+        let processing = old.voice_processing();
+        assert_eq!(processing, kc_media::processing::VoiceProcessing::default());
+        assert!(processing.auto_sensitivity);
+
+        let mut odd: CapturePreferences =
+            serde_json::from_str(r#"{"noise_suppression": 7, "input_threshold_db": 12.0}"#)
+                .unwrap();
+        odd.normalize();
+        assert_eq!(odd.noise_suppression, 0);
+        assert_eq!(
+            odd.input_threshold_db,
+            kc_media::processing::DEFAULT_THRESHOLD_DB
+        );
+
+        let chosen: CapturePreferences = serde_json::from_str(
+            r#"{"noise_suppression": 2, "echo_cancellation": true, "auto_input_sensitivity": false, "input_threshold_db": -42.0}"#,
+        )
+        .unwrap();
+        let processing = chosen.voice_processing();
+        assert_eq!(
+            processing.noise_suppression,
+            kc_media::processing::NoiseSuppression::Strong
+        );
+        assert!(processing.echo_cancellation && !processing.auto_gain);
+        assert_eq!(
+            processing.sensitivity(),
+            kc_media::processing::Sensitivity::Manual(-42.0)
+        );
     }
 
     #[test]

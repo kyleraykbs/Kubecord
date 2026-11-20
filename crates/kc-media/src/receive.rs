@@ -298,10 +298,21 @@ impl Mixer {
 /// the way a timer would.
 pub(crate) struct Output {
     pipeline: gst::Pipeline,
+    /// Present while the playback carries the echo probe.
+    _probe: Option<crate::processing::EchoProbeGuard>,
 }
 
 impl Output {
-    pub(crate) fn start(mut next_frame: impl FnMut() -> Vec<i16> + Send + 'static) -> Result<Self> {
+    pub(crate) fn start(next_frame: impl FnMut() -> Vec<i16> + Send + 'static) -> Result<Self> {
+        Self::start_with(next_frame, false)
+    }
+
+    /// Plays a call. With `echo_probe`, the playback passes through the
+    /// probe echo cancellation listens to (see [`crate::processing`]).
+    pub(crate) fn start_with(
+        mut next_frame: impl FnMut() -> Vec<i16> + Send + 'static,
+        echo_probe: bool,
+    ) -> Result<Self> {
         gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
 
         // A short device buffer keeps the delay low; the jitter buffer, not
@@ -321,8 +332,17 @@ impl Output {
             }
             _ => "autoaudiosink".to_owned(),
         };
+        let probe = echo_probe && crate::processing::echo_probe_available();
+        let probe_element = if probe {
+            format!(
+                "webrtcechoprobe name={} ! audioconvert ! ",
+                crate::processing::ECHO_PROBE
+            )
+        } else {
+            String::new()
+        };
         let element = gst::parse::launch(&format!(
-            "appsrc name=src format=time ! audioconvert ! audioresample ! {sink}"
+            "appsrc name=src format=time ! audioconvert ! audioresample ! {probe_element}{sink}"
         ))
         .map_err(|error| Error::Message(format!("playback pipeline: {error}")))?;
         let pipeline = element
@@ -368,7 +388,10 @@ impl Output {
         pipeline
             .set_state(gst::State::Playing)
             .map_err(|error| Error::Message(format!("playback state: {error}")))?;
-        Ok(Self { pipeline })
+        Ok(Self {
+            pipeline,
+            _probe: probe.then(crate::processing::EchoProbeGuard::new),
+        })
     }
 }
 
@@ -389,7 +412,7 @@ impl RemoteAudio {
     pub fn start() -> Result<Self> {
         let mixer = Arc::new(Mutex::new(Mixer::new()));
         let source = mixer.clone();
-        let output = Output::start(move || source.lock().mix())?;
+        let output = Output::start_with(move || source.lock().mix(), true)?;
         Ok(Self {
             mixer,
             _output: output,

@@ -8,6 +8,7 @@ pub mod error;
 pub mod h264;
 pub mod mjpeg;
 pub mod portal;
+pub mod processing;
 pub mod receive;
 pub mod share_audio;
 pub mod video;

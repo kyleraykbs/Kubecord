@@ -427,6 +427,11 @@ fn video_rtp_step(frame_ms: u32) -> u32 {
     frame_ms * 90
 }
 
+/// One Opus frame of silence; sent unencrypted by end-to-end encryption.
+const OPUS_SILENCE: [u8; 3] = [0xF8, 0xFF, 0xFE];
+/// Silence frames sent when speech ends (as the official clients send).
+const SILENCE_FRAMES: usize = 5;
+
 enum Command {
     SendAudio {
         opus: Vec<u8>,
@@ -438,6 +443,14 @@ enum Command {
         frame_ms: u32,
     },
     SetSpeaking(u8),
+    /// The microphone went quiet: silence frames, then speaking off.
+    EndTalkBurst {
+        frame_ms: u32,
+    },
+    /// A microphone frame that was not sent; the clock moves on.
+    SkipAudio {
+        frame_ms: u32,
+    },
     SetVideo(bool),
     SetRetransmitWindow(Duration),
     SetLossKeyframeSpacing(Duration),
@@ -517,6 +530,22 @@ impl VoiceHandle {
 
     pub fn set_speaking(&self, flags: u8) {
         self.send(Command::SetSpeaking(flags));
+    }
+
+    /// Ends a stretch of speech, as the official clients do when their
+    /// user stops talking: a few Opus silence frames (`F8 FF FE`, outside
+    /// end-to-end encryption, as receivers expect them), then the
+    /// speaking flag off. The next [`VoiceHandle::send_audio`] turns it on
+    /// again.
+    pub fn end_talk_burst(&self, frame_ms: u32) {
+        self.send(Command::EndTalkBurst { frame_ms });
+    }
+
+    /// Accounts for a microphone frame that was held back (muted, or
+    /// below the input sensitivity), so the RTP clock keeps time with the
+    /// gap and receivers place the next speech correctly.
+    pub fn skip_audio(&self, frame_ms: u32) {
+        self.send(Command::SkipAudio { frame_ms });
     }
 
     pub fn set_video(&self, enabled: bool) {
@@ -898,7 +927,7 @@ async fn run(
     // `speaking: 0` leaves the server without a media source for this SSRC.
     if !state.params.receive_only {
         state.set_speaking(1).await?;
-        state.send_rtp_audio(&[0xF8, 0xFF, 0xFE]).await?;
+        state.send_rtp_audio(&OPUS_SILENCE).await?;
     }
     // The server sends no video to a client that has not announced its own
     // video state (even "off") and said which streams it wants to see.
@@ -1160,6 +1189,16 @@ impl SessionState {
             }
             Command::SetSpeaking(flags) => {
                 self.set_speaking(flags).await?;
+            }
+            Command::EndTalkBurst { frame_ms } => {
+                for _ in 0..SILENCE_FRAMES {
+                    self.send_rtp_audio(&OPUS_SILENCE).await?;
+                    self.ts_audio = self.ts_audio.wrapping_add(frame_ms * 48);
+                }
+                self.set_speaking(0).await?;
+            }
+            Command::SkipAudio { frame_ms } => {
+                self.ts_audio = self.ts_audio.wrapping_add(frame_ms * 48);
             }
             Command::SetVideo(enabled) => {
                 tracing::info!(enabled, video_ssrc = self.video_ssrc, "set video state");

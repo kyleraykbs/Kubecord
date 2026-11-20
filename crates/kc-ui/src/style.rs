@@ -520,6 +520,14 @@ image.kc-server-muted {
     background-color: black;
 }
 
+/* The input sensitivity slider: its track is the level meter drawn
+   under it, so the trough itself is see-through. */
+.kc-sensitivity trough,
+.kc-sensitivity highlight {
+    background: none;
+    box-shadow: none;
+}
+
 .kc-meter block {
     min-width: 4px;
     min-height: 26px;

@@ -13,6 +13,7 @@ use tracing::debug;
 
 use crate::delay::DelayedSender;
 use crate::error::{Error, Result};
+use crate::processing::{CAPTURE_CAPS, GateAction, VoiceGate};
 use crate::receive::{ReceiveStats, RemoteAudio};
 use crate::share_audio::{AudioShare, Linker, VirtualOutput};
 
@@ -23,26 +24,83 @@ const FRAME_SAMPLES: usize = 960; // 20 ms per channel
 const FRAME_INTERLEAVED: usize = FRAME_SAMPLES * 2;
 const MAX_OPUS_FRAME: usize = 5760;
 
+/// Builds a capture pipeline's launch line; `true` asks for the
+/// microphone processing, `false` for the plain microphone.
+type LineBuilder = Box<dyn Fn(bool) -> String + Send>;
+
 /// Captures the default input device as 48 kHz stereo S16, in 20 ms frames.
 pub struct Capture {
-    pipeline: gst::Pipeline,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Whether the microphone processing is running (false while it is
+    /// off, failed, or this is not a microphone).
+    processed: Arc<AtomicBool>,
+}
+
+/// The microphone's launch line: the chosen device, then the processing
+/// (see [`crate::processing`]) unless `processed` is false.
+fn microphone_line(processed: bool) -> String {
+    // The chosen microphone, or the system default.
+    let source = match crate::devices::input_device() {
+        Some(device) => format!("pulsesrc device=\"{device}\""),
+        None => "autoaudiosrc".to_owned(),
+    };
+    let chain = if processed {
+        crate::processing::chain(
+            &crate::processing::current(),
+            crate::processing::probe_running(),
+            &crate::processing::element_available,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{source} ! audioconvert ! audioresample ! {CAPTURE_CAPS}{chain} \
+         ! appsink name=sink sync=false max-buffers=8 drop=true"
+    )
 }
 
 impl Capture {
+    /// Starts the microphone. It follows the processing settings and the
+    /// chosen device while it runs, rebuilding its pipeline when they
+    /// change.
     pub fn start(on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
-        // The chosen microphone, or the system default.
-        let source = match crate::devices::input_device() {
-            Some(device) => format!("pulsesrc device=\"{device}\""),
-            None => "autoaudiosrc".to_owned(),
+        Self::start_rebuilding(Box::new(microphone_line), on_frame)
+    }
+
+    /// Starts the pipeline `line` makes, and makes it again whenever
+    /// [`crate::processing::generation`] changes. If the processed
+    /// pipeline cannot start or fails, it falls back to the plain one until
+    /// the settings change again.
+    fn start_rebuilding(
+        line: LineBuilder,
+        on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Result<Self> {
+        let generation = crate::processing::generation();
+        let (pipeline, processed) = match launch(&line(true), |_| {}) {
+            Ok(pipeline) => (pipeline, true),
+            Err(error) => {
+                tracing::warn!(%error, "microphone processing could not start; capturing without it");
+                (launch(&line(false), |_| {})?, false)
+            }
         };
-        let pipeline = format!(
-            "{source} ! audioconvert ! audioresample \
-             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-             ! appsink name=sink sync=false max-buffers=8 drop=true"
-        );
-        Self::start_with_source(&pipeline, on_frame)
+        let shown = Arc::new(AtomicBool::new(processed));
+        Ok(Self::run(
+            pipeline,
+            Some(Rebuild {
+                line,
+                generation,
+                processed,
+                shown: shown.clone(),
+            }),
+            shown,
+            on_frame,
+        ))
+    }
+
+    /// Whether the processed pipeline is the one running.
+    pub fn is_processed(&self) -> bool {
+        self.processed.load(Ordering::Relaxed)
     }
 
     /// Captures the default output's monitor, for Go Live system audio. The
@@ -86,32 +144,39 @@ impl Capture {
     /// before it plays.
     fn start_configured(
         source: &str,
-        mut on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+        on_frame: impl FnMut(Vec<i16>) + Send + 'static,
         configure: impl FnOnce(&gst::Pipeline),
     ) -> Result<Self> {
-        gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
-        let element = gst::parse::launch(source)
-            .map_err(|error| Error::Message(format!("capture pipeline: {error}")))?;
-        let pipeline = element
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| Error::Message("capture pipeline is not a pipeline".into()))?;
-        configure(&pipeline);
-        let appsink = pipeline
-            .by_name("sink")
-            .and_then(|element| element.downcast::<gstreamer_app::AppSink>().ok())
-            .ok_or_else(|| Error::Message("capture appsink missing".into()))?;
-        appsink.set_sync(false);
-        appsink.set_drop(true);
-        pipeline
-            .set_state(gst::State::Playing)
-            .map_err(|error| Error::Message(format!("capture state: {error}")))?;
+        let pipeline = launch(source, configure)?;
+        Ok(Self::run(
+            pipeline,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            on_frame,
+        ))
+    }
 
+    fn run(
+        running: Running,
+        mut rebuild: Option<Rebuild>,
+        processed: Arc<AtomicBool>,
+        mut on_frame: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = std::thread::spawn(move || {
+            let mut running = running;
             let mut pending: Vec<i16> = Vec::with_capacity(FRAME_INTERLEAVED * 2);
             while !thread_stop.load(Ordering::Relaxed) {
-                let Some(sample) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(20))
+                if let Some(rebuild) = &mut rebuild
+                    && let Some(replacement) = rebuild.check(&running)
+                {
+                    running = replacement;
+                    pending.clear();
+                }
+                let Some(sample) = running
+                    .appsink
+                    .try_pull_sample(gst::ClockTime::from_mseconds(20))
                 else {
                     continue;
                 };
@@ -130,20 +195,102 @@ impl Capture {
                     on_frame(frame);
                 }
             }
+            let _ = running.pipeline.set_state(gst::State::Null);
         });
-
-        Ok(Self {
-            pipeline,
+        Self {
             stop,
             thread: Some(thread),
-        })
+            processed,
+        }
+    }
+}
+
+/// A playing capture pipeline and its sink.
+struct Running {
+    pipeline: gst::Pipeline,
+    appsink: gstreamer_app::AppSink,
+}
+
+/// Parses `line`, lets `configure` adjust it, and starts it.
+fn launch(line: &str, configure: impl FnOnce(&gst::Pipeline)) -> Result<Running> {
+    gst::init().map_err(|error| Error::Message(format!("gstreamer init: {error}")))?;
+    let element = gst::parse::launch(line)
+        .map_err(|error| Error::Message(format!("capture pipeline: {error}")))?;
+    let pipeline = element
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| Error::Message("capture pipeline is not a pipeline".into()))?;
+    configure(&pipeline);
+    let appsink = pipeline
+        .by_name("sink")
+        .and_then(|element| element.downcast::<gstreamer_app::AppSink>().ok())
+        .ok_or_else(|| Error::Message("capture appsink missing".into()))?;
+    appsink.set_sync(false);
+    appsink.set_drop(true);
+    if let Err(error) = pipeline.set_state(gst::State::Playing) {
+        let _ = pipeline.set_state(gst::State::Null);
+        return Err(Error::Message(format!("capture state: {error}")));
+    }
+    Ok(Running { pipeline, appsink })
+}
+
+/// How a microphone capture remakes itself when its settings change.
+struct Rebuild {
+    line: LineBuilder,
+    /// The settings generation the running pipeline was made for.
+    generation: u64,
+    /// Whether it runs with the processing (false after a failure).
+    processed: bool,
+    /// The same, for [`Capture::is_processed`].
+    shown: Arc<AtomicBool>,
+}
+
+impl Rebuild {
+    /// A new pipeline if the settings changed or the processed one
+    /// failed; the old one is stopped first.
+    fn check(&mut self, running: &Running) -> Option<Running> {
+        let generation = crate::processing::generation();
+        let failed = self.processed
+            && running.pipeline.bus().is_some_and(|bus| {
+                bus.pop_filtered(&[gst::MessageType::Error])
+                    .is_some_and(|message| {
+                        if let gst::MessageView::Error(error) = message.view() {
+                            tracing::warn!(error = %error.error(), debug = ?error.debug(), "microphone processing failed; capturing without it");
+                        }
+                        true
+                    })
+            });
+        if generation == self.generation && !failed {
+            return None;
+        }
+        self.generation = generation;
+        let _ = running.pipeline.set_state(gst::State::Null);
+        let mut processed = !failed;
+        let replacement = launch(&(self.line)(processed), |_| {}).or_else(|error| {
+            tracing::warn!(%error, "microphone processing could not start; capturing without it");
+            processed = false;
+            launch(&(self.line)(false), |_| {})
+        });
+        match replacement {
+            Ok(replacement) => {
+                tracing::info!(processed, "microphone pipeline rebuilt");
+                self.processed = processed;
+                self.shown.store(processed, Ordering::Relaxed);
+                Some(replacement)
+            }
+            Err(error) => {
+                // Keep what ran before rather than going silent.
+                tracing::warn!(%error, "microphone pipeline could not be rebuilt");
+                let _ = running.pipeline.set_state(gst::State::Playing);
+                None
+            }
+        }
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        // The capture thread stops its pipeline on the way out.
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.pipeline.set_state(gst::State::Null);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -273,44 +420,6 @@ impl Drop for ScreenAudio {
     }
 }
 
-/// Root-mean-square level above which the microphone counts as speech,
-/// about -38 dBFS: well above a quiet room, well below normal speech.
-const SPEECH_RMS: f64 = 400.0;
-/// Frames the speaking state outlives the last loud frame (300 ms), so it
-/// does not flicker between words.
-const SPEECH_HANGOVER_FRAMES: u32 = 15;
-
-/// Decides from microphone frames whether the user is speaking.
-#[derive(Default)]
-struct SpeechDetector {
-    /// Frames left before a pause counts as silence.
-    hangover: u32,
-}
-
-impl SpeechDetector {
-    /// Feeds one frame; returns `Some(state)` when speaking starts or stops.
-    fn feed(&mut self, frame: &[i16]) -> Option<bool> {
-        let was = self.hangover > 0;
-        let energy: f64 = frame
-            .iter()
-            .map(|sample| f64::from(*sample) * f64::from(*sample))
-            .sum();
-        let rms = (energy / frame.len().max(1) as f64).sqrt();
-        if rms >= SPEECH_RMS {
-            self.hangover = SPEECH_HANGOVER_FRAMES;
-        } else {
-            self.hangover = self.hangover.saturating_sub(1);
-        }
-        let now = self.hangover > 0;
-        (was != now).then_some(now)
-    }
-
-    /// Ends speech at once (the microphone was switched off).
-    fn silence(&mut self) -> Option<bool> {
-        (std::mem::take(&mut self.hangover) > 0).then_some(false)
-    }
-}
-
 /// Owns the local audio path for one voice connection: the microphone on its
 /// way out, and everyone else on their way in.
 pub struct VoiceAudio {
@@ -337,17 +446,39 @@ impl VoiceAudio {
         let mic_enabled = Arc::new(AtomicBool::new(true));
         let capture_enabled = mic_enabled.clone();
         let first_packet = Arc::new(AtomicBool::new(true));
-        let mut detector = SpeechDetector::default();
+        let mut gate = VoiceGate::default();
+        // Whether the local ring shows speech.
+        let mut speaking = false;
         let capture = Capture::start(move |mut frame| {
             crate::devices::apply_gain(&mut frame, crate::devices::input_gain());
-            if !capture_enabled.load(Ordering::Relaxed) {
-                if let Some(speaking) = detector.silence() {
-                    on_speaking(speaking);
+            // The input sensitivity decides which frames go out. A pause
+            // ends with silence frames and the speaking flag off, as the
+            // official clients do; the next loud frame turns it on again.
+            let level = crate::processing::level_db(&frame);
+            let sensitivity = crate::processing::current().sensitivity();
+            let enabled = capture_enabled.load(Ordering::Relaxed);
+            let action = gate.feed(level, sensitivity, enabled);
+            crate::processing::report_level(
+                level,
+                action == GateAction::Send,
+                crate::processing::shown_threshold(&gate, sensitivity),
+            );
+            match action {
+                GateAction::Send => {}
+                GateAction::Skip => {
+                    voice.skip_audio(20);
+                    return;
                 }
-                return;
+                GateAction::EndSpeech => {
+                    voice.end_talk_burst(20);
+                    if std::mem::take(&mut speaking) {
+                        on_speaking(false);
+                    }
+                    return;
+                }
             }
-            if let Some(speaking) = detector.feed(&frame) {
-                on_speaking(speaking);
+            if !std::mem::replace(&mut speaking, true) {
+                on_speaking(true);
             }
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
@@ -420,10 +551,24 @@ impl MicTest {
         let peak = Arc::new(AtomicU32::new(0));
         let captured = queue.clone();
         let level = peak.clone();
+        let mut gate = VoiceGate::default();
         let capture = Capture::start(move |mut frame| {
             crate::devices::apply_gain(&mut frame, crate::devices::input_gain());
             let loudest = frame.iter().map(|sample| sample.unsigned_abs()).max();
             level.fetch_max(u32::from(loudest.unwrap_or(0)), Ordering::Relaxed);
+            // Play back what a call would send: below the input
+            // sensitivity, silence.
+            let db = crate::processing::level_db(&frame);
+            let sensitivity = crate::processing::current().sensitivity();
+            let action = gate.feed(db, sensitivity, true);
+            crate::processing::report_level(
+                db,
+                action == GateAction::Send,
+                crate::processing::shown_threshold(&gate, sensitivity),
+            );
+            if action != GateAction::Send {
+                frame.fill(0);
+            }
             let mut queue = captured.lock();
             if queue.len() >= MIC_TEST_QUEUE {
                 queue.pop_front();
@@ -534,24 +679,115 @@ mod tests {
         assert_eq!(first, FRAME_INTERLEAVED);
     }
 
-    #[test]
-    fn speech_detector_reports_edges_and_holds_through_pauses() {
-        let quiet = vec![20i16; FRAME_INTERLEAVED];
-        let loud = vec![3000i16; FRAME_INTERLEAVED];
-        let mut detector = SpeechDetector::default();
-        assert_eq!(detector.feed(&quiet), None);
-        assert_eq!(detector.feed(&loud), Some(true));
-        assert_eq!(detector.feed(&loud), None);
-        // A pause shorter than the hangover does not end speech.
-        for _ in 0..SPEECH_HANGOVER_FRAMES - 1 {
-            assert_eq!(detector.feed(&quiet), None);
+    /// A microphone made of a test tone, with `processing` applied the
+    /// way the real microphone applies it.
+    fn tone_line(
+        processing: std::sync::Arc<Mutex<crate::processing::VoiceProcessing>>,
+    ) -> LineBuilder {
+        Box::new(move |processed| {
+            let chain = if processed {
+                crate::processing::chain(
+                    &processing.lock(),
+                    crate::processing::probe_running(),
+                    &crate::processing::element_available,
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "audiotestsrc is-live=true wave=sine freq=440 volume=0.3 \
+                 ! audioconvert ! audioresample ! {CAPTURE_CAPS}{chain} \
+                 ! appsink name=sink sync=false"
+            )
+        })
+    }
+
+    /// Frames and the loudest frame level seen in `window`.
+    fn collect(
+        rx: &std::sync::mpsc::Receiver<Vec<i16>>,
+        window: std::time::Duration,
+    ) -> (usize, f32) {
+        let deadline = std::time::Instant::now() + window;
+        let mut frames = 0;
+        let mut loudest = crate::processing::FLOOR_DB;
+        while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let Ok(frame) = rx.recv_timeout(left) else {
+                break;
+            };
+            assert_eq!(frame.len(), FRAME_INTERLEAVED);
+            frames += 1;
+            loudest = loudest.max(crate::processing::level_db(&frame));
         }
-        assert_eq!(detector.feed(&quiet), Some(false));
-        assert_eq!(detector.feed(&quiet), None);
-        // Muting ends speech immediately.
-        assert_eq!(detector.feed(&loud), Some(true));
-        assert_eq!(detector.silence(), Some(false));
-        assert_eq!(detector.silence(), None);
+        (frames, loudest)
+    }
+
+    #[test]
+    fn microphone_processing_passes_audio_and_follows_changes() {
+        use crate::processing::{NoiseSuppression, VoiceProcessing};
+        gst::init().unwrap();
+        for element in ["webrtcdsp", "webrtcechoprobe", "audiornnoise"] {
+            assert!(
+                crate::processing::element_available(element),
+                "{element} is missing from the GStreamer plugin path"
+            );
+        }
+        // A call's playback, with the probe echo cancellation listens to.
+        let playback = gst::parse::launch(&format!(
+            "audiotestsrc is-live=true wave=ticks volume=0.2 ! audioconvert \
+             ! webrtcechoprobe name={} ! fakesink sync=true",
+            crate::processing::ECHO_PROBE
+        ))
+        .unwrap();
+        playback.set_state(gst::State::Playing).unwrap();
+        let _probe = crate::processing::EchoProbeGuard::new();
+
+        let settings = std::sync::Arc::new(Mutex::new(VoiceProcessing::default()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let capture = Capture::start_rebuilding(tone_line(settings.clone()), move |frame| {
+            let _ = tx.send(frame);
+        })
+        .unwrap();
+        let (frames, loudest) = collect(&rx, std::time::Duration::from_millis(1500));
+        assert!(frames >= 40, "plain: {frames} frames");
+        assert!(loudest > -20.0, "plain: {loudest} dB");
+
+        let variants = [
+            VoiceProcessing {
+                noise_suppression: NoiseSuppression::Standard,
+                ..VoiceProcessing::default()
+            },
+            VoiceProcessing {
+                noise_suppression: NoiseSuppression::Strong,
+                ..VoiceProcessing::default()
+            },
+            VoiceProcessing {
+                auto_gain: true,
+                ..VoiceProcessing::default()
+            },
+            VoiceProcessing {
+                echo_cancellation: true,
+                noise_suppression: NoiseSuppression::Standard,
+                auto_gain: true,
+                ..VoiceProcessing::default()
+            },
+            VoiceProcessing::default(),
+        ];
+        for variant in variants {
+            *settings.lock() = variant;
+            crate::processing::rebuild();
+            // The rebuild happens within a frame; skip what came before.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            while rx.try_recv().is_ok() {}
+            let (frames, _) = collect(&rx, std::time::Duration::from_millis(1500));
+            assert!(frames >= 40, "{variant:?}: {frames} frames");
+            // Not a silent fallback to the plain microphone.
+            assert!(capture.is_processed(), "{variant:?} fell back");
+        }
+        // Back to plain: the tone is as loud as at the start.
+        let (_, loudest) = collect(&rx, std::time::Duration::from_millis(500));
+        assert!(loudest > -20.0, "plain again: {loudest} dB");
+        drop(capture);
+        playback.set_state(gst::State::Null).unwrap();
     }
 
     #[test]
