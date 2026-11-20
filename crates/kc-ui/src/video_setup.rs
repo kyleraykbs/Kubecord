@@ -733,6 +733,11 @@ const AUDIO_MODE_HELP: [&str; 4] = [
     "Adds an output named kylecord Go Live while you stream. Connect anything to it in your patchbay, or choose it as a program's output; viewers hear what reaches it.",
 ];
 
+/// The Shared Audio Boost slider's range, as a percentage of the captured
+/// loudness. 100 % sends the sound unchanged; 500 % is a five-times boost.
+const STREAM_AUDIO_BOOST_MIN: u32 = 100;
+const STREAM_AUDIO_BOOST_MAX: u32 = 500;
+
 /// Keeps the program chosen for one-program sound, for this stream and
 /// the next.
 fn remember_program(
@@ -1067,9 +1072,14 @@ impl AppState {
     /// sound, one program, or a node for a patchbay. With one program, a
     /// list of programs that have sound and a button to look again. The
     /// choice is kept for next time.
-    fn stream_audio_controls(self: &Rc<Self>, prefs: Rc<RefCell<CapturePreferences>>) -> gtk::Box {
+    fn stream_audio_controls(
+        self: &Rc<Self>,
+        account: AccountId,
+        prefs: Rc<RefCell<CapturePreferences>>,
+    ) -> gtk::Box {
         let group = gtk::Box::new(gtk::Orientation::Vertical, 6);
         group.append(&caption("Stream Audio"));
+        let saved_gain = prefs.borrow().stream_audio_gain;
         let modes: Vec<String> = AUDIO_MODES.iter().map(|name| (*name).to_owned()).collect();
         let mode = string_dropdown(&modes);
         mode.set_selected(prefs.borrow().share_audio.min(AUDIO_MODES.len() as u32 - 1));
@@ -1227,6 +1237,50 @@ impl AppState {
         if mode.selected() == 2 {
             fill();
         }
+
+        // Boost on the user's own outgoing stream sound. 100 % sends it as
+        // captured; higher makes only viewers hear it louder.
+        let boost_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        boost_box.set_margin_top(10);
+        boost_box.append(&caption("Shared Audio Boost"));
+        let boost = gtk::Scale::with_range(
+            gtk::Orientation::Horizontal,
+            f64::from(STREAM_AUDIO_BOOST_MIN),
+            f64::from(STREAM_AUDIO_BOOST_MAX),
+            5.0,
+        );
+        let start_percent = (f64::from(saved_gain) * 100.0).clamp(
+            f64::from(STREAM_AUDIO_BOOST_MIN),
+            f64::from(STREAM_AUDIO_BOOST_MAX),
+        );
+        boost.set_value(start_percent);
+        boost.add_mark(100.0, gtk::PositionType::Bottom, Some("100%"));
+        boost.set_draw_value(true);
+        boost.set_value_pos(gtk::PositionType::Right);
+        boost.set_format_value_func(|_, value| format!("{value:.0}%"));
+        boost.set_hexpand(true);
+        boost_box.append(&boost);
+        let boost_help = gtk::Label::new(Some(
+            "Makes viewers hear the shared sound louder without changing your own volume. Too much will distort or clip the audio.",
+        ));
+        boost_help.set_xalign(0.0);
+        boost_help.set_wrap(true);
+        boost_help.add_css_class("dim-label");
+        boost_help.add_css_class("caption");
+        boost_box.append(&boost_help);
+        group.append(&boost_box);
+        {
+            let app = self.clone();
+            boost.connect_value_changed(move |scale| {
+                let gain = (scale.value() / 100.0) as f32;
+                // Persist for the next stream, and apply live to one running.
+                app.update_prefs(|prefs| prefs.stream_audio_gain = gain);
+                let _ = app
+                    .cmd_tx
+                    .try_send(Command::SetStreamAudioGain { account, gain });
+            });
+        }
+
         group
     }
 
@@ -1256,7 +1310,7 @@ impl AppState {
         page.append(&camera_list);
         let camera_access: Rc<RefCell<Option<CameraAccess>>> = Rc::new(RefCell::new(None));
 
-        page.append(&self.stream_audio_controls(prefs.clone()));
+        page.append(&self.stream_audio_controls(account, prefs.clone()));
 
         let selected_camera = {
             let access = camera_access.clone();
@@ -1411,10 +1465,18 @@ impl AppState {
             let settings = prefs.borrow().video_settings();
             let delay_ms = prefs.borrow().stream_delay_ms;
             let audio = prefs.borrow().audio_share();
+            let stream_audio_gain = prefs.borrow().stream_audio_gain;
             if prefs.borrow().share_audio == 2 && audio.is_none() {
                 app.set_status("Choose the program to share sound from");
                 return;
             }
+            // Carries the saved boost to the runtime so the stream starts at
+            // it, even if the slider was not touched this time. Queued before
+            // the start command, so it is read when the capture begins.
+            let _ = app.cmd_tx.try_send(Command::SetStreamAudioGain {
+                account,
+                gain: stream_audio_gain,
+            });
             if source.selected() == CAMERA_SOURCE {
                 let Some((access, node_id)) = selected_camera() else {
                     app.set_status("No camera available");

@@ -196,6 +196,19 @@ pub fn run() -> glib::ExitCode {
                 // so it can be looked at without signing in.
                 if popup == "share" && app_state.active().is_none() {
                     app_state.show_share_popup(0);
+                    // The share popup is an in-window dialog, so a screenshot
+                    // of the main window catches it. Give it a moment to lay
+                    // out, then save if asked.
+                    if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                        let app_state = app_state.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                            if let Err(error) =
+                                save_window_png(&app_state.window, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the share popup: {error}");
+                            }
+                        });
+                    }
                     return;
                 }
                 let Some((account, _, store)) = app_state.active() else {

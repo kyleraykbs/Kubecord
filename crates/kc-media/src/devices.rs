@@ -170,4 +170,21 @@ mod tests {
         apply_gain(&mut samples, 0.0);
         assert_eq!(samples, [0; 4]);
     }
+
+    #[test]
+    fn unity_gain_leaves_samples_unchanged() {
+        let original = [0i16, 1, -1, 1234, -1234, i16::MAX, i16::MIN];
+        let mut samples = original;
+        apply_gain(&mut samples, 1.0);
+        assert_eq!(samples, original);
+    }
+
+    #[test]
+    fn large_boost_clips_to_the_rails_not_wraps() {
+        // A big multiplier must saturate, never overflow/wrap a positive
+        // sample to a negative one (or vice versa).
+        let mut samples = [100i16, -100, 20_000, -20_000];
+        apply_gain(&mut samples, 500.0);
+        assert_eq!(samples, [i16::MAX, i16::MIN, i16::MAX, i16::MIN]);
+    }
 }

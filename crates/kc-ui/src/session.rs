@@ -216,6 +216,12 @@ pub enum VoiceCommand {
         user_id: Snowflake,
         volume: f32,
     },
+    /// Gain on the user's own outgoing shared-stream sound (what viewers
+    /// hear), as a linear multiplier; `1.0` is unchanged. Takes effect live
+    /// on a running stream and is kept for the next one.
+    SetStreamAudioGain {
+        gain: f32,
+    },
     SetCamera(bool),
     SetCameraDevice {
         access: CameraAccess,
@@ -319,6 +325,10 @@ pub enum Command {
         account: AccountId,
         user_id: Snowflake,
         volume: f32,
+    },
+    SetStreamAudioGain {
+        account: AccountId,
+        gain: f32,
     },
     SetCamera {
         account: AccountId,
@@ -609,6 +619,9 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             )
             .await;
         }
+        Command::SetStreamAudioGain { account, gain } => {
+            forward_voice(account, VoiceCommand::SetStreamAudioGain { gain }, ui).await;
+        }
         Command::SetCamera { account, camera } => {
             forward_voice(account, VoiceCommand::SetCamera(camera), ui).await;
         }
@@ -794,6 +807,7 @@ fn spawn_account(
             stream_sources: ShareSources::ScreenOrWindow,
             stream_capture: None,
             stream_audio: Some(AudioShare::Desktop),
+            stream_audio_gain: 1.0,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -1032,6 +1046,10 @@ struct VoiceRuntime {
     stream_sources: ShareSources,
     stream_capture: Option<Box<PreparedCapture>>,
     stream_audio: Option<AudioShare>,
+    /// Linear multiplier for the user's own outgoing shared-stream sound, so
+    /// viewers can hear it louder. `1.0` is unchanged. Applied when a stream
+    /// starts and live while one runs.
+    stream_audio_gain: f32,
     stream_pending: bool,
     streaming: bool,
     stream_generation: u64,
@@ -1535,6 +1553,7 @@ async fn handle_voice_control(
                 Ok(source) => {
                     let delay_ms = voice.stream_delay_ms;
                     let share_audio = voice.stream_audio.clone();
+                    let gain = voice.stream_audio_gain;
                     if let Some(connection) = &mut voice.stream_connection {
                         tracing::info!("stream source ready");
                         source.adapt(&voice.stream_settings);
@@ -1550,6 +1569,7 @@ async fn handle_voice_control(
                                 128_000,
                                 delay_ms,
                                 share,
+                                gain,
                             ) {
                                 Ok(audio) => connection.audio = Some(audio),
                                 Err(error) => {
@@ -2793,6 +2813,18 @@ async fn apply_voice_command(
                 audio.set_volume(stream_audio_key(user_id), volume);
             }
         }
+        VoiceCommand::SetStreamAudioGain { gain } => {
+            // Kept so the next stream starts at it, and applied live to one
+            // already running.
+            voice.stream_audio_gain = gain;
+            if let Some(audio) = voice
+                .stream_connection
+                .as_ref()
+                .and_then(|connection| connection.audio.as_ref())
+            {
+                audio.set_gain(gain);
+            }
+        }
         VoiceCommand::SetDeafen(deafened) => {
             voice.deafened = deafened;
             if let Some(connection) = &voice.connection {
@@ -3435,6 +3467,7 @@ mod tests {
             stream_sources: ShareSources::ScreenOrWindow,
             stream_capture: None,
             stream_audio: Some(AudioShare::Desktop),
+            stream_audio_gain: 1.0,
             stream_pending: false,
             streaming: false,
             stream_generation: 0,
@@ -3679,6 +3712,26 @@ mod tests {
         .await;
         assert_eq!(voice.user_volumes.get(&user), Some(&0.3));
         assert_eq!(voice.stream_volumes.get(&user), Some(&1.8));
+    }
+
+    #[tokio::test]
+    async fn stream_audio_gain_is_kept_on_the_runtime() {
+        // The outgoing boost is stored even with no stream running, so the
+        // next stream starts at it (ScreenAudio::start reads this field).
+        let (handle, _sent) = GatewayHandle::detached();
+        let mut voice = runtime(handle);
+        assert_eq!(voice.stream_audio_gain, 1.0);
+        let (ui_tx, _ui_rx) = async_channel::unbounded();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        apply_voice_command(
+            &mut voice,
+            VoiceCommand::SetStreamAudioGain { gain: 2.5 },
+            0,
+            &ui_tx,
+            &control_tx,
+        )
+        .await;
+        assert_eq!(voice.stream_audio_gain, 2.5);
     }
 
     /// A voice runtime in a call in channel 12 of guild 5, its connection

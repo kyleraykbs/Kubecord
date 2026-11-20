@@ -112,6 +112,12 @@ pub struct CapturePreferences {
     /// [`kc_media::share_audio::AudioApp::key`], and the name it showed.
     pub share_audio_app: Option<String>,
     pub share_audio_app_name: Option<String>,
+    /// Boost on the user's own outgoing shared-stream sound (what viewers
+    /// hear), as a linear multiplier; `1.0` leaves it unchanged. Does not
+    /// touch the user's own output/monitor volume. The struct's `serde(default)`
+    /// fills it with `1.0` (from [`Default`]) for settings files written
+    /// before this existed.
+    pub stream_audio_gain: f32,
     /// Width of the channel sidebar in pixels.
     pub sidebar_width: i32,
     /// Start the camera preview as soon as the camera popup opens.
@@ -228,6 +234,7 @@ impl Default for CapturePreferences {
             share_audio: 1,
             share_audio_app: None,
             share_audio_app_name: None,
+            stream_audio_gain: 1.0,
             sidebar_width: SIDEBAR_WIDTH,
             always_preview: false,
             captcha_in_app: true,

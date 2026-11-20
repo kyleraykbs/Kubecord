@@ -369,6 +369,11 @@ static CAPTURE_COUNT: AtomicU32 = AtomicU32::new(0);
 pub struct ScreenAudio {
     _sound: SharedSound,
     voice: VoiceHandle,
+    /// Linear multiplier applied to each outgoing frame (`f32` bits), so
+    /// viewers can be made to hear the shared sound louder without touching
+    /// the user's own output. Read in the capture callback, so a change
+    /// takes effect on the next frame. `1.0` leaves the sound unchanged.
+    gain: Arc<AtomicU32>,
 }
 
 impl ScreenAudio {
@@ -377,6 +382,7 @@ impl ScreenAudio {
         bitrate: u32,
         delay_ms: u64,
         share: AudioShare,
+        gain: f32,
     ) -> Result<Self> {
         let encoder = Arc::new(Mutex::new(
             Encoder::new(SAMPLE_RATE, Channels::Stereo, Application::Audio)
@@ -393,7 +399,15 @@ impl ScreenAudio {
             std::time::Duration::from_millis(delay_ms),
             move |packet, frame_ms| send_voice.send_soundshare_audio(packet, frame_ms),
         );
-        let on_frame = move |frame: Vec<i16>| {
+        let gain = Arc::new(AtomicU32::new(gain.max(0.0).to_bits()));
+        let frame_gain = gain.clone();
+        let on_frame = move |mut frame: Vec<i16>| {
+            // Scale the viewers' copy only; this capture is a separate
+            // monitor tap, so the user's own playback is untouched.
+            crate::devices::apply_gain(
+                &mut frame,
+                f32::from_bits(frame_gain.load(Ordering::Relaxed)),
+            );
             let mut encoder = encoder.lock();
             match encoder.encode_vec(&frame, 4000) {
                 Ok(packet) => delayed.send(packet, 20),
@@ -410,7 +424,14 @@ impl ScreenAudio {
         Ok(Self {
             _sound: sound,
             voice,
+            gain,
         })
+    }
+
+    /// Sets the outgoing gain (a linear multiplier, `1.0` = unchanged) while
+    /// streaming. It applies to the next frame, without restarting.
+    pub fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.max(0.0).to_bits(), Ordering::Relaxed);
     }
 }
 
