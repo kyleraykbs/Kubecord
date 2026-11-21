@@ -1,11 +1,15 @@
 //! Widgets for what a message contains: formatted text with mentions and
 //! custom emoji, attachments, embeds and stickers.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gtk::prelude::*;
 use libadwaita as adw;
+use regex::Regex;
 
 use kc_core::Snowflake;
 use kc_http::cdn;
@@ -16,7 +20,24 @@ use crate::markdown::format_size;
 use crate::player::LoopingVideo;
 use crate::rich::{self, Piece};
 use crate::shell::AppState;
-use crate::widgets::{first_icon, hex_color, icon_button, label, max_width, open_uri};
+use crate::widgets::{first_icon, hex_color, icon_button, label, max_width, open_uri, status_dot};
+
+thread_local! {
+    /// Resolved invites by code (`None` = invalid/expired), so re-rendering a
+    /// message with an invite link does not re-hit the API.
+    static INVITE_CACHE: RefCell<HashMap<String, Option<ResolvedInvite>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// What an invite card shows, once resolved.
+#[derive(Clone)]
+struct ResolvedInvite {
+    guild_id: Snowflake,
+    name: String,
+    icon: Option<String>,
+    members: u32,
+    online: u32,
+}
 
 /// What a media preview shows, and what clicking it does.
 pub(crate) enum MediaKind {
@@ -216,6 +237,28 @@ pub(crate) fn long_date(iso: &str) -> String {
     local_time(iso)
         .and_then(|time| time.format("%e %B %Y").ok())
         .map(|text| text.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// Invite codes from any `discord.gg/…` or `discord.com/invite/…` link in text.
+fn invite_codes(content: &str) -> Vec<String> {
+    static INVITE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:discord\.gg|discord(?:app)?\.com/invite)/([A-Za-z0-9-]+)")
+            .expect("a valid invite regex")
+    });
+    INVITE
+        .captures_iter(content)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_owned()))
+        .collect()
+}
+
+/// "Est. Nov 2026" from a guild's creation time (encoded in its id).
+fn established(guild_id: Snowflake) -> String {
+    let seconds = (guild_id.timestamp() / 1000) as i64;
+    glib::DateTime::from_unix_local(seconds)
+        .ok()
+        .and_then(|date| date.format("%b %Y").ok())
+        .map(|when| format!("Est. {when}"))
         .unwrap_or_default()
 }
 
@@ -540,6 +583,126 @@ impl AppState {
                 });
             },
         );
+    }
+
+    /// Invite cards for any `discord.gg/…` links in `content`. Discord does not
+    /// embed invites server-side for user clients, so the client resolves them.
+    pub(crate) fn invite_cards(self: &Rc<Self>, content: &str) -> Vec<gtk::Widget> {
+        let mut seen = std::collections::HashSet::new();
+        invite_codes(content)
+            .into_iter()
+            .filter(|code| seen.insert(code.clone()))
+            .map(|code| self.invite_card(&code))
+            .collect()
+    }
+
+    /// One invite card: fills from cache, or shows a spinner while it resolves.
+    fn invite_card(self: &Rc<Self>, code: &str) -> gtk::Widget {
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        frame.add_css_class("kc-invite");
+
+        if let Some(cached) = INVITE_CACHE.with_borrow(|cache| cache.get(code).cloned()) {
+            self.fill_invite_card(&frame, code, cached.as_ref());
+            return frame.upcast();
+        }
+
+        let spinner = gtk::Spinner::new();
+        spinner.set_halign(gtk::Align::Center);
+        spinner.set_margin_top(12);
+        spinner.set_margin_bottom(12);
+        spinner.start();
+        frame.append(&spinner);
+
+        let Some((_, http, _)) = self.active() else {
+            return frame.upcast();
+        };
+        let code = code.to_owned();
+        let request_code = code.clone();
+        let frame_weak = frame.downgrade();
+        crate::video_setup::spawn_local(
+            self,
+            async move { http.resolve_invite(&request_code).await.map_err(|_| ()) },
+            move |app, result| {
+                let resolved = result.ok().map(|invite| ResolvedInvite {
+                    guild_id: invite.guild.as_ref().map(|g| g.id).unwrap_or_default(),
+                    name: invite
+                        .guild
+                        .as_ref()
+                        .and_then(|g| g.name.clone())
+                        .unwrap_or_else(|| "Unknown Server".to_owned()),
+                    icon: invite.guild.as_ref().and_then(|g| g.icon.clone()),
+                    members: invite.approximate_member_count,
+                    online: invite.approximate_presence_count,
+                });
+                INVITE_CACHE.with_borrow_mut(|cache| {
+                    cache.insert(code.clone(), resolved.clone());
+                });
+                if let Some(frame) = frame_weak.upgrade() {
+                    while let Some(child) = frame.first_child() {
+                        frame.remove(&child);
+                    }
+                    app.fill_invite_card(&frame, &code, resolved.as_ref());
+                }
+            },
+        );
+        frame.upcast()
+    }
+
+    /// Populates (or, on `None`, marks invalid) an invite card frame.
+    fn fill_invite_card(self: &Rc<Self>, frame: &gtk::Box, code: &str, info: Option<&ResolvedInvite>) {
+        let Some(info) = info else {
+            frame.append(&label("Invalid or expired invite", &["dim-label"]));
+            return;
+        };
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let icon = info
+            .icon
+            .as_ref()
+            .map(|hash| cdn::guild_icon(info.guild_id, hash, 96));
+        row.append(&self.images.avatar(48, &info.name, icon.as_deref()));
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_valign(gtk::Align::Center);
+        text.append(&label(&info.name, &["heading"]));
+        let counts = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        counts.append(&status_dot("online"));
+        counts.append(&label(&format!("{} Online", info.online), &["caption", "dim-label"]));
+        counts.append(&status_dot("offline"));
+        counts.append(&label(
+            &format!("{} Members", info.members),
+            &["caption", "dim-label"],
+        ));
+        text.append(&counts);
+        let est = established(info.guild_id);
+        if !est.is_empty() {
+            text.append(&label(&est, &["caption", "dim-label"]));
+        }
+        row.append(&text);
+        frame.append(&row);
+
+        // "Go to Server" when already a member, else "Join".
+        let member = self
+            .with_session(|session| {
+                session
+                    .store
+                    .read(|state| state.guilds.contains_key(&info.guild_id))
+            })
+            .unwrap_or(false);
+        let button = gtk::Button::with_label(if member { "Go to Server" } else { "Join" });
+        button.add_css_class("suggested-action");
+        button.set_hexpand(true);
+        let app = self.clone();
+        let guild_id = info.guild_id;
+        let code = code.to_owned();
+        button.connect_clicked(move |_| {
+            if member {
+                app.select_guild(guild_id);
+            } else {
+                app.join_server(&code);
+            }
+        });
+        frame.append(&button);
     }
 
     /// A preview of an image, video or GIF, sized to keep its aspect.

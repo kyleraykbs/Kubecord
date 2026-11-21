@@ -223,6 +223,13 @@ button.kc-link-button:hover {
     border-left: 4px solid alpha(@window_fg_color, 0.25);
 }
 
+.kc-invite {
+    padding: 12px;
+    border-radius: 8px;
+    background-color: alpha(@window_fg_color, 0.06);
+    margin-top: 4px;
+}
+
 .kc-media {
     border-radius: 8px;
 }

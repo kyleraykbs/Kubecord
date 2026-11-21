@@ -347,6 +347,18 @@ impl HttpClient {
             .ok_or_else(|| Error::Other("Discord did not return the new server".to_owned()))
     }
 
+    /// Looks up an invite without accepting it, with member/online counts, so
+    /// the client can render an invite card.
+    pub async fn resolve_invite(&self, code: &str) -> Result<Invite> {
+        let value = self
+            .get(&format!(
+                "/invites/{}?with_counts=true&with_expiration=true",
+                percent_encode(code)
+            ))
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
     /// Joins the guild an invite points to by accepting it. Returns the guild's
     /// id when the response carries one (so the client can navigate to it).
     pub async fn accept_invite(&self, code: &str) -> Result<Option<Snowflake>> {
@@ -1787,6 +1799,14 @@ pub struct Invite {
     pub code: String,
     #[serde(default)]
     pub inviter: Option<User>,
+    /// The server the invite leads to (present when resolving an invite).
+    #[serde(default)]
+    pub guild: Option<InviteGuild>,
+    /// Approximate total members / online members, with `with_counts=true`.
+    #[serde(default)]
+    pub approximate_member_count: u32,
+    #[serde(default)]
+    pub approximate_presence_count: u32,
     #[serde(default)]
     pub channel: Option<InviteChannel>,
     #[serde(default)]
@@ -1808,6 +1828,15 @@ pub struct InviteChannel {
     pub id: Snowflake,
     #[serde(default)]
     pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct InviteGuild {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 /// The body that opens a DM (one recipient) or a group DM (several).

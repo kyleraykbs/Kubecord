@@ -112,7 +112,7 @@ impl AppState {
     }
 
     /// Accepts an invite and opens the server it points to.
-    fn join_server(self: &Rc<Self>, code: &str) {
+    pub(crate) fn join_server(self: &Rc<Self>, code: &str) {
         let Some((_, http, _)) = self.active() else {
             return;
         };

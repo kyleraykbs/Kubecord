@@ -1091,6 +1091,12 @@ impl AppState {
                     column.append(&widget);
                 }
             }
+            // Invite links resolve into their own card (Discord does not embed
+            // them server-side for user clients).
+            for card in self.invite_cards(&message.content) {
+                card.set_margin_top(2);
+                column.append(&card);
+            }
         }
         for sticker in &message.sticker_items {
             column.append(&self.sticker_widget(sticker));
