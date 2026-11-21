@@ -573,12 +573,28 @@ impl AppState {
         // kubecord's own emoji picker (as in the message box), built when
         // first opened.
         let chooser = gtk::Popover::new();
+        let chooser_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        chooser_box.set_margin_top(8);
+        chooser_box.set_margin_bottom(8);
+        chooser_box.set_margin_start(8);
+        chooser_box.set_margin_end(8);
+        // Text alone, no emoji.
+        let no_emoji = gtk::Button::with_label("No Emoji");
+        no_emoji.add_css_class("flat");
+        let unpicked = status_emoji.clone();
+        let show = show_emoji.clone();
+        let popover = chooser.downgrade();
+        no_emoji.connect_clicked(move |_| {
+            *unpicked.borrow_mut() = None;
+            show(None);
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
+        chooser_box.append(&no_emoji);
         let picker_page = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        picker_page.set_margin_top(8);
-        picker_page.set_margin_bottom(8);
-        picker_page.set_margin_start(8);
-        picker_page.set_margin_end(8);
-        chooser.set_child(Some(&picker_page));
+        chooser_box.append(&picker_page);
+        chooser.set_child(Some(&chooser_box));
         emoji_button.set_popover(Some(&chooser));
         let built = std::cell::Cell::new(false);
         let app = self.clone();
