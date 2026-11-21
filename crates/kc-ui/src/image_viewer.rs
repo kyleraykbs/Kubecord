@@ -167,11 +167,13 @@ impl Viewer {
         }
         self.fitted.set(false);
         self.scale.set(next.scale);
-        self.picture.set_content_fit(gtk::ContentFit::Fill);
-        // Center so the scrolled window gives the picture exactly its
-        // requested size; left at Fill it would stretch the picture to the
-        // viewport in whichever dimension the zoomed image is smaller than it,
-        // distorting the aspect ratio (a vertical stretch for a wide image).
+        // The size request is only a minimum: where the zoomed image is
+        // smaller than the viewport (one side of a tall or wide image), the
+        // scrolled window still makes the picture as wide (or tall) as the
+        // viewport. Contain keeps the aspect ratio in that box, which is
+        // exactly the zoomed size (the other side fills the box exactly);
+        // Fill stretched it. Centred, so the box is no bigger than needed.
+        self.picture.set_content_fit(gtk::ContentFit::Contain);
         self.picture.set_halign(gtk::Align::Center);
         self.picture.set_valign(gtk::Align::Center);
         self.picture.set_size_request(

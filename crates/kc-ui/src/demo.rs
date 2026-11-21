@@ -1019,11 +1019,20 @@ impl AppState {
             }
             "viewer" => {
                 self.open_channel(general);
-                let url = "https://cdn.discordapp.com/embed/avatars/2.png?size=1024";
+                // KUBECORD_VIEWER_URL / _ZOOM pick another picture and zoom
+                // (a tall one shows whether zooming keeps its shape).
+                let url: &'static str = std::env::var("KUBECORD_VIEWER_URL")
+                    .ok()
+                    .map(|url| &*Box::leak(url.into_boxed_str()))
+                    .unwrap_or("https://cdn.discordapp.com/embed/avatars/2.png?size=1024");
+                let zoom = std::env::var("KUBECORD_VIEWER_ZOOM")
+                    .ok()
+                    .and_then(|zoom| zoom.parse::<f64>().ok())
+                    .unwrap_or(4.0);
                 self.show_image(url, url);
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(2500), move || {
-                    app.demo_zoom_viewer(url, 4.0);
+                    app.demo_zoom_viewer(url, zoom);
                     let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") else {
                         return;
                     };
