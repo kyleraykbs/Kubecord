@@ -252,6 +252,9 @@ pub struct Message {
     /// For a call message: who joined, and when it ended.
     #[serde(default)]
     pub call: Option<MessageCall>,
+    /// Deleted on Discord, and shown from the message log.
+    #[serde(skip)]
+    pub deleted: bool,
     /// Local send progress for a message shown before Discord confirms it.
     /// Never sent by Discord; always [`SendState::Sent`] for its messages.
     #[serde(skip)]
@@ -362,6 +365,7 @@ impl Message {
             interaction_metadata: None,
             interaction: None,
             call: None,
+            deleted: false,
             send_state: SendState::Sending,
         }
     }

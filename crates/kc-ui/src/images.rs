@@ -166,6 +166,10 @@ impl ImageCache {
     /// path, or `None` when the download failed. Used for media that is
     /// played rather than decoded (GIF-style videos).
     pub fn file(&self, url: &str, extension: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
+        if let Some(local) = local_path(url) {
+            done(local.exists().then_some(local));
+            return;
+        }
         if self.inner.directory.is_none() {
             done(None);
             return;
@@ -326,6 +330,10 @@ impl Inner {
 }
 
 async fn fetch_texture(url: &str, path: Option<PathBuf>) -> Option<gdk::Texture> {
+    // A copy kept on disk (the message log's media): read it in place.
+    if let Some(local) = local_path(url) {
+        return decode(tokio::fs::read(local).await.ok()?).await;
+    }
     if let Some(path) = &path
         && let Ok(bytes) = tokio::fs::read(path).await
     {
@@ -400,6 +408,12 @@ fn decode_webp(bytes: &[u8]) -> Option<gdk::Texture> {
 }
 
 /// Stable file name for a URL (FNV-1a, so it survives toolchain upgrades).
+/// The file a `file://` URL names (any query a resize added is dropped).
+pub(crate) fn local_path(url: &str) -> Option<PathBuf> {
+    let path = url.strip_prefix("file://")?;
+    Some(PathBuf::from(path.split('?').next().unwrap_or(path)))
+}
+
 fn cache_name(url: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in url.as_bytes() {

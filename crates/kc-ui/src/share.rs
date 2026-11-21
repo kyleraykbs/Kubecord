@@ -341,7 +341,15 @@ pub(crate) fn format_text(
             last_author = None;
             continue;
         }
-        let text = body(message);
+        let mut text = body(message);
+        // Kept by the message logger after it was deleted.
+        if message.deleted {
+            text = if options.markdown {
+                format!("{text} *(deleted)*")
+            } else {
+                format!("{text} [deleted]")
+            };
+        }
         if options.markdown {
             if last_author != Some(message.author.id) {
                 out.push('\n');
@@ -954,6 +962,10 @@ impl AppState {
                     }
                     after = last;
                 }
+                // Deleted messages the logger kept are not on Discord any more.
+                found.extend(crate::logger::deleted_between(channel, low, high));
+                found.sort_by_key(|message| message.id);
+                found.dedup_by_key(|message| message.id);
                 Ok::<_, kc_http::Error>(found)
             },
             move |app, result| match result {
@@ -1512,11 +1524,13 @@ mod tests {
         };
         let mut call = message(5, 8, "");
         call.kind = 3;
+        let mut gone = message(4, 8, "bye");
+        gone.deleted = true;
         let items = vec![
             (message(1, 7, "hello\nthere"), Mark::In),
             (message(2, 7, "again"), Mark::In),
             (message(3, 8, "secret"), Mark::Redacted),
-            (message(4, 8, "bye"), Mark::In),
+            (gone, Mark::In),
             (message(5, 8, ""), Mark::Skipped(2)),
             (call, Mark::In),
         ];
@@ -1533,14 +1547,14 @@ mod tests {
         };
         assert_eq!(
             format_text(&items, &name, &body, &time, &system, options),
-            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye\n··· 2 messages skipped ···\n[10:00] user8 started a call.\n"
+            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye [deleted]\n··· 2 messages skipped ···\n[10:00] user8 started a call.\n"
         );
         options.markdown = true;
         options.leave_out_redacted = true;
         options.times = false;
         assert_eq!(
             format_text(&items, &name, &body, &time, &system, options),
-            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye\n\n*··· 2 messages skipped ···*\n\n*user8 started a call.*\n"
+            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye *(deleted)*\n\n*··· 2 messages skipped ···*\n\n*user8 started a call.*\n"
         );
     }
 }

@@ -224,6 +224,9 @@ impl AppState {
         };
 
         let Some(channel_id) = selected else {
+            if let Some((account, ..)) = self.active() {
+                crate::logger::set_viewed(account, None);
+            }
             self.chat.borrow_mut().channel = None;
             if dm_mode {
                 self.content_stack.set_visible_child_name("friends");
@@ -282,6 +285,10 @@ impl AppState {
 
     fn rebuild_messages(self: &Rc<Self>, channel_id: Snowflake) {
         self.share_channel_changed(channel_id);
+        if let Some((account, ..)) = self.active() {
+            crate::logger::set_viewed(account, Some(channel_id));
+            self.merge_logged(account, channel_id);
+        }
         self.hide_toolbar();
         clear_list(&self.messages_list);
         {
@@ -1190,6 +1197,33 @@ impl AppState {
         if !message.reactions.is_empty() {
             column.append(&self.reactions_row(message));
         }
+        // Deleted on Discord, kept by the message logger: says so, and a
+        // right-click can take it out of the log.
+        if message.deleted {
+            body.add_css_class("kc-deleted");
+            let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let bin = gtk::Image::from_icon_name("user-trash-symbolic");
+            bin.set_pixel_size(12);
+            footer.append(&bin);
+            let note = gtk::Label::new(Some("Deleted"));
+            note.add_css_class("caption");
+            note.add_css_class("kc-deleted-note");
+            footer.append(&note);
+            column.append(&footer);
+            let menu = gtk::GestureClick::new();
+            menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+            let app = self.clone();
+            let (channel_id, message_id) = (message.channel_id, message.id);
+            let content = message.content.clone();
+            let anchor = body.downgrade();
+            menu.connect_pressed(move |gesture, _, x, y| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(anchor) = anchor.upgrade() {
+                    app.show_deleted_menu(channel_id, message_id, content.clone(), &anchor, x, y);
+                }
+            });
+            body.add_controller(menu);
+        }
         // Only this user sees it (Discord keeps no copy): it can be put away.
         if message.flags & Message::FLAG_EPHEMERAL != 0 {
             let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -1255,6 +1289,51 @@ impl AppState {
         row.append(&column);
         body.append(&row);
         body
+    }
+
+    /// The right-click menu of a deleted message: copy its text, or take it
+    /// out of the message log (it then goes, as deleted messages do).
+    fn show_deleted_menu(
+        self: &Rc<Self>,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        content: String,
+        anchor: &gtk::Box,
+        x: f64,
+        y: f64,
+    ) {
+        let popover = gtk::Popover::new();
+        self.anchor_popover(&popover, anchor, x, y);
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        menu.add_css_class("kc-menu");
+        menu.set_width_request(180);
+        if !content.is_empty() {
+            let copy = crate::menu::menu_item("Copy Text", false);
+            let inner = popover.clone();
+            copy.connect_clicked(move |button| {
+                button.clipboard().set_text(&content);
+                inner.popdown();
+            });
+            menu.append(&copy);
+        }
+        let remove = crate::menu::menu_item("Remove from Log", true);
+        let app = self.clone();
+        let inner = popover.clone();
+        remove.connect_clicked(move |_| {
+            inner.popdown();
+            crate::logger::forget(message_id);
+            app.with_session(|session| {
+                session.store.write(|state| {
+                    if let Some(buffer) = state.messages.get_mut(&channel_id) {
+                        buffer.remove(message_id);
+                    }
+                })
+            });
+            app.message_deleted(channel_id, message_id);
+        });
+        menu.append(&remove);
+        popover.set_child(Some(&menu));
+        popover.popup();
     }
 
     /// A message as the chat draws it, for a shared picture.
@@ -1670,8 +1749,18 @@ impl AppState {
 
     /// The pointer is over a message: show its toolbar.
     fn hover_message(self: &Rc<Self>, message_id: Snowflake, anchor: &gtk::Box) {
-        // Choosing messages to share: no message actions.
-        if crate::share::active() {
+        // Choosing messages to share: no message actions; a deleted
+        // message has its own (right-click) menu.
+        let deleted = self
+            .with_session(|session| {
+                let channel = session.selected_channel?;
+                session.store.read(|state| {
+                    state.messages.get(&channel)?.get(message_id).map(|message| message.deleted)
+                })
+            })
+            .flatten()
+            .unwrap_or(false);
+        if crate::share::active() || deleted {
             return;
         }
         {

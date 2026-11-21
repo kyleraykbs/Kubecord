@@ -869,6 +869,9 @@ fn spawn_account(
                             let _ = ui.send(UiEvent::Connected { account }).await;
                         }
                         GatewayEvent::Dispatch { name, data } => {
+                            // Seen by the message logger before the store
+                            // drops a deleted message.
+                            crate::logger::observe(account, &name, &data, &store);
                             store.apply(&name, &data);
                             match name.as_str() {
                                 "INTERACTION_CREATE"

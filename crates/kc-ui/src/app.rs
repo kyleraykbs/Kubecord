@@ -561,6 +561,12 @@ impl AppState {
         }
         let emoji = self.capture.borrow().discord_emoji;
         self.apply_discord_emoji(emoji);
+        // The message log drops what has expired, now and every hour.
+        std::thread::spawn(crate::logger::prune);
+        glib::timeout_add_seconds_local(60 * 60, || {
+            std::thread::spawn(crate::logger::prune);
+            glib::ControlFlow::Continue
+        });
 
         // Search runs on the server when the entry is submitted.
         let app = self.clone();
@@ -1912,6 +1918,21 @@ impl AppState {
     }
 
     pub(crate) fn handle_store_event(self: &Rc<Self>, account: AccountId, event: StoreEvent) {
+        // A deleted message the logger kept stays, marked deleted.
+        let event = match event {
+            StoreEvent::MessageDeleted {
+                channel_id,
+                message_id,
+            } if self.keep_deleted(account, channel_id, message_id) => StoreEvent::MessageUpdated {
+                channel_id,
+                message_id,
+            },
+            StoreEvent::HistoryLoaded(channel_id) => {
+                self.merge_logged(account, channel_id);
+                StoreEvent::HistoryLoaded(channel_id)
+            }
+            other => other,
+        };
         // Any signed-in account can notify, not only the one shown.
         if let StoreEvent::MessageAdded {
             channel_id,

@@ -35,7 +35,7 @@ const METER_BLOCKS: f64 = 40.0;
 
 /// The pages, in order: name, title, icon. Each one is a tab in the list
 /// on the left.
-const PAGES: [(&str, &str, &str); 8] = [
+const PAGES: [(&str, &str, &str); 9] = [
     ("account", "My Account", "avatar-default-symbolic"),
     ("voice", "Voice", "audio-input-microphone-symbolic"),
     ("video", "Video", "camera-web-symbolic"),
@@ -46,6 +46,7 @@ const PAGES: [(&str, &str, &str); 8] = [
     ),
     ("sounds", "Sounds", "audio-volume-high-symbolic"),
     ("chat", "Chat", "chat-message-new-symbolic"),
+    ("logger", "Message Logger", "document-open-recent-symbolic"),
     ("theming", "Theming", "applications-graphics-symbolic"),
     ("advanced", "Advanced", "utilities-terminal-symbolic"),
 ];
@@ -155,6 +156,7 @@ impl AppState {
                 "notifications" => self.notifications_page(),
                 "sounds" => self.sounds_page(),
                 "theming" => self.theming_page(),
+                "logger" => self.logger_page(),
                 _ => self.advanced_page(),
             };
             pages.add_named(&page_scroll(&content), Some(name));
@@ -817,6 +819,117 @@ impl AppState {
     // -- theming -------------------------------------------------------------
 
     /// Light/dark and the typeface.
+    /// The message logger: how long to keep the text and media of each kind
+    /// of message, what the log holds, and clearing it.
+    fn logger_page(self: &Rc<Self>) -> gtk::Box {
+        use crate::logger::{Keep, KeepPair, LoggerPrefs};
+        let page = page_box();
+        page.append(&section_title("Message Logger"));
+
+        let keep = adw::PreferencesGroup::new();
+        keep.set_title("What to Keep");
+        keep.set_description(Some(
+            "Deleted messages stay in the chat, marked in red, for as long as they are kept here. Only messages Discord sends to Kubecord anyway are logged: nothing is fetched to log them. Media is copied when a message arrives, since Discord removes it with the message.",
+        ));
+        let labels: Vec<&str> = Keep::ALL.iter().map(|keep| keep.label()).collect();
+        type Field = fn(&mut LoggerPrefs) -> &mut KeepPair;
+        let rows: [(&str, &str, Field); 3] = [
+            (
+                "Channels You're Viewing",
+                "Messages in the channel open in Kubecord.",
+                |prefs| &mut prefs.viewed,
+            ),
+            (
+                "Messages That Would Notify",
+                "Messages that would send you a notification, even while on Do Not Disturb.",
+                |prefs| &mut prefs.notifying,
+            ),
+            (
+                "Everything Else",
+                "Every other message Discord sends to Kubecord.",
+                |prefs| &mut prefs.other,
+            ),
+        ];
+        for (title, subtitle, field) in rows {
+            let row = adw::ActionRow::new();
+            row.set_title(title);
+            row.set_subtitle(subtitle);
+            row.set_subtitle_lines(0);
+            let current = *field(&mut self.capture.borrow_mut().logger);
+            for (heading, text) in [("Text", true), ("Media", false)] {
+                let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                column.set_valign(gtk::Align::Center);
+                let caption = crate::widgets::label(heading, &["caption", "dim-label"]);
+                caption.set_xalign(0.0);
+                column.append(&caption);
+                let choice = gtk::DropDown::from_strings(&labels);
+                // One width, so the columns line up from row to row.
+                choice.set_size_request(132, -1);
+                let chosen = if text { current.text } else { current.media };
+                choice.set_selected(Keep::ALL.iter().position(|keep| *keep == chosen).unwrap_or(0) as u32);
+                let app = self.clone();
+                choice.connect_selected_notify(move |choice| {
+                    let Some(keep) = Keep::ALL.get(choice.selected() as usize).copied() else {
+                        return;
+                    };
+                    app.update_prefs(|prefs| {
+                        let pair = field(&mut prefs.logger);
+                        if text {
+                            pair.text = keep;
+                        } else {
+                            pair.media = keep;
+                        }
+                    });
+                });
+                column.append(&choice);
+                row.add_suffix(&column);
+            }
+            keep.add(&row);
+        }
+        page.append(&keep);
+
+        let log = adw::PreferencesGroup::new();
+        log.set_title("Log");
+        let held = adw::ActionRow::new();
+        held.set_title("Logged");
+        let show_stats = {
+            let held = held.clone();
+            move || {
+                let (all, deleted, bytes) = crate::logger::stats();
+                held.set_subtitle(&format!(
+                    "{all} messages, {deleted} deleted, {} of media",
+                    crate::markdown::format_size(bytes)
+                ));
+            }
+        };
+        show_stats();
+        let clear = gtk::Button::with_label("Clear Log…");
+        clear.add_css_class("destructive-action");
+        clear.set_valign(gtk::Align::Center);
+        let app = self.clone();
+        clear.connect_clicked(move |button| {
+            let dialog = adw::AlertDialog::new(
+                Some("Clear the Message Log?"),
+                Some("Every logged message and its media is removed, and deleted messages shown from the log disappear."),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("clear", "Clear Log");
+            dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
+            let show_stats = show_stats.clone();
+            let app = app.clone();
+            dialog.connect_response(Some("clear"), move |_, _| {
+                crate::logger::clear();
+                show_stats();
+                app.redraw_times();
+            });
+            dialog.present(Some(button));
+        });
+        held.add_suffix(&clear);
+        log.add(&held);
+        page.append(&log);
+        page
+    }
+
     fn theming_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
         page.append(&section_title("Theming"));

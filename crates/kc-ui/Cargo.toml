@@ -39,6 +39,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 webkit6 = { workspace = true, optional = true }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [features]
 # Solve Discord's captchas in an embedded WebKitGTK view.

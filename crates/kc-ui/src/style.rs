@@ -200,6 +200,15 @@ const CSS: &str = r#"
     border-radius: 4px;
 }
 
+/* A deleted message the message logger kept. */
+.kc-message.kc-deleted {
+    background-color: alpha(@error_bg_color, 0.14);
+    box-shadow: inset 2px 0 0 @error_bg_color;
+}
+.kc-deleted-note {
+    color: @error_color;
+}
+
 .kc-message.kc-mentioned {
     background-color: alpha(@warning_bg_color, 0.12);
     box-shadow: inset 2px 0 0 @warning_bg_color;

@@ -63,6 +63,8 @@
 //! - `bot`: an app's messages (buttons, menus, a private reply, thinking,
 //!   a components layout) and the composer's command suggestions.
 //! - `bot-form`: a form an app opened.
+//! - `logger`: the message logger keeping two deleted messages, also after
+//!   the channel is shown again.
 //! - `share`: share mode with a range, a redaction and an added message,
 //!   exported to `KUBECORD_SHARE_EXPORT` (a folder) when set.
 //! - `spelling`: the right-click corrections for a misspelled word.
@@ -771,6 +773,71 @@ impl AppState {
                         names(kc_http::Command::USER)
                     );
                     app.set_composer_text("");
+                });
+            }
+            "logger" => {
+                // The message logger: a new message deleted, and an older
+                // one (loaded with the history, so logged only as it goes)
+                // deleted too; both stay, in red. Then the channel's
+                // messages are dropped and the channel shown again: the
+                // deleted ones come back from the log.
+                self.open_channel(general);
+                let app = self.clone();
+                let store = store.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                    let send = {
+                        let store = store.clone();
+                        move |name: &str, data: &Value| {
+                            crate::logger::observe(account, name, data, &store);
+                            store.apply(name, data);
+                        }
+                    };
+                    let gone = id_at(0, 41);
+                    send(
+                        "MESSAGE_CREATE",
+                        &message(gone, ADA, "This message gets deleted, but the logger keeps it."),
+                    );
+                    send("MESSAGE_CREATE", &message(id_at(0, 42), GRACE, "This one stays."));
+                    let older = app.chat.borrow().rows.iter().rev().nth(4).map(|entry| entry.id);
+                    let app = app.clone();
+                    let store = store.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                        send("MESSAGE_DELETE", &json!({"id": gone.to_string(), "channel_id": GENERAL.to_string()}));
+                        if let Some(older) = older {
+                            send("MESSAGE_DELETE", &json!({"id": older.to_string(), "channel_id": GENERAL.to_string()}));
+                        }
+                        let (all, deleted, _) = crate::logger::stats();
+                        eprintln!("demo: logged {all}, deleted {deleted}");
+                        let kept = |label: &str| {
+                            let shown: Vec<String> = store.read(|state| {
+                                state
+                                    .messages
+                                    .get(&Snowflake::new(GENERAL))
+                                    .map(|buffer| {
+                                        buffer
+                                            .messages()
+                                            .iter()
+                                            .filter(|message| message.deleted)
+                                            .map(|message| message.content.clone())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            });
+                            eprintln!("demo: {label}: deleted shown {shown:?}");
+                        };
+                        kept("after deleting");
+                        // Dropped from the store, then shown again.
+                        store.write(|state| {
+                            if let Some(buffer) = state.messages.get_mut(&Snowflake::new(GENERAL)) {
+                                buffer.remove(Snowflake::new(gone));
+                                if let Some(older) = older {
+                                    buffer.remove(older);
+                                }
+                            }
+                        });
+                        app.redraw_times();
+                        kept("after reloading");
+                    });
                 });
             }
             "share" => {

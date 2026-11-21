@@ -20,6 +20,7 @@ mod interactions;
 mod images;
 mod live;
 pub mod logging;
+mod logger;
 mod login;
 mod markdown;
 mod members;

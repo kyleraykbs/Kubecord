@@ -193,6 +193,8 @@ pub struct CapturePreferences {
     pub discord_font: bool,
     /// Draw emoji with Twemoji, as Discord does. On by default.
     pub discord_emoji: bool,
+    /// What the message logger keeps, and for how long.
+    pub logger: crate::logger::LoggerPrefs,
     /// Underline misspelled words in the message box. On by default.
     #[serde(default = "default_true")]
     pub spellcheck: bool,
@@ -319,6 +321,7 @@ impl Default for CapturePreferences {
             dark_scheme: true,
             discord_font: false,
             discord_emoji: true,
+            logger: crate::logger::LoggerPrefs::default(),
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,
@@ -487,6 +490,7 @@ impl CapturePreferences {
         kc_state::set_unload_distant(self.unload_distant_messages);
         crate::animation::set_animate_unfocused(self.animate_gifs_unfocused);
         crate::spelling::set_enabled(self.spellcheck);
+        crate::logger::set_prefs(self.logger, self.notify_prefs());
         crate::theme::apply_color_scheme(self);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         crate::logging::set_diagnostics(self.log_diagnostics);
