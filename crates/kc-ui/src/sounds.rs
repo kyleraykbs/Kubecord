@@ -544,7 +544,7 @@ impl AppState {
                 return None;
             }
         }
-        let volume = f64::from(self.capture.borrow().sound_volume);
+        let volume = f64::from(self.capture.borrow().sound_volume_of(event.key()));
         if dry_run() {
             eprintln!(
                 "demo: sound {} from {} ({})",

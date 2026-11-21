@@ -23,6 +23,13 @@ use crate::video_setup::{
 
 /// Longest device name shown in a dropdown before it is shortened.
 const DEVICE_LABEL_CHARS: usize = 40;
+
+thread_local! {
+    /// Every open per-sound volume slider, by sound key, so the copies on the
+    /// Sounds and Notifications pages stay in step.
+    static SOUND_SCALES: RefCell<Vec<(&'static str, glib::WeakRef<gtk::Scale>)>> =
+        const { RefCell::new(Vec::new()) };
+}
 /// Segments in the mic test's level meter.
 const METER_BLOCKS: f64 = 40.0;
 
@@ -333,6 +340,24 @@ impl AppState {
         desktop.add(&test_row);
         page.append(&desktop);
 
+        // The message sounds' own volumes, mirrored from the Sounds page (the
+        // same setting: moving either slider moves both).
+        let sounds = adw::PreferencesGroup::new();
+        sounds.set_title("Notification Sounds");
+        sounds.set_description(Some(
+            "The same sliders as on the Sounds page, which also has the overall volume and every other sound.",
+        ));
+        for event in [
+            crate::sounds::SoundEvent::Message,
+            crate::sounds::SoundEvent::Mention,
+        ] {
+            let row = adw::ActionRow::builder().title(event.title()).build();
+            row.add_suffix(&self.sound_level_scale(event));
+            row.add_suffix(&self.sound_preview_button(event));
+            sounds.add(&row);
+        }
+        page.append(&sounds);
+
         let what = adw::PreferencesGroup::new();
         what.set_title("What Notifies");
         what.add(&self.pref_switch(
@@ -381,6 +406,68 @@ impl AppState {
     }
 
     // -- sounds --------------------------------------------------------------
+
+    /// A 0-100 % slider for one sound's own volume. Every slider for the same
+    /// sound (the Sounds page row and its copy on the Notifications page)
+    /// follows the others, so they never disagree.
+    fn sound_level_scale(self: &Rc<Self>, event: crate::sounds::SoundEvent) -> gtk::Scale {
+        let key = event.key();
+        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        scale.set_value(f64::from(self.capture.borrow().sound_level(key)) * 100.0);
+        scale.set_draw_value(true);
+        scale.set_value_pos(gtk::PositionType::Right);
+        scale.set_format_value_func(|_, value| format!("{value:.0}%"));
+        scale.set_width_request(160);
+        scale.set_valign(gtk::Align::Center);
+        scale.set_tooltip_text(Some(&format!("{} volume", event.title())));
+        SOUND_SCALES.with_borrow_mut(|scales| {
+            scales.retain(|(_, weak)| weak.upgrade().is_some());
+            scales.push((key, scale.downgrade()));
+        });
+        let app = self.clone();
+        scale.connect_value_changed(move |scale| {
+            let value = scale.value();
+            let level = (value / 100.0) as f32;
+            app.update_prefs(|prefs| {
+                if level >= 1.0 {
+                    prefs.sound_volumes.remove(key);
+                } else {
+                    prefs.sound_volumes.insert(key.to_owned(), level);
+                }
+            });
+            // Move the other sliders for this sound (collected first: setting
+            // one runs its own handler, which reads the list again).
+            let others: Vec<gtk::Scale> = SOUND_SCALES.with_borrow(|scales| {
+                scales
+                    .iter()
+                    .filter(|(other_key, _)| *other_key == key)
+                    .filter_map(|(_, weak)| weak.upgrade())
+                    .filter(|other| other != scale)
+                    .collect()
+            });
+            for other in others {
+                if (other.value() - value).abs() > f64::EPSILON {
+                    other.set_value(value);
+                }
+            }
+        });
+        scale
+    }
+
+    /// A button that previews one sound (a looping ring plays for 4 s).
+    fn sound_preview_button(self: &Rc<Self>, event: crate::sounds::SoundEvent) -> gtk::Button {
+        let preview = gtk::Button::from_icon_name("media-playback-start-symbolic");
+        preview.add_css_class("flat");
+        preview.set_valign(gtk::Align::Center);
+        preview.set_tooltip_text(Some("Play"));
+        let app = self.clone();
+        preview.connect_clicked(move |_| {
+            if let Some(sound) = app.play_sound_anyway(event) {
+                glib::timeout_add_seconds_local_once(4, move || sound.stop());
+            }
+        });
+        preview
+    }
 
     /// Interface sounds: on or off, how loud, where they come from, and
     /// each one with a preview.
@@ -467,18 +554,8 @@ impl AppState {
         let mut rows = Vec::new();
         for event in SoundEvent::ALL {
             let row = adw::ActionRow::builder().title(event.title()).build();
-            let preview = gtk::Button::from_icon_name("media-playback-start-symbolic");
-            preview.add_css_class("flat");
-            preview.set_valign(gtk::Align::Center);
-            preview.set_tooltip_text(Some("Play"));
-            let app = self.clone();
-            // A ring loops: play it for a few seconds only.
-            preview.connect_clicked(move |_| {
-                if let Some(sound) = app.play_sound_anyway(event) {
-                    glib::timeout_add_seconds_local_once(4, move || sound.stop());
-                }
-            });
-            row.add_suffix(&preview);
+            row.add_suffix(&self.sound_level_scale(event));
+            row.add_suffix(&self.sound_preview_button(event));
             let switch = gtk::Switch::new();
             switch.set_valign(gtk::Align::Center);
             switch.set_active(

@@ -222,6 +222,21 @@ pub struct CapturePreferences {
     pub sound_volume: f32,
     /// Sounds switched off, by [`crate::sounds::SoundEvent::key`].
     pub sounds_off: Vec<String>,
+    /// Each sound's own volume, 0.0 to 1.0, by key; applied on top of
+    /// `sound_volume`. A sound not listed plays at 1.0 (100 %).
+    pub sound_volumes: std::collections::BTreeMap<String, f32>,
+}
+
+impl CapturePreferences {
+    /// The volume one sound plays at: the overall sound volume times its own.
+    pub fn sound_volume_of(&self, key: &str) -> f32 {
+        self.sound_volume * self.sound_level(key)
+    }
+
+    /// A sound's own volume, 0.0 to 1.0 (1.0 when never set).
+    pub fn sound_level(&self, key: &str) -> f32 {
+        self.sound_volumes.get(key).copied().unwrap_or(1.0)
+    }
 }
 
 pub const NOISE_SUPPRESSION: [&str; 3] = ["Off", "Standard", "Strong"];
@@ -308,6 +323,7 @@ impl Default for CapturePreferences {
             sounds_enabled: true,
             sound_volume: 0.6,
             sounds_off: Vec::new(),
+            sound_volumes: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -604,6 +620,8 @@ impl CapturePreferences {
         }
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self.call_height = self.call_height.max(CALL_HEIGHT_MIN);
+        self.sound_volumes
+            .retain(|_, level| level.is_finite() && (0.0..=1.0).contains(level));
     }
 }
 
