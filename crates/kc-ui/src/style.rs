@@ -142,6 +142,59 @@ const CSS: &str = r#"
     background-color: alpha(@accent_bg_color, 0.18);
 }
 
+/* Share mode: the chosen messages, the redacted ones (blurred behind
+   stripes), the range's edges and their handles, and the bar. */
+.kc-message.kc-share-selected {
+    background-color: alpha(@accent_bg_color, 0.20);
+}
+.kc-message.kc-share-redacted {
+    background-color: alpha(@accent_bg_color, 0.10);
+    background-image: repeating-linear-gradient(135deg, alpha(currentColor, 0.07) 0px, alpha(currentColor, 0.07) 6px, transparent 6px, transparent 12px);
+}
+.kc-message.kc-share-redacted > box {
+    filter: blur(6px);
+    opacity: 0.5;
+}
+.kc-message.kc-share-first {
+    box-shadow: inset 0 2px 0 @accent_bg_color;
+}
+.kc-message.kc-share-last {
+    box-shadow: inset 0 -2px 0 @accent_bg_color;
+}
+.kc-message.kc-share-first.kc-share-last {
+    box-shadow: inset 0 2px 0 @accent_bg_color, inset 0 -2px 0 @accent_bg_color;
+}
+.kc-share-handle {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    border-radius: 999px;
+    padding: 2px 18px;
+    box-shadow: 0 1px 4px alpha(black, 0.4);
+}
+.kc-share-bar {
+    background-color: @popover_bg_color;
+    border-radius: 12px;
+    padding: 8px 10px;
+    box-shadow: 0 2px 10px alpha(black, 0.35);
+}
+/* A shared picture: the window's colours around the messages. */
+.kc-share-render {
+    background-color: @window_bg_color;
+    padding: 16px 8px;
+}
+.kc-share-render.kc-no-times .kc-time,
+.kc-share-render .kc-gutter-time {
+    opacity: 0;
+}
+.kc-redacted-avatar {
+    background-color: alpha(currentColor, 0.25);
+    border-radius: 999px;
+}
+.kc-redacted-bar {
+    background-color: alpha(currentColor, 0.75);
+    border-radius: 4px;
+}
+
 .kc-message.kc-mentioned {
     background-color: alpha(@warning_bg_color, 0.12);
     box-shadow: inset 2px 0 0 @warning_bg_color;

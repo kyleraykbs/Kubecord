@@ -76,6 +76,7 @@ impl AppState {
                 let text_channel = kind.is_text();
                 self.search_entry.set_visible(text_channel);
                 self.pins_button.set_visible(text_channel);
+                self.share_button.set_visible(text_channel);
                 // A call button for DMs and group DMs; reflects whether a
                 // call in this channel is already up.
                 let is_dm = matches!(kind, ChannelType::Dm | ChannelType::GroupDm);
@@ -116,6 +117,7 @@ impl AppState {
                 self.channel_topic_label.set_label("");
                 self.search_entry.set_visible(false);
                 self.pins_button.set_visible(false);
+                self.share_button.set_visible(false);
                 self.set_window_title("Kubecord");
             }
         }

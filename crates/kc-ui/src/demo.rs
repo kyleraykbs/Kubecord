@@ -63,6 +63,8 @@
 //! - `bot`: an app's messages (buttons, menus, a private reply, thinking,
 //!   a components layout) and the composer's command suggestions.
 //! - `bot-form`: a form an app opened.
+//! - `share`: share mode with a range, a redaction and an added message,
+//!   exported to `KUBECORD_SHARE_EXPORT` (a folder) when set.
 //! - `spelling`: the right-click corrections for a misspelled word.
 //! - `shortcode`: `:smi` lists standard emoji; a closing `:` makes the emoji.
 //! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
@@ -769,6 +771,16 @@ impl AppState {
                         names(kc_http::Command::USER)
                     );
                     app.set_composer_text("");
+                });
+            }
+            "share" => {
+                // Share mode: a range picked by two clicks, one message
+                // redacted in it and one added outside it; both exports.
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let folder = std::env::var_os("KUBECORD_SHARE_EXPORT").map(std::path::PathBuf::from);
+                    app.demo_share(folder);
                 });
             }
             "spelling" => {

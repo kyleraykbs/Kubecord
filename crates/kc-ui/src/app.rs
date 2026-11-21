@@ -572,6 +572,8 @@ impl AppState {
         });
         let app = self.clone();
         self.pins_button.connect_clicked(move |_| app.show_pins());
+        let app = self.clone();
+        self.share_button.connect_clicked(move |_| app.toggle_share_mode());
 
         let app = self.clone();
         self.dm_call_button

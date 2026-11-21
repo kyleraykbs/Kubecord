@@ -37,6 +37,7 @@ mod server_settings;
 mod session;
 mod settings;
 mod settings_panel;
+mod share;
 mod shell;
 mod sidebar;
 mod slash;

@@ -24,9 +24,9 @@ const PAGE: u8 = 50;
 
 pub(crate) struct RowEntry {
     pub id: Snowflake,
-    row: gtk::ListBoxRow,
+    pub(crate) row: gtk::ListBoxRow,
     /// The message itself, without the day divider above it.
-    body: gtk::Box,
+    pub(crate) body: gtk::Box,
 }
 
 /// Which message the floating toolbar belongs to.
@@ -83,7 +83,7 @@ fn link_button(text: &str) -> gtk::Button {
 }
 
 /// Whether `message` continues the group started by `previous`.
-fn continues(previous: &Message, message: &Message) -> bool {
+pub(crate) fn continues(previous: &Message, message: &Message) -> bool {
     previous.author.id == message.author.id
         && previous.webhook_id == message.webhook_id
         && !previous.is_system()
@@ -281,6 +281,7 @@ impl AppState {
     }
 
     fn rebuild_messages(self: &Rc<Self>, channel_id: Snowflake) {
+        self.share_channel_changed(channel_id);
         self.hide_toolbar();
         clear_list(&self.messages_list);
         {
@@ -460,6 +461,7 @@ impl AppState {
         let day = day_key(&message.timestamp);
         let divider = previous.is_some_and(|previous| day_key(&previous.timestamp) != day);
         let (row, body) = self.message_row(message, headed, divider, state);
+        self.mark_share_row(&body, message.id);
         RowEntry {
             id: message.id,
             row,
@@ -1042,7 +1044,7 @@ impl AppState {
             }
             header.append(&label(
                 &format_time(&message.timestamp),
-                &["caption", "dim-label"],
+                &["caption", "dim-label", "kc-time"],
             ));
             column.append(&header);
         } else {
@@ -1233,6 +1235,17 @@ impl AppState {
         row.append(&column);
         body.append(&row);
         body
+    }
+
+    /// A message as the chat draws it, for a shared picture.
+    pub(crate) fn share_body(
+        self: &Rc<Self>,
+        message: &Message,
+        headed: bool,
+        guild: Option<Snowflake>,
+        state: &State,
+    ) -> gtk::Box {
+        self.message_body(message, headed, guild, state)
     }
 
     /// The line above an app's answer: who used which command.
@@ -1634,6 +1647,10 @@ impl AppState {
 
     /// The pointer is over a message: show its toolbar.
     fn hover_message(self: &Rc<Self>, message_id: Snowflake, anchor: &gtk::Box) {
+        // Choosing messages to share: no message actions.
+        if crate::share::active() {
+            return;
+        }
         {
             let mut hover = self.hover.borrow_mut();
             // Any motion cancels a pending hide.
@@ -1692,7 +1709,7 @@ impl AppState {
         });
     }
 
-    fn hide_toolbar(&self) {
+    pub(crate) fn hide_toolbar(&self) {
         if self.hover.borrow().menu_open {
             return;
         }

@@ -77,6 +77,8 @@ pub(crate) struct AppState {
     pub channel_topic_label: gtk::Label,
     pub search_entry: gtk::SearchEntry,
     pub pins_button: gtk::Button,
+    /// Share mode: choose messages to export as a picture or text.
+    pub share_button: gtk::Button,
     pub members_toggle: gtk::ToggleButton,
     pub dm_call_button: gtk::Button,
 
@@ -431,6 +433,10 @@ impl AppState {
         search_entry.set_valign(gtk::Align::Center);
 
         let pins_button = icon_button("view-pin-symbolic", "Pinned Messages");
+        let share_button = icon_button(
+            first_icon(&["share-symbolic", "emblem-shared-symbolic", "send-to-symbolic"]),
+            "Share Messages",
+        );
         let members_toggle = toggle_icon_button("system-users-symbolic", "Member List");
         members_toggle.set_active(true);
 
@@ -443,6 +449,7 @@ impl AppState {
         content_header.pack_start(&title_box);
         content_header.pack_end(&search_entry);
         content_header.pack_end(&members_toggle);
+        content_header.pack_end(&share_button);
         content_header.pack_end(&pins_button);
         content_header.pack_end(&dm_call_button);
 
@@ -795,6 +802,7 @@ impl AppState {
             channel_topic_label,
             search_entry,
             pins_button,
+            share_button,
             members_toggle,
             dm_call_button,
             content_stack,
