@@ -66,6 +66,94 @@ struct Completion {
 /// Emoji size in the composer, drawn in Discord's art.
 const COMPOSER_EMOJI: i32 = 20;
 
+/// Typing paused this long starts a new undo step.
+const UNDO_PAUSE: Duration = Duration::from_secs(1);
+/// Undo steps kept.
+const UNDO_LIMIT: usize = 200;
+
+/// The composer's text at one point (emoji as text), and where the cursor
+/// was, in characters of that text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Snapshot {
+    text: String,
+    cursor: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edit {
+    Insert,
+    Delete,
+}
+
+/// The composer's own undo history. GTK's records text but not the emoji
+/// images put in place of typed emoji, so undoing through it duplicates
+/// them; this one works on the message text, which drawing emoji as images
+/// never changes.
+#[derive(Debug, Default)]
+struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    current: Snapshot,
+    /// The single-character edits being grouped into one step, and when the
+    /// last one happened.
+    typing: Option<(Edit, Instant)>,
+}
+
+impl History {
+    /// Takes in the text after an edit. Typing (or deleting) character by
+    /// character is one step until a pause, a switch between typing and
+    /// deleting, or the end of a word; anything else is a step of its own.
+    fn record(&mut self, now: Snapshot, at: Instant) {
+        if now.text == self.current.text {
+            self.current.cursor = now.cursor;
+            return;
+        }
+        let before = self.current.text.chars().count();
+        let after = now.text.chars().count();
+        let edit = if after > before {
+            Edit::Insert
+        } else {
+            Edit::Delete
+        };
+        let single = before.abs_diff(after) == 1;
+        let continues = single
+            && self.typing.is_some_and(|(kind, last)| {
+                kind == edit && at.saturating_duration_since(last) < UNDO_PAUSE
+            });
+        let word_end = edit == Edit::Insert
+            && now
+                .text
+                .chars()
+                .nth(now.cursor.saturating_sub(1))
+                .is_some_and(char::is_whitespace);
+        let previous = std::mem::replace(&mut self.current, now);
+        if !continues {
+            self.undo.push(previous);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.typing = (single && !word_end).then_some((edit, at));
+    }
+
+    fn undo(&mut self) -> Option<Snapshot> {
+        let previous = self.undo.pop()?;
+        self.redo
+            .push(std::mem::replace(&mut self.current, previous.clone()));
+        self.typing = None;
+        Some(previous)
+    }
+
+    fn redo(&mut self) -> Option<Snapshot> {
+        let next = self.redo.pop()?;
+        self.undo
+            .push(std::mem::replace(&mut self.current, next.clone()));
+        self.typing = None;
+        Some(next)
+    }
+}
+
 /// Text between two iterators, emoji images turned back into their emoji.
 fn expanded_text(start: &gtk::TextIter, end: &gtk::TextIter) -> String {
     let slice = start.slice(end);
@@ -104,6 +192,11 @@ fn copy_with_emoji(view: &gtk::TextView) -> bool {
 }
 
 thread_local! {
+    /// The composer's undo history.
+    static HISTORY: std::cell::RefCell<History> = std::cell::RefCell::new(History::default());
+    /// Set while the composer is changed in ways the history must not
+    /// record (drawing emoji, undoing, text put there by the app).
+    static COMPOSER_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A redraw of the composer's emoji is queued.
     static COMPOSER_EMOJI_QUEUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `display -> raw` pairs for mentions and emoji inserted through
@@ -114,6 +207,8 @@ thread_local! {
 
 impl AppState {
     pub(crate) fn connect_composer(self: &Rc<Self>) {
+        // GTK's undo cannot follow emoji drawn as images; ours does.
+        self.composer.buffer().set_enable_undo(false);
         let app = self.clone();
         self.composer.buffer().connect_changed(move |_| {
             app.on_composer_changed();
@@ -124,7 +219,17 @@ impl AppState {
         keys.connect_key_pressed(move |_, key, _, modifiers| {
             use gtk::gdk::Key;
             let completing = app.completion.is_visible();
+            let control = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             match key {
+                Key::z | Key::Z if control => {
+                    app.undo_composer(shift);
+                    glib::Propagation::Stop
+                }
+                Key::y | Key::Y if control => {
+                    app.undo_composer(true);
+                    glib::Propagation::Stop
+                }
                 Key::Return | Key::KP_Enter => {
                     if modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
                         return glib::Propagation::Proceed;
@@ -230,6 +335,53 @@ impl AppState {
             .to_string()
     }
 
+    fn composer_snapshot(&self) -> Snapshot {
+        let buffer = self.composer.buffer();
+        let cursor = buffer.iter_at_mark(&buffer.get_insert());
+        Snapshot {
+            text: self.composer_text(),
+            cursor: expanded_text(&buffer.start_iter(), &cursor).chars().count(),
+        }
+    }
+
+    /// Puts `text` in the composer as the app (a draft, a message to edit, a
+    /// cleared box): a fresh start for undo.
+    pub(crate) fn set_composer_text(&self, text: &str) {
+        let buffer = self.composer.buffer();
+        COMPOSER_QUIET.set(true);
+        buffer.set_text(text);
+        COMPOSER_QUIET.set(false);
+        let now = self.composer_snapshot();
+        HISTORY.with_borrow_mut(|history| {
+            *history = History {
+                current: now,
+                ..History::default()
+            }
+        });
+    }
+
+    /// Undoes (or redoes) the last step of typing in the composer.
+    pub(crate) fn undo_composer(self: &Rc<Self>, redo: bool) {
+        let step = HISTORY.with_borrow_mut(|history| {
+            if redo {
+                history.redo()
+            } else {
+                history.undo()
+            }
+        });
+        let Some(step) = step else {
+            return;
+        };
+        let buffer = self.composer.buffer();
+        COMPOSER_QUIET.set(true);
+        buffer.set_text(&step.text);
+        // Placed while the text is still plain, so the offset is right; the
+        // emoji become images just after and the cursor moves with them.
+        buffer.place_cursor(&buffer.iter_at_offset(step.cursor as i32));
+        COMPOSER_QUIET.set(false);
+        self.composer.scroll_mark_onscreen(&buffer.get_insert());
+    }
+
     /// Redraws the composer's emoji (soon, once): typed emoji become Discord's
     /// art while it is on, and back into text when it is off.
     pub(crate) fn queue_composer_emoji(self: &Rc<Self>) {
@@ -244,6 +396,13 @@ impl AppState {
     }
 
     fn redraw_composer_emoji(self: &Rc<Self>) {
+        // Same text either way: nothing for the undo history.
+        let was_quiet = COMPOSER_QUIET.replace(true);
+        self.swap_composer_emoji();
+        COMPOSER_QUIET.set(was_quiet);
+    }
+
+    fn swap_composer_emoji(self: &Rc<Self>) {
         let buffer = self.composer.buffer();
         let text = self.composer_positions();
         if !crate::discord_emoji::active() {
@@ -409,6 +568,10 @@ impl AppState {
     }
 
     fn on_composer_changed(self: &Rc<Self>) {
+        if !COMPOSER_QUIET.get() {
+            let now = self.composer_snapshot();
+            HISTORY.with_borrow_mut(|history| history.record(now, Instant::now()));
+        }
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
         self.queue_composer_emoji();
@@ -553,7 +716,7 @@ impl AppState {
         }
 
         let mention_reply = self.context_ping.is_active();
-        self.composer.buffer().set_text("");
+        self.set_composer_text("");
         TOKENS.with_borrow_mut(Vec::clear);
         self.with_session_mut(|session| {
             session.editing = None;
@@ -741,7 +904,7 @@ impl AppState {
     /// Puts unsent text back unless the user has already typed something new.
     fn restore_draft(&self, text: &str) {
         if self.composer_text().is_empty() {
-            self.composer.buffer().set_text(text);
+            self.set_composer_text(text);
         }
     }
 
@@ -773,7 +936,7 @@ impl AppState {
             Some(content)
         });
         if let Some(Some(content)) = content {
-            self.composer.buffer().set_text(&content);
+            self.set_composer_text(&content);
             self.render_composer();
             self.composer.grab_focus();
         }
@@ -808,7 +971,7 @@ impl AppState {
             })
             .unwrap_or(false);
         if was_editing {
-            self.composer.buffer().set_text("");
+            self.set_composer_text("");
         }
         self.render_composer();
     }
@@ -2026,5 +2189,67 @@ mod slowmode_tests {
         assert_eq!(slowmode_text(Duration::from_secs(125)), "2m 5s");
         assert_eq!(slowmode_text(Duration::from_secs(3600)), "1h");
         assert_eq!(slowmode_text(Duration::from_secs(5400)), "1h 30m");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(text: &str) -> Snapshot {
+        Snapshot {
+            text: text.to_owned(),
+            cursor: text.chars().count(),
+        }
+    }
+
+    #[test]
+    fn typing_undoes_a_word_at_a_time() {
+        let start = Instant::now();
+        let mut history = History::default();
+        let mut text = String::new();
+        for (index, c) in "hi there".chars().enumerate() {
+            text.push(c);
+            history.record(snap(&text), start + Duration::from_millis(100 * index as u64));
+        }
+        assert_eq!(history.undo().map(|step| step.text), Some("hi ".to_owned()));
+        assert_eq!(history.undo().map(|step| step.text), Some(String::new()));
+        assert_eq!(history.undo(), None);
+        assert_eq!(history.redo().map(|step| step.text), Some("hi ".to_owned()));
+        assert_eq!(history.redo().map(|step| step.text), Some("hi there".to_owned()));
+        assert_eq!(history.redo(), None);
+    }
+
+    #[test]
+    fn emoji_drawn_as_images_are_not_undo_steps() {
+        let start = Instant::now();
+        let mut history = History::default();
+        history.record(snap("go 🚀"), start);
+        // The same text (its emoji now an image) is no new step.
+        history.record(snap("go 🚀"), start + Duration::from_millis(10));
+        assert_eq!(history.undo().map(|step| step.text), Some(String::new()));
+        assert_eq!(history.undo(), None);
+    }
+
+    #[test]
+    fn a_pause_or_deleting_starts_a_new_step() {
+        let start = Instant::now();
+        let mut history = History::default();
+        history.record(snap("a"), start);
+        history.record(snap("ab"), start + Duration::from_secs(3));
+        history.record(snap("a"), start + Duration::from_millis(3100));
+        assert_eq!(history.undo().map(|step| step.text), Some("ab".to_owned()));
+        assert_eq!(history.undo().map(|step| step.text), Some("a".to_owned()));
+        assert_eq!(history.undo().map(|step| step.text), Some(String::new()));
+    }
+
+    #[test]
+    fn a_new_edit_drops_the_redo_steps() {
+        let start = Instant::now();
+        let mut history = History::default();
+        history.record(snap("one"), start);
+        history.undo();
+        history.record(snap("two"), start + Duration::from_secs(2));
+        assert_eq!(history.redo(), None);
     }
 }

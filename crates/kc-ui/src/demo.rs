@@ -60,6 +60,7 @@
 //! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
 //! - `emoji-picker`: the emoji picker (opening on Standard) and emoji typed
 //!   in the composer, in Discord's art.
+//! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
 //! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
 //!   server emoji (drawn as an image) -- then Edit Profile, where it is set.
 //! - `accounts` (the account menu with two accounts, each with a Log Out
@@ -592,9 +593,7 @@ impl AppState {
                 // The picker (opening on Standard) and emoji typed in the
                 // composer, drawn in Discord's art but sent as text.
                 self.open_channel(general);
-                self.composer
-                    .buffer()
-                    .set_text("Typing 🚀 with emoji 👍🏽 in the box");
+                self.set_composer_text("Typing 🚀 with emoji 👍🏽 in the box");
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_secs(3), move || {
                     eprintln!("demo: composer text = {:?}", app.composer_text());
@@ -619,6 +618,46 @@ impl AppState {
                         });
                     }
                 });
+            }
+            "emoji-undo" => {
+                // Undo and redo over an emoji drawn as an image: each step
+                // brings back exactly the text before it, no duplicates.
+                self.open_channel(general);
+                let app = self.clone();
+                let report = |app: &Rc<Self>, label: &str| {
+                    let buffer = app.composer.buffer();
+                    let images = buffer
+                        .slice(&buffer.start_iter(), &buffer.end_iter(), true)
+                        .matches('\u{fffc}')
+                        .count();
+                    eprintln!("demo: {label}: {:?} ({images} images)", app.composer_text());
+                };
+                let steps: Vec<(u64, &'static str)> = vec![
+                    (500, "type"),
+                    (1500, "emoji"),
+                    (2500, "undo"),
+                    (3000, "undo"),
+                    (3500, "undo"),
+                    (4000, "redo"),
+                    (4500, "redo"),
+                    (5000, "redo"),
+                ];
+                for (delay, step) in steps {
+                    let app = app.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+                        let buffer = app.composer.buffer();
+                        match step {
+                            "type" => buffer.insert_at_cursor("go "),
+                            "emoji" => buffer.insert_at_cursor("🚀"),
+                            "undo" => app.undo_composer(false),
+                            _ => app.undo_composer(true),
+                        }
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+                            report(&app, step);
+                        });
+                    });
+                }
             }
             "gif-link" => {
                 // A bare link to a GIF (an `image` embed), as favourites send.
