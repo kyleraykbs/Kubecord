@@ -1408,8 +1408,12 @@ fn redacted_row(message: &Message) -> gtk::Box {
 
 /// Renders `root` to pictures at most [`PART_HEIGHT`] tall each.
 fn render_parts(window: &libadwaita::ApplicationWindow, root: &gtk::Box, high_resolution: bool) -> Result<Vec<gtk::gdk::Texture>, String> {
-    let width = root.width();
-    let height = root.height();
+    // The whole box, padding included: `width()`/`height()` leave the
+    // padding out, and the paintable scales the box into whatever size it
+    // is drawn at, which squashed the picture (more so vertically).
+    let bounds = root.compute_bounds(root).ok_or("nothing was laid out")?;
+    let width = bounds.width().ceil() as i32;
+    let height = bounds.height().ceil() as i32;
     if width <= 0 || height <= 0 {
         return Err("nothing was laid out".to_owned());
     }
