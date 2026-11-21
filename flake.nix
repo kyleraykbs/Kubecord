@@ -100,6 +100,10 @@
                 gappsWrapperArgs+=(
                   --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "${lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins}"
                   --suffix PATH : "${lib.makeBinPath [ pkgs.pipewire ]}"
+                  # GdkPixbuf needs its loaders cache to decode animated GIFs
+                  # (librsvg bundles a full cache: gif, svg and the rest). Without
+                  # it the GIF loader is not found and GIFs render as a still.
+                  --set GDK_PIXBUF_MODULE_FILE "${pkgs.librsvg}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
                 )
               '';
               meta = {
