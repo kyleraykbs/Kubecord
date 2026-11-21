@@ -103,6 +103,11 @@ impl AppState {
     pub(crate) fn connect_chat(self: &Rc<Self>) {
         let adjustment = self.messages_scroll.vadjustment();
 
+        // Content that grows or arrives (a new message, an embed filling in)
+        // moves what is on screen without a scroll: re-check which looping
+        // GIFs are visible then too.
+        let app = self.clone();
+        adjustment.connect_changed(move |_| app.queue_players_update());
         let app = self.clone();
         adjustment.connect_value_changed(move |_| {
             app.queue_players_update();

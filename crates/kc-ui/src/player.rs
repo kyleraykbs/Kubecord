@@ -170,12 +170,38 @@ fn queue_update(app: &Weak<AppState>) {
     if app.players_update_queued.replace(true) {
         return;
     }
+    // Positions mean something only once layout has run, and GTK applies a new
+    // widget's allocation -- or a scroll -- only at the next frame's layout. A
+    // plain idle can run before that frame and measure stale positions (a GIF
+    // just sent, still below the bottom until the list scrolls to it), leaving
+    // it paused until a scroll asked again. So wait for the next frame and
+    // measure on the idle after it (that frame's layout runs first). The
+    // "queued" flag clears when the frame arrives, not when the measuring
+    // runs: a scroll requested after this frame's layout gets its own frame
+    // instead of being folded into a measurement that cannot see it yet. A
+    // window that is not mapped draws no frames, so it is measured on an idle.
     let weak = Rc::downgrade(&app);
-    // Layout has to settle before positions mean anything.
-    glib::idle_add_local_once(move || {
+    let run = move || {
         if let Some(app) = weak.upgrade() {
-            app.players_update_queued.set(false);
             app.update_players();
         }
-    });
+    };
+    if app.window.is_mapped() {
+        let weak = Rc::downgrade(&app);
+        app.window.add_tick_callback(move |_, _| {
+            if let Some(app) = weak.upgrade() {
+                app.players_update_queued.set(false);
+            }
+            glib::idle_add_local_once(run.clone());
+            glib::ControlFlow::Break
+        });
+    } else {
+        let weak = Rc::downgrade(&app);
+        glib::idle_add_local_once(move || {
+            if let Some(app) = weak.upgrade() {
+                app.players_update_queued.set(false);
+            }
+            run();
+        });
+    }
 }

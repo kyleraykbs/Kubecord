@@ -590,8 +590,14 @@ impl AppState {
                         "content_type": "video/mp4", "flags": 0,
                     },
                 }]);
-                store.apply("MESSAGE_CREATE", &message);
+                // Arrives after the channel is open, at the bottom, as a GIF
+                // just sent does: it must start playing without a scroll.
                 self.open_channel(general);
+                let store = store.clone();
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    store.apply("MESSAGE_CREATE", &message);
+                    eprintln!("demo: gif sent");
+                });
             }
             "gif-unfurl" => {
                 // The real sequence for a posted GIF link: the bare link first
