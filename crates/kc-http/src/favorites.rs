@@ -176,7 +176,9 @@ fn parse_favorite_gifs(bytes: &[u8]) -> Vec<FavoriteGif> {
         }
         true
     });
-    gifs.sort_by_key(|gif| gif.order);
+    // Discord assigns each new favourite a higher `order` than the last, so
+    // sorting descending puts the most recently favourited GIF at the top.
+    gifs.sort_by(|a, b| b.order.cmp(&a.order));
     gifs
 }
 
@@ -607,14 +609,14 @@ mod tests {
             .expect("valid base64");
         let gifs = parse_settings_proto(&bytes);
         assert_eq!(gifs.len(), 3);
-        // Ordered by `order`: a (0), b (1), c (2).
-        assert_eq!(gifs[0].src, "https://media.tenor.com/a.gif");
-        assert_eq!(gifs[0].format, 2);
-        assert_eq!((gifs[0].width, gifs[0].height), (100, 100));
+        // Ordered by `order` descending (newest first): c (2), b (1), a (0).
+        assert_eq!(gifs[0].src, "https://media.tenor.com/c.mp4");
+        assert_eq!(gifs[0].format, 3); // video
+        assert_eq!((gifs[0].width, gifs[0].height), (320, 240));
         assert_eq!(gifs[1].src, "https://media.tenor.com/b.gif");
         assert_eq!(gifs[1].order, 1);
-        assert_eq!(gifs[2].src, "https://media.tenor.com/c.mp4");
-        assert_eq!(gifs[2].format, 3); // video
+        assert_eq!(gifs[2].src, "https://media.tenor.com/a.gif");
+        assert_eq!(gifs[2].format, 2); // image
     }
 
     #[test]

@@ -89,6 +89,8 @@ fn matches(gif: &Gif, needle: &str) -> bool {
 
 /// Records a newly favourited GIF in the cache (no-op if not yet loaded, so
 /// the next fetch is authoritative). Does not duplicate an existing entry.
+/// Inserts at the front so the most recent favourite shows at the top, matching
+/// the descending order the parser applies to a fresh fetch.
 pub(crate) fn insert(gif: Gif) {
     FAVORITES.with_borrow_mut(|cache| {
         if let Some(gifs) = cache.as_mut()
@@ -96,7 +98,7 @@ pub(crate) fn insert(gif: Gif) {
                 .iter()
                 .any(|existing| existing.url == gif.url && !gif.url.is_empty())
         {
-            gifs.push(gif);
+            gifs.insert(0, gif);
         }
     });
 }
