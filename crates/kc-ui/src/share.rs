@@ -578,6 +578,13 @@ impl AppState {
         let Some(mut share) = SHARE.with_borrow_mut(Option::take) else {
             return;
         };
+        // The close button had the focus: removed with the bar, it would
+        // pass the focus to a message row, and the list would scroll to show
+        // that row. The message box takes it instead.
+        self.composer.grab_focus();
+        // Removing the "Redacted" notes changes heights; the message at the
+        // top of the view stays where it is.
+        let anchor = self.top_visible_row();
         if let Some(source) = share.autoscroll.take() {
             source.remove();
         }
@@ -599,6 +606,39 @@ impl AppState {
         for entry in self.chat.borrow().rows.iter() {
             mark_body(&entry.body, Mark::Out, false, false);
         }
+        if let Some((row, offset)) = anchor {
+            let app = self.clone();
+            glib::idle_add_local_once(move || app.restore_top_row(&row, offset));
+        }
+    }
+
+    /// The first row showing at the top of the message list, and how far
+    /// its top is above the view's top.
+    fn top_visible_row(&self) -> Option<(gtk::ListBoxRow, f64)> {
+        if self.chat.borrow().at_bottom {
+            return None;
+        }
+        let value = self.messages_scroll.vadjustment().value();
+        let content = self.messages_scroll.child()?;
+        let chat = self.chat.borrow();
+        chat.rows.iter().find_map(|entry| {
+            let bounds = entry.row.compute_bounds(&content)?;
+            let bottom = f64::from(bounds.y() + bounds.height());
+            (bottom > value).then(|| (entry.row.clone(), value - f64::from(bounds.y())))
+        })
+    }
+
+    /// Scrolls so `row`'s top is `offset` above the view's top again.
+    fn restore_top_row(&self, row: &gtk::ListBoxRow, offset: f64) {
+        let Some(content) = self.messages_scroll.child() else {
+            return;
+        };
+        let Some(bounds) = row.compute_bounds(&content) else {
+            return;
+        };
+        let adjustment = self.messages_scroll.vadjustment();
+        let max = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+        adjustment.set_value((f64::from(bounds.y()) + offset).clamp(adjustment.lower(), max));
     }
 
     /// Leaves share mode if it was for another channel than `channel`.
@@ -1278,6 +1318,37 @@ impl AppState {
                 eprintln!("demo: dragged the end: {before:?} -> {after:?}");
             }
         });
+        // KUBECORD_SHARE_CANCEL: the close button clicked (as a real click
+        // does, with the focus on it), and the reading position compared.
+        if std::env::var_os("KUBECORD_SHARE_CANCEL").is_some() {
+            let app = self.clone();
+            // `up`: scrolled up first, off the bottom.
+            if std::env::var("KUBECORD_SHARE_CANCEL").as_deref() == Ok("up") {
+                let adjustment = self.messages_scroll.vadjustment();
+                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                    adjustment.set_value(adjustment.value() - 300.0);
+                });
+            }
+            glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                let adjustment = app.messages_scroll.vadjustment();
+                let before = adjustment.value();
+                let gap = |adjustment: &gtk::Adjustment| adjustment.upper() - adjustment.page_size() - adjustment.value();
+                eprintln!("demo: before cancel: {} from the bottom", gap(&adjustment));
+                let cancel = SHARE.with_borrow(|share| {
+                    share.as_ref().and_then(|share| share.bar.last_child()).and_downcast::<gtk::Button>()
+                });
+                if let Some(cancel) = cancel {
+                    cancel.grab_focus();
+                    cancel.emit_clicked();
+                }
+                let app = app.clone();
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    let after = app.messages_scroll.vadjustment().value();
+                    eprintln!("demo: after cancel: {} from the bottom", gap(&app.messages_scroll.vadjustment()));
+                    eprintln!("demo: cancel scroll {before} -> {after} (focus {:?})", gtk::prelude::GtkWindowExt::focus(&app.window).map(|w| w.type_().name()));
+                });
+            });
+        }
         DEMO_FOLDER.with_borrow_mut(|slot| *slot = folder.clone());
         if folder.is_some() {
             let options = ExportOptions {
