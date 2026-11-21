@@ -820,6 +820,12 @@ fn remove_media_files(paths: &[String]) {
     }
 }
 
+/// Drops a message's earlier versions from the log.
+pub(crate) fn forget_edits(message_id: Snowflake) {
+    let id = message_id.get() as i64;
+    with_db(|db| db.execute("DELETE FROM logged_edits WHERE message_id = ?1", params![id]));
+}
+
 /// Takes a message out of the log (and its media).
 pub(crate) fn forget(message_id: Snowflake) {
     let id = message_id.get() as i64;

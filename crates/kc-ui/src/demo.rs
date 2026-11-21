@@ -64,7 +64,8 @@
 //!   a components layout) and the composer's command suggestions.
 //! - `bot-form`: a form an app opened.
 //! - `logger`: the message logger keeping two deleted messages, also after
-//!   the channel is shown again. `KUBECORD_DELETED_MENU` right-clicks one.
+//!   the channel is shown again. `KUBECORD_DELETED_MENU` right-clicks one,
+//!   and drops an edited message's history through its menu.
 //! - `share`: share mode with a range, a redaction and an added message,
 //!   exported to `KUBECORD_SHARE_EXPORT` (a folder) when set.
 //!   `KUBECORD_SHARE_GIF` adds a GIF to it (`video` for a GIF host's MP4).

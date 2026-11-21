@@ -83,13 +83,54 @@ fn link_button(text: &str) -> gtk::Button {
 }
 
 /// Whether `message` continues the group started by `previous`.
+/// The first widget under `widget` (itself included) with `class`.
+fn find_class(widget: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+    if widget.has_css_class(class) {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        if let Some(found) = find_class(&next, class) {
+            return Some(found);
+        }
+        child = next.next_sibling();
+    }
+    None
+}
+
+/// The label text of a menu item (for the demo).
+fn menu_item_text(button: &gtk::Button) -> Option<String> {
+    let mut stack = vec![button.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = stack.pop() {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            return Some(label.text().to_string());
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            child = next.next_sibling();
+            stack.push(next);
+        }
+    }
+    None
+}
+
+/// What the logger's right-click menu offers for one message.
+struct LoggedMenu {
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    /// A deleted message's text, to copy (empty: no Copy Text).
+    content: String,
+    deleted: bool,
+    edits: bool,
+}
+
 /// Whether the part of `body` at `(x, y)` has a right-click menu of its own
 /// (a picture, a video, an avatar), which a menu on the whole message
 /// should leave to it.
-fn has_own_menu(body: &gtk::Box, x: f64, y: f64) -> bool {
+fn has_own_menu(body: &gtk::Widget, x: f64, y: f64) -> bool {
     let mut widget = body.pick(x, y, gtk::PickFlags::DEFAULT);
     while let Some(current) = widget {
-        if current == *body.upcast_ref::<gtk::Widget>() {
+        if current == *body {
             break;
         }
         let controllers = current.observe_controllers();
@@ -1133,6 +1174,11 @@ impl AppState {
                     history.append(&old);
                 }
             }
+            // Right-click the earlier versions to drop them from the log (a
+            // deleted message's menu, on all of it, offers it too).
+            if !message.deleted {
+                self.attach_logged_menu(&history, message, false);
+            }
             column.append(&history);
         }
         if let Some(text) = self.text_widget(&message.content, guild, state) {
@@ -1248,27 +1294,7 @@ impl AppState {
             note.add_css_class("kc-deleted-note");
             footer.append(&note);
             column.append(&footer);
-            let menu = gtk::GestureClick::new();
-            menu.set_button(gtk::gdk::BUTTON_SECONDARY);
-            let app = self.clone();
-            let (channel_id, message_id) = (message.channel_id, message.id);
-            let content = message.content.clone();
-            let anchor = body.downgrade();
-            // Ahead of the text, which would show its own Cut/Copy/Paste
-            // menu; media and avatars keep their own menus.
-            menu.set_propagation_phase(gtk::PropagationPhase::Capture);
-            menu.connect_pressed(move |gesture, _, x, y| {
-                let Some(anchor) = anchor.upgrade() else {
-                    return;
-                };
-                if has_own_menu(&anchor, x, y) {
-                    gesture.set_state(gtk::EventSequenceState::Denied);
-                    return;
-                }
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                app.show_deleted_menu(channel_id, message_id, content.clone(), &anchor, x, y);
-            });
-            body.add_controller(menu);
+            self.attach_logged_menu(&body, message, true);
         }
         // Only this user sees it (Discord keeps no copy): it can be put away.
         if message.flags & Message::FLAG_EPHEMERAL != 0 {
@@ -1337,49 +1363,97 @@ impl AppState {
         body
     }
 
-    /// The right-click menu of a deleted message: copy its text, or take it
-    /// out of the message log (it then goes, as deleted messages do).
-    fn show_deleted_menu(
-        self: &Rc<Self>,
-        channel_id: Snowflake,
-        message_id: Snowflake,
-        content: String,
-        anchor: &gtk::Box,
-        x: f64,
-        y: f64,
-    ) {
+    /// A right-click menu for what the message logger kept of `message`
+    /// on `widget`: the whole of a deleted message (`deleted`), or an
+    /// edited one's earlier versions.
+    fn attach_logged_menu(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>, message: &Message, deleted: bool) {
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let app = self.clone();
+        let logged = LoggedMenu {
+            channel_id: message.channel_id,
+            message_id: message.id,
+            content: if deleted { message.content.clone() } else { String::new() },
+            deleted,
+            edits: !message.edits.is_empty(),
+        };
+        let anchor = widget.clone().upcast::<gtk::Widget>().downgrade();
+        // Ahead of the text, which would show its own Cut/Copy/Paste
+        // menu; media and avatars keep their own menus.
+        menu.set_propagation_phase(gtk::PropagationPhase::Capture);
+        menu.connect_pressed(move |gesture, _, x, y| {
+            let Some(anchor) = anchor.upgrade() else {
+                return;
+            };
+            if has_own_menu(&anchor, x, y) {
+                gesture.set_state(gtk::EventSequenceState::Denied);
+                return;
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            app.show_logged_menu(&logged, &anchor, x, y);
+        });
+        widget.add_controller(menu);
+    }
+
+    /// The menu of what the logger kept of a message: copy a deleted
+    /// message's text, drop its earlier versions, or take it out of the log
+    /// altogether (it then goes, as deleted messages do).
+    fn show_logged_menu(self: &Rc<Self>, logged: &LoggedMenu, anchor: &gtk::Widget, x: f64, y: f64) -> gtk::Popover {
+        let LoggedMenu { channel_id, message_id, .. } = *logged;
         let popover = gtk::Popover::new();
         self.anchor_popover(&popover, anchor, x, y);
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
         menu.add_css_class("kc-menu");
         menu.set_width_request(180);
-        if !content.is_empty() {
+        if !logged.content.is_empty() {
             let copy = crate::menu::menu_item("Copy Text", false);
             let inner = popover.clone();
+            let content = logged.content.clone();
             copy.connect_clicked(move |button| {
                 button.clipboard().set_text(&content);
                 inner.popdown();
             });
             menu.append(&copy);
         }
-        let remove = crate::menu::menu_item("Remove from Log", true);
-        let app = self.clone();
-        let inner = popover.clone();
-        remove.connect_clicked(move |_| {
-            inner.popdown();
-            crate::logger::forget(message_id);
-            app.with_session(|session| {
-                session.store.write(|state| {
-                    if let Some(buffer) = state.messages.get_mut(&channel_id) {
-                        buffer.remove(message_id);
-                    }
-                })
+        if logged.edits {
+            let drop = crate::menu::menu_item("Remove Edit History", true);
+            let app = self.clone();
+            let inner = popover.clone();
+            drop.connect_clicked(move |_| {
+                inner.popdown();
+                crate::logger::forget_edits(message_id);
+                app.with_session(|session| {
+                    session.store.write(|state| {
+                        if let Some(buffer) = state.messages.get_mut(&channel_id) {
+                            buffer.update_with(message_id, |message| message.edits.clear());
+                        }
+                    })
+                });
+                app.message_updated(channel_id, message_id);
             });
-            app.message_deleted(channel_id, message_id);
-        });
-        menu.append(&remove);
+            menu.append(&drop);
+        }
+        if logged.deleted {
+            let remove = crate::menu::menu_item("Remove from Log", true);
+            let app = self.clone();
+            let inner = popover.clone();
+            remove.connect_clicked(move |_| {
+                inner.popdown();
+                crate::logger::forget(message_id);
+                app.with_session(|session| {
+                    session.store.write(|state| {
+                        if let Some(buffer) = state.messages.get_mut(&channel_id) {
+                            buffer.remove(message_id);
+                        }
+                    })
+                });
+                app.message_deleted(channel_id, message_id);
+            });
+            menu.append(&remove);
+        }
         popover.set_child(Some(&menu));
         popover.popup();
+        popover
     }
 
     /// The demo: a deleted message right-clicked on its text and on its
@@ -1418,16 +1492,60 @@ impl AppState {
         let text = centre_of(gtk::TextView::static_type()).or_else(|| centre_of(gtk::Label::static_type()));
         let avatar = centre_of(libadwaita::Avatar::static_type());
         if let Some((x, y)) = avatar {
-            eprintln!("demo: avatar has its own menu: {}", has_own_menu(&body, x, y));
+            eprintln!("demo: avatar has its own menu: {}", has_own_menu(body.upcast_ref(), x, y));
         }
         if let Some((x, y)) = text {
             let picked = body.pick(x, y, gtk::PickFlags::DEFAULT).map(|widget| widget.type_().name());
-            let own = has_own_menu(&body, x, y);
+            let own = has_own_menu(body.upcast_ref(), x, y);
             eprintln!("demo: text ({picked:?}) has its own menu: {own}");
             if !own {
-                self.show_deleted_menu(Snowflake::new(1), Snowflake::new(1), "text".to_owned(), &body, x, y);
+                let logged = LoggedMenu {
+                    channel_id: Snowflake::new(1),
+                    message_id: Snowflake::new(1),
+                    content: "text".to_owned(),
+                    deleted: true,
+                    edits: false,
+                };
+                self.show_logged_menu(&logged, body.upcast_ref(), x, y);
             }
         }
+        // An edited message: its earlier versions dropped from the menu.
+        let edited = self.chat.borrow().rows.iter().find_map(|entry| {
+            let history = find_class(entry.body.upcast_ref(), "kc-edit-history")?;
+            Some((entry.id, history))
+        });
+        let Some((message_id, history)) = edited else {
+            eprintln!("demo: no edit history shown");
+            return;
+        };
+        let Some(channel_id) = self.chat.borrow().channel else {
+            return;
+        };
+        let logged = LoggedMenu {
+            channel_id,
+            message_id,
+            content: String::new(),
+            deleted: false,
+            edits: true,
+        };
+        let popover = self.show_logged_menu(&logged, &history, 4.0, 4.0);
+        let button = popover
+            .child()
+            .and_then(|menu| menu.first_child())
+            .and_downcast::<gtk::Button>();
+        eprintln!("demo: history menu offers {:?}", button.as_ref().and_then(menu_item_text));
+        if let Some(button) = button {
+            button.emit_clicked();
+        }
+        let left = crate::logger::edits(message_id).len();
+        let rebuilt = self
+            .chat
+            .borrow()
+            .rows
+            .iter()
+            .find(|entry| entry.id == message_id)
+            .is_some_and(|entry| find_class(entry.body.upcast_ref(), "kc-edit-history").is_none());
+        eprintln!("demo: after Remove Edit History: {left} logged, history gone from the row: {rebuilt}");
     }
 
     /// A message as the chat draws it, for a shared picture.
