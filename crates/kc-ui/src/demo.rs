@@ -64,7 +64,7 @@
 //!   a components layout) and the composer's command suggestions.
 //! - `bot-form`: a form an app opened.
 //! - `logger`: the message logger keeping two deleted messages, also after
-//!   the channel is shown again.
+//!   the channel is shown again. `KUBECORD_DELETED_MENU` right-clicks one.
 //! - `share`: share mode with a range, a redaction and an added message,
 //!   exported to `KUBECORD_SHARE_EXPORT` (a folder) when set.
 //!   `KUBECORD_SHARE_GIF` adds a GIF to it (`video` for a GIF host's MP4).
@@ -874,6 +874,14 @@ impl AppState {
                                 .unwrap_or_default()
                         });
                         eprintln!("demo: edit history {edits:?}");
+                        // KUBECORD_DELETED_MENU: a deleted message
+                        // right-clicked on its text.
+                        if std::env::var_os("KUBECORD_DELETED_MENU").is_some() {
+                            let app = app.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                                app.demo_deleted_menu();
+                            });
+                        }
                     });
                 });
             }

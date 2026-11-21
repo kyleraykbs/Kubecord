@@ -83,6 +83,30 @@ fn link_button(text: &str) -> gtk::Button {
 }
 
 /// Whether `message` continues the group started by `previous`.
+/// Whether the part of `body` at `(x, y)` has a right-click menu of its own
+/// (a picture, a video, an avatar), which a menu on the whole message
+/// should leave to it.
+fn has_own_menu(body: &gtk::Box, x: f64, y: f64) -> bool {
+    let mut widget = body.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(current) = widget {
+        if current == *body.upcast_ref::<gtk::Widget>() {
+            break;
+        }
+        let controllers = current.observe_controllers();
+        let secondary = (0..controllers.n_items()).any(|index| {
+            controllers
+                .item(index)
+                .and_downcast::<gtk::GestureClick>()
+                .is_some_and(|click| click.button() == gtk::gdk::BUTTON_SECONDARY)
+        });
+        if secondary {
+            return true;
+        }
+        widget = current.parent();
+    }
+    false
+}
+
 pub(crate) fn continues(previous: &Message, message: &Message) -> bool {
     previous.author.id == message.author.id
         && previous.webhook_id == message.webhook_id
@@ -1230,11 +1254,19 @@ impl AppState {
             let (channel_id, message_id) = (message.channel_id, message.id);
             let content = message.content.clone();
             let anchor = body.downgrade();
+            // Ahead of the text, which would show its own Cut/Copy/Paste
+            // menu; media and avatars keep their own menus.
+            menu.set_propagation_phase(gtk::PropagationPhase::Capture);
             menu.connect_pressed(move |gesture, _, x, y| {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                if let Some(anchor) = anchor.upgrade() {
-                    app.show_deleted_menu(channel_id, message_id, content.clone(), &anchor, x, y);
+                let Some(anchor) = anchor.upgrade() else {
+                    return;
+                };
+                if has_own_menu(&anchor, x, y) {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
                 }
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                app.show_deleted_menu(channel_id, message_id, content.clone(), &anchor, x, y);
             });
             body.add_controller(menu);
         }
@@ -1348,6 +1380,54 @@ impl AppState {
         menu.append(&remove);
         popover.set_child(Some(&menu));
         popover.popup();
+    }
+
+    /// The demo: a deleted message right-clicked on its text and on its
+    /// avatar; the text gets the message's menu, the avatar keeps its own.
+    pub(crate) fn demo_deleted_menu(self: &Rc<Self>) {
+        let body = self
+            .chat
+            .borrow()
+            .rows
+            .iter()
+            .rev()
+            .map(|entry| entry.body.clone())
+            .find(|body| body.has_css_class("kc-deleted"));
+        let Some(body) = body else {
+            eprintln!("demo: no deleted message shown");
+            return;
+        };
+        let centre_of = |kind: glib::Type| -> Option<(f64, f64)> {
+            let mut stack = vec![body.clone().upcast::<gtk::Widget>()];
+            while let Some(widget) = stack.pop() {
+                if widget.type_().is_a(kind) && widget != *body.upcast_ref::<gtk::Widget>() {
+                    let bounds = widget.compute_bounds(&body)?;
+                    return Some((
+                        f64::from(bounds.x() + bounds.width() / 2.0),
+                        f64::from(bounds.y() + bounds.height() / 2.0),
+                    ));
+                }
+                let mut child = widget.first_child();
+                while let Some(next) = child {
+                    child = next.next_sibling();
+                    stack.push(next);
+                }
+            }
+            None
+        };
+        let text = centre_of(gtk::TextView::static_type()).or_else(|| centre_of(gtk::Label::static_type()));
+        let avatar = centre_of(libadwaita::Avatar::static_type());
+        if let Some((x, y)) = avatar {
+            eprintln!("demo: avatar has its own menu: {}", has_own_menu(&body, x, y));
+        }
+        if let Some((x, y)) = text {
+            let picked = body.pick(x, y, gtk::PickFlags::DEFAULT).map(|widget| widget.type_().name());
+            let own = has_own_menu(&body, x, y);
+            eprintln!("demo: text ({picked:?}) has its own menu: {own}");
+            if !own {
+                self.show_deleted_menu(Snowflake::new(1), Snowflake::new(1), "text".to_owned(), &body, x, y);
+            }
+        }
     }
 
     /// A message as the chat draws it, for a shared picture.
