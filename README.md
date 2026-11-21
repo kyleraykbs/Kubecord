@@ -4,6 +4,9 @@ A Discord client for Linux, built from scratch in Rust!
 
 The Linux community has been shackled by the official Discord client for far too long! I thought someone else would do it, but I guess if you want something done right (or done at all) you gotta do it yourself. Welcome to your liberation from electron! Please make issues if you have suggestions for features or find any bugs, I've tested the client extensively but I'm sure I missed *something*.
 
+<img width="1436" height="815" alt="image" src="https://github.com/user-attachments/assets/42b06599-ad76-43e1-a947-bfdaa6c2c8fc" />
+
+
 ## Warning
 Third-party clients are *kinda* (see below for more information) against Discord's TOS 
 and *can* get the account banned. Though the risk is quite low as discord mainly tries
@@ -14,7 +17,7 @@ This client does it's best to adhere to the proper usage of the API. See below f
 <summary>Click to expand</summary>
 
 The specific lines in the Discord TOS that this *may* violate and a description of how:
-  
+
 **"using any unauthorized software designed to modify the services"**
 ```
 While there technically are modifications to the original intent they are minor
@@ -60,8 +63,14 @@ In summary, we aren't doing anything malicious and that's where the main ban ris
     - See who is talking
     - Control individual audio volume
     - Audio volume boost up to 5x
+
+<img width="653" height="371" alt="image" src="https://github.com/user-attachments/assets/e46c6fed-7ef3-4d15-b2d2-158508b4c13e" />
+
 - Screenshare & Webcam
     - Audio support!!
+
+      <img width="360" height="159" alt="image" src="https://github.com/user-attachments/assets/9b550203-9f33-472f-8f1e-3b2de301846b" />
+
       - Whole desktop
       - Specific window
       - Dummy node for any patchbay
@@ -76,6 +85,9 @@ In summary, we aren't doing anything malicious and that's where the main ban ris
 - Echo cancellation
 - Sensitivity
 
+<img width="420" height="376" alt="image" src="https://github.com/user-attachments/assets/74427ba5-3679-47b1-b78c-f0f7fddfb376" />
+
+
 ### 2 - Text channel support
 - Receive and send texts
 - Media
@@ -89,6 +101,7 @@ In summary, we aren't doing anything malicious and that's where the main ban ris
     - Search (Including partial favorites search, matched by link)
 - Emoji (Server & Standard)
 - Stickers (all except the stock discord stickers)
+- Spellchecker
 - Shows typing
     - Ability to hide your own typing
     - Shows both when *you* and other people are typing
@@ -119,7 +132,6 @@ In summary, we aren't doing anything malicious and that's where the main ban ris
 
 ## Unsupported
 - In call sound effects
-- Spellchecker (Coming soon)
 - Discord web games like it's golf game, chess, wordle, etc
 - Animated profile overlays
 
