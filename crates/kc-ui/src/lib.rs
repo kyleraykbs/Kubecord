@@ -38,6 +38,7 @@ mod sidebar;
 mod spelling;
 mod sounds;
 mod style;
+mod theme;
 mod tile_grid;
 mod video_info;
 mod video_player;

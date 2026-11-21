@@ -27,6 +27,10 @@ kc-media.workspace = true
 kc-state.workspace = true
 kc-voice.workspace = true
 libadwaita = { workspace = true, features = ["v1_7"] }
+# Registering a downloaded font file at run time (FontMap::add_font_file).
+pango = { version = "0.22", features = ["v1_56"] }
+# Discord's font arrives as WOFF2, which Pango will not use: unwrap it to TTF.
+woff2-patched = "0.4"
 # Finding Discord's sound files in its web app's script bundles.
 regex = "1"
 serde.workspace = true

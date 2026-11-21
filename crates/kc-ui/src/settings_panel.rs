@@ -35,7 +35,7 @@ const METER_BLOCKS: f64 = 40.0;
 
 /// The pages, in order: name, title, icon. Each one is a tab in the list
 /// on the left.
-const PAGES: [(&str, &str, &str); 7] = [
+const PAGES: [(&str, &str, &str); 8] = [
     ("account", "My Account", "avatar-default-symbolic"),
     ("voice", "Voice", "audio-input-microphone-symbolic"),
     ("video", "Video", "camera-web-symbolic"),
@@ -46,6 +46,7 @@ const PAGES: [(&str, &str, &str); 7] = [
     ),
     ("sounds", "Sounds", "audio-volume-high-symbolic"),
     ("chat", "Chat", "chat-message-new-symbolic"),
+    ("theming", "Theming", "applications-graphics-symbolic"),
     ("advanced", "Advanced", "utilities-terminal-symbolic"),
 ];
 
@@ -63,7 +64,8 @@ fn page_heading(name: &str) -> Option<&'static str> {
 /// callers still land on the right page.
 fn page_alias(name: &str) -> &str {
     match name {
-        "features" | "appearance" | "text" => "chat",
+        "features" | "text" => "chat",
+        "appearance" | "theme" | "themes" => "theming",
         "compat" | "compatibility" | "debug" => "advanced",
         other => other,
     }
@@ -152,6 +154,7 @@ impl AppState {
                 "chat" => self.chat_page(),
                 "notifications" => self.notifications_page(),
                 "sounds" => self.sounds_page(),
+                "theming" => self.theming_page(),
                 _ => self.advanced_page(),
             };
             pages.add_named(&page_scroll(&content), Some(name));
@@ -809,6 +812,63 @@ impl AppState {
             }
         });
         boost
+    }
+
+    // -- theming -------------------------------------------------------------
+
+    /// Light/dark and the typeface.
+    fn theming_page(self: &Rc<Self>) -> gtk::Box {
+        let page = page_box();
+        page.append(&section_title("Theming"));
+
+        let colors = adw::PreferencesGroup::new();
+        colors.set_title("Colors");
+        let follow = adw::SwitchRow::new();
+        follow.set_title("Follow System Color Scheme");
+        follow.set_subtitle(
+            "Use the light or dark style your desktop asks for. Off, pick one below.",
+        );
+        follow.set_subtitle_lines(0);
+        follow.set_active(self.capture.borrow().follow_system_scheme);
+        let scheme = adw::ComboRow::new();
+        scheme.set_title("Color Scheme");
+        scheme.set_model(Some(&gtk::StringList::new(&["Dark", "Light"])));
+        scheme.set_selected(if self.capture.borrow().dark_scheme { 0 } else { 1 });
+        scheme.set_sensitive(!self.capture.borrow().follow_system_scheme);
+        let app = self.clone();
+        let picker = scheme.clone();
+        follow.connect_active_notify(move |row| {
+            let on = row.is_active();
+            picker.set_sensitive(!on);
+            app.update_prefs(|prefs| prefs.follow_system_scheme = on);
+        });
+        let app = self.clone();
+        scheme.connect_selected_notify(move |row| {
+            let dark = row.selected() == 0;
+            app.update_prefs(|prefs| prefs.dark_scheme = dark);
+        });
+        colors.add(&follow);
+        colors.add(&scheme);
+        page.append(&colors);
+
+        let text = adw::PreferencesGroup::new();
+        text.set_title("Text");
+        let font = adw::SwitchRow::new();
+        font.set_title("Use Discord's Font");
+        font.set_subtitle(
+            "gg sans, as in the official app. kubecord does not ship it: turning this on downloads it once from discord.com's public web app into the cache (no account details are sent).",
+        );
+        font.set_subtitle_lines(0);
+        font.set_active(self.capture.borrow().discord_font);
+        let app = self.clone();
+        font.connect_active_notify(move |row| {
+            let on = row.is_active();
+            app.update_prefs(|prefs| prefs.discord_font = on);
+            app.apply_discord_font(on);
+        });
+        text.add(&font);
+        page.append(&text);
+        page
     }
 
     // -- advanced ------------------------------------------------------------

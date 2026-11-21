@@ -554,6 +554,10 @@ impl AppState {
 
         self.connect_chat();
         self.connect_composer();
+        // Discord's font, if chosen (from the cache, or downloaded once).
+        if self.capture.borrow().discord_font {
+            self.apply_discord_font(true);
+        }
 
         // Search runs on the server when the entry is submitted.
         let app = self.clone();

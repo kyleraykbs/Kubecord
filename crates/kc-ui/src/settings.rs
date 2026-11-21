@@ -184,6 +184,13 @@ pub struct CapturePreferences {
     /// (GIFs pause when unfocused, to save work).
     #[serde(default)]
     pub animate_gifs_unfocused: bool,
+    /// Follow the system's light/dark preference. On by default; off uses
+    /// `dark_scheme`.
+    pub follow_system_scheme: bool,
+    /// Dark (true) or light, when not following the system.
+    pub dark_scheme: bool,
+    /// Use Discord's typeface (gg sans, downloaded on request). Off by default.
+    pub discord_font: bool,
     /// Underline misspelled words in the message box. On by default.
     #[serde(default = "default_true")]
     pub spellcheck: bool,
@@ -306,6 +313,9 @@ impl Default for CapturePreferences {
             unload_distant_messages: true,
             animate_gifs_unfocused: false,
             spellcheck: true,
+            follow_system_scheme: true,
+            dark_scheme: true,
+            discord_font: false,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,
@@ -474,6 +484,7 @@ impl CapturePreferences {
         kc_state::set_unload_distant(self.unload_distant_messages);
         crate::animation::set_animate_unfocused(self.animate_gifs_unfocused);
         crate::spelling::set_enabled(self.spellcheck);
+        crate::theme::apply_color_scheme(self);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         crate::logging::set_diagnostics(self.log_diagnostics);
         kc_media::devices::set_input_gain(self.input_volume);
