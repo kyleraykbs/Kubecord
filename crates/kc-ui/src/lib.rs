@@ -38,6 +38,7 @@ mod sounds;
 mod style;
 mod tile_grid;
 mod video_info;
+mod video_player;
 mod video_setup;
 mod voice;
 mod widgets;

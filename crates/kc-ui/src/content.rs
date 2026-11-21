@@ -22,8 +22,10 @@ use crate::widgets::{first_icon, hex_color, icon_button, label, max_width, open_
 pub(crate) enum MediaKind {
     /// A still image; clicking opens the viewer.
     Image,
-    /// A video with a poster frame; clicking opens it externally.
-    Video,
+    /// A video with a poster frame. `file_url` is the directly-playable file
+    /// (an uploaded attachment): clicking plays it in an in-app player. `None`
+    /// for a webpage-backed video embed (e.g. YouTube), which opens externally.
+    Video { file_url: Option<String> },
     /// A GIF delivered as a short video (a `gifv` embed, Tenor/Giphy MP4),
     /// played inline, muted and looping, through GStreamer.
     Gif { video_url: String },
@@ -415,7 +417,15 @@ impl AppState {
                 width,
                 height,
                 kind: if attachment.is_video() {
-                    MediaKind::Video
+                    // Play the original file (not the transcoded proxy) in-app.
+                    let file_url = if attachment.url.is_empty() {
+                        attachment.proxy_url.clone()
+                    } else {
+                        attachment.url.clone()
+                    };
+                    MediaKind::Video {
+                        file_url: Some(file_url),
+                    }
                 } else if attachment.is_gif() {
                     MediaKind::AnimatedGif
                 } else {
@@ -541,7 +551,7 @@ impl AppState {
             display_width as u32 * scale,
             display_height as u32 * scale,
         );
-        if matches!(media.kind, MediaKind::Video) && url.starts_with(cdn::MEDIA_BASE) {
+        if matches!(media.kind, MediaKind::Video { .. }) && url.starts_with(cdn::MEDIA_BASE) {
             // The proxy renders a still frame of a video on request.
             url.push_str("&format=webp");
         }
@@ -560,7 +570,7 @@ impl AppState {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&picture));
         match &media.kind {
-            MediaKind::Video => {
+            MediaKind::Video { .. } => {
                 let play = gtk::Image::from_icon_name("media-playback-start-symbolic");
                 play.set_pixel_size(48);
                 play.add_css_class("osd");
@@ -650,36 +660,43 @@ impl AppState {
             start();
         }
 
-        // What a click does: `Some(true)` opens the target externally (a
-        // video's page), `Some(false)` opens it in the in-app viewer (images
-        // and real GIFs, which the viewer animates), `None` does nothing (a
-        // `gifv` is an MP4 the viewer cannot animate, so it keeps playing
+        // What a click does: open the in-app image viewer (images and real
+        // GIFs, which it animates), play an uploaded video in the in-app player,
+        // open a webpage-backed video embed externally, or -- for an inline
+        // `gifv`, an MP4 the viewer cannot animate -- nothing (it keeps playing
         // inline instead).
-        let opens = match &media.kind {
-            MediaKind::Image | MediaKind::AnimatedGif => Some(false),
-            MediaKind::Video => Some(true),
-            MediaKind::Gif { .. } => None,
+        enum OnClick {
+            Nothing,
+            Viewer(String),
+            External(String),
+            PlayVideo(String),
+        }
+        let action = match &media.kind {
+            // A real GIF opens animated in the viewer, pointed at the GIF bytes
+            // (the proxy still URL) rather than a browser page.
+            MediaKind::AnimatedGif => OnClick::Viewer(url.clone()),
+            MediaKind::Image => OnClick::Viewer(media.target.to_owned()),
+            MediaKind::Video {
+                file_url: Some(file),
+            } => OnClick::PlayVideo(file.clone()),
+            MediaKind::Video { file_url: None } => OnClick::External(media.target.to_owned()),
+            MediaKind::Gif { .. } => OnClick::Nothing,
         };
-        // A real GIF opens animated in the viewer, so point the viewer at the
-        // GIF bytes (the proxy still URL) rather than a browser page.
-        let open_target = if matches!(media.kind, MediaKind::AnimatedGif) {
-            url.clone()
-        } else {
-            media.target.to_owned()
-        };
-        if let Some(external) = opens {
+        if !matches!(action, OnClick::Nothing) {
             let click = gtk::GestureClick::new();
             let app = self.clone();
-            let target = open_target;
             let preview_url = url.clone();
             click.connect_released(move |_, _, _, _| {
                 if hidden.get() {
                     return;
                 }
-                if external {
-                    open_uri(Some(app.window.upcast_ref()), &target);
-                } else {
-                    app.show_image(&target, &preview_url);
+                match &action {
+                    OnClick::Viewer(target) => app.show_image(target, &preview_url),
+                    OnClick::External(target) => {
+                        open_uri(Some(app.window.upcast_ref()), target)
+                    }
+                    OnClick::PlayVideo(file) => app.show_video(file, &preview_url),
+                    OnClick::Nothing => {}
                 }
             });
             picture.add_controller(click);
@@ -897,7 +914,9 @@ impl AppState {
                 width,
                 height,
                 kind: if kind == "video" {
-                    MediaKind::Video
+                    // A webpage-backed video embed (its target is a page, not a
+                    // media file), so it opens externally.
+                    MediaKind::Video { file_url: None }
                 } else {
                     MediaKind::Image
                 },
