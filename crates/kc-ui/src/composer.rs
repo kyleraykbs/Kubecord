@@ -24,6 +24,10 @@ const PICKER_EMOJI: usize = 400;
 /// How many GIF-picker tiles animate at once. The rest show a still preview,
 /// so a wall of results does not run dozens of frame timers.
 const GIF_PICKER_ANIMATED: usize = 16;
+/// How many tiles to render per scroll page. Discord's GIF endpoints return a
+/// single (cursor-less) batch, so "load more on scroll" renders that batch
+/// incrementally rather than building every tile up front.
+const GIF_PAGE: usize = 20;
 
 /// A guild name and its `(id, name, animated)` emoji, for the picker.
 type EmojiGroup = (String, Vec<(Snowflake, String, bool)>);
@@ -917,8 +921,28 @@ impl AppState {
         scroll.set_min_content_height(360);
         scroll.set_min_content_width(380);
         scroll.set_child(Some(&flow));
-        content.append(&scroll);
+
+        // A spinner centred over the grid while a fetch is in flight, so the
+        // panel is never just blank while loading.
+        let spinner = gtk::Spinner::new();
+        spinner.set_halign(gtk::Align::Center);
+        spinner.set_valign(gtk::Align::Center);
+        spinner.set_size_request(32, 32);
+        spinner.set_visible(false);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&scroll));
+        overlay.add_overlay(&spinner);
+        content.append(&overlay);
         popover.set_child(Some(&content));
+        GIF_SPINNER.with_borrow_mut(|slot| *slot = Some(spinner));
+
+        // Reaching the bottom renders the next page of the buffered results.
+        let app = self.clone();
+        scroll.connect_edge_reached(move |_, pos| {
+            if pos == gtk::PositionType::Bottom {
+                app.append_gif_page();
+            }
+        });
 
         // Switching tab re-runs the current search against that tab's source
         // and updates the placeholder.
@@ -969,6 +993,11 @@ impl AppState {
         let asked = query.clone();
         GIF_QUERY.with_borrow_mut(|current| *current = query.clone());
         let favorited = GIF_TAB.with(|t| t.get());
+        // Only spin when a real network fetch runs -- filtering already-cached
+        // favourites as you type is instant and should not flash a spinner.
+        if !favorited || !crate::gif_favorites::is_loaded() {
+            Self::set_gif_loading(true);
+        }
         if favorited {
             // The favourites are fetched once per picker opening and cached, so
             // typing filters them without re-fetching. They have no title, but
@@ -1018,7 +1047,10 @@ impl AppState {
                     }
                     match result {
                         Ok(gifs) => app.show_gifs(gifs),
-                        Err(error) => app.set_status(&format!("Could not load GIFs: {error}")),
+                        Err(error) => {
+                            Self::set_gif_loading(false);
+                            app.set_status(&format!("Could not load GIFs: {error}"));
+                        }
                     }
                 },
             );
@@ -1032,87 +1064,132 @@ impl AppState {
                     }
                     match result {
                         Ok(gifs) => app.show_gifs(gifs),
-                        Err(error) => app.set_status(&format!("Could not load GIFs: {error}")),
+                        Err(error) => {
+                            Self::set_gif_loading(false);
+                            app.set_status(&format!("Could not load GIFs: {error}"));
+                        }
                     }
                 },
             );
         }
     }
 
-    /// Fills the picker's single flow with the current tab's GIFs.
+    /// Shows or hides the GIF picker's loading spinner.
+    fn set_gif_loading(loading: bool) {
+        GIF_SPINNER.with_borrow(|slot| {
+            if let Some(spinner) = slot {
+                spinner.set_visible(loading);
+                if loading {
+                    spinner.start();
+                } else {
+                    spinner.stop();
+                }
+            }
+        });
+    }
+
+    /// Shows a fresh set of results: buffers them and renders the first page.
+    /// Subsequent pages render on scroll via `append_gif_page`.
     fn show_gifs(self: &Rc<Self>, gifs: Vec<kc_http::Gif>) {
+        Self::set_gif_loading(false);
         let Some(flow) = GIF_SECTIONS.with_borrow(Clone::clone) else {
             return;
         };
-        let mut budget = GIF_PICKER_ANIMATED;
-        self.fill_gif_flow(&flow, gifs, &mut budget);
-    }
-
-    /// Replaces the picker's tiles. `budget` caps how many animate (the rest
-    /// show a still).
-    fn fill_gif_flow(
-        self: &Rc<Self>,
-        flow: &gtk::FlowBox,
-        gifs: Vec<kc_http::Gif>,
-        budget: &mut usize,
-    ) {
         while let Some(child) = flow.first_child() {
             flow.remove(&child);
         }
-        for gif in gifs.into_iter().take(40) {
-            let picture = gtk::Picture::new();
-            picture.set_can_shrink(true);
-            picture.set_content_fit(gtk::ContentFit::Cover);
-            picture.set_size_request(180, 110);
-            picture.add_css_class("kc-media");
-            picture.set_overflow(gtk::Overflow::Hidden);
-            // Render the tile from its media. Trending/search give `src` as an
-            // animated `.gif` (the picker asks for `media_format=tinygif`);
-            // favourites saved on the official client give `src` as a video
-            // (`.mp4`/`.webm`) even for the "image" format, and have no
-            // preview. So: a `.gif` animates via the pixbuf player; anything
-            // else plays as a looping video (like a chat gifv). Cap how many
-            // run at once; the rest show a still preview if there is one.
-            let media = if gif.src.is_empty() {
-                &gif.gif_src
-            } else {
-                &gif.src
-            };
-            let preview = if gif.preview.is_empty() {
-                &gif.src
-            } else {
-                &gif.preview
-            };
-            if *budget > 0 && !media.is_empty() {
-                *budget -= 1;
-                if media.ends_with(".gif") {
-                    self.images.set_animated_picture(&picture, media);
-                } else {
-                    self.play_gif(&picture, media);
-                }
-            } else if !preview.is_empty() {
-                // Over the animate budget: a still if there is an image one.
-                self.images.set_picture(&picture, preview);
-            }
+        GIF_BUFFER.with_borrow_mut(|buffer| *buffer = gifs);
+        GIF_RENDERED.with(|rendered| rendered.set(0));
+        GIF_ANIM_BUDGET.with(|budget| budget.set(GIF_PICKER_ANIMATED));
+        self.append_gif_page();
+    }
 
-            let button = gtk::Button::new();
-            button.add_css_class("flat");
-            button.set_child(Some(&picture));
-            let app = self.clone();
-            let url = gif.url.clone();
-            button.connect_clicked(move |_| {
-                app.gif_button.popdown();
-                app.send_text(url.clone());
-            });
-
-            // A star in the top-right corner, over the tile, toggles the
-            // favourite. It sits in an overlay above the send button so it
-            // takes the click itself (and does not also send the gif).
-            let overlay = gtk::Overlay::new();
-            overlay.set_child(Some(&button));
-            overlay.add_overlay(&self.gif_star(&gif));
-            flow.insert(&overlay, -1);
+    /// Renders the next page of the buffered results into the flow. A no-op once
+    /// everything has been rendered. Called on first show and whenever the user
+    /// scrolls to the bottom.
+    fn append_gif_page(self: &Rc<Self>) {
+        let Some(flow) = GIF_SECTIONS.with_borrow(Clone::clone) else {
+            return;
+        };
+        let start = GIF_RENDERED.with(std::cell::Cell::get);
+        let total = GIF_BUFFER.with_borrow(Vec::len);
+        if start >= total {
+            return;
         }
+        let end = (start + GIF_PAGE).min(total);
+        let page = GIF_BUFFER.with_borrow(|buffer| buffer[start..end].to_vec());
+        for gif in &page {
+            // Spend the shared animation budget so a wall of results does not
+            // run dozens of frame timers; past it, tiles fall back to a still.
+            let animate = GIF_ANIM_BUDGET.with(|budget| {
+                let left = budget.get();
+                if left > 0 {
+                    budget.set(left - 1);
+                    true
+                } else {
+                    false
+                }
+            });
+            flow.insert(&self.gif_tile(gif, animate), -1);
+        }
+        GIF_RENDERED.with(|rendered| rendered.set(end));
+    }
+
+    /// Builds one picker tile. Trending/search give `src` as an animated `.gif`
+    /// (the picker asks for `media_format=tinygif`); favourites saved on the
+    /// official client give `src` as a video (`.mp4`/`.webm`) even for the
+    /// "image" format, and carry no separate preview. So a `.gif` animates via
+    /// the pixbuf player and anything else plays as a looping video (like a chat
+    /// gifv). `animate` gates animation; past it a tile shows a still *if* it
+    /// has an image one (video favourites have none, so they always play).
+    fn gif_tile(self: &Rc<Self>, gif: &kc_http::Gif, animate: bool) -> gtk::Widget {
+        let picture = gtk::Picture::new();
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Cover);
+        picture.set_size_request(180, 110);
+        picture.add_css_class("kc-media");
+        picture.set_overflow(gtk::Overflow::Hidden);
+
+        let media = if gif.src.is_empty() {
+            &gif.gif_src
+        } else {
+            &gif.src
+        };
+        let preview = if gif.preview.is_empty() {
+            &gif.src
+        } else {
+            &gif.preview
+        };
+        // A still only helps if it is actually an image; a video URL (as
+        // favourites carry) cannot be shown as a still, so such tiles must play.
+        let has_still = !preview.is_empty() && !is_video_url(preview);
+        if !media.is_empty() && (animate || !has_still) {
+            if media.ends_with(".gif") {
+                self.images.set_animated_picture(&picture, media);
+            } else {
+                self.play_gif(&picture, media);
+            }
+        } else if has_still {
+            self.images.set_picture(&picture, preview);
+        }
+
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.set_child(Some(&picture));
+        let app = self.clone();
+        let url = gif.url.clone();
+        button.connect_clicked(move |_| {
+            app.gif_button.popdown();
+            app.send_text(url.clone());
+        });
+
+        // A star in the top-right corner, over the tile, toggles the favourite.
+        // It sits in an overlay above the send button so it takes the click
+        // itself (and does not also send the gif).
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&button));
+        overlay.add_overlay(&self.gif_star(gif));
+        overlay.upcast()
     }
 
     /// Fetches the favourite GIFs into the shared cache if not already loaded,
@@ -1482,6 +1559,23 @@ thread_local! {
     static GIF_QUERY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// Which tab is showing: true = Favorited, false = Search.
     static GIF_TAB: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// The full current result set; rendered into the flow a page at a time as
+    /// the user scrolls to the bottom.
+    static GIF_BUFFER: std::cell::RefCell<Vec<kc_http::Gif>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many tiles of `GIF_BUFFER` have been rendered so far.
+    static GIF_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Remaining animation budget across the whole current result (see
+    /// `GIF_PICKER_ANIMATED`), decremented as pages render.
+    static GIF_ANIM_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The picker's loading spinner, shown while a fetch is in flight.
+    static GIF_SPINNER: std::cell::RefCell<Option<gtk::Spinner>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `url` points at a video the pixbuf still-loader cannot render (so a
+/// tile must play it rather than fall back to a static preview).
+fn is_video_url(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    path.ends_with(".mp4") || path.ends_with(".webm") || path.ends_with(".mov") || path.ends_with(".gifv")
 }
 
 /// A fresh GIF-tile flow (two columns), configured as the picker wants it.
