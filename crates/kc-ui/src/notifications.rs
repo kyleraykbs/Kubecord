@@ -7,7 +7,7 @@
 //! clicking one runs the `app.open-message` action, which brings the window
 //! up and opens the channel at that message.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use gtk::gio;
@@ -31,7 +31,7 @@ const PREVIEW_CHARS: usize = 200;
 #[derive(Default)]
 pub(crate) struct Shown {
     /// Channels with a notification up, by account.
-    channels: HashSet<(AccountId, Snowflake)>,
+    channels: HashMap<(AccountId, Snowflake), VecDeque<String>>,
     /// Calls with a notification up.
     calls: HashSet<Snowflake>,
     /// Notifications since the window was last looked at.
@@ -74,9 +74,18 @@ pub(crate) fn parse_target(target: &str) -> Option<(AccountId, Snowflake, Option
     Some((account, channel, message))
 }
 
-fn channel_id_name(account: AccountId, channel: Snowflake) -> String {
-    format!("message-{account}-{channel}")
+/// One notification per message: reusing an id makes the daemon replace the
+/// notification already up -- silently, with no new popup -- so a second
+/// message in a channel would only be heard, never seen.
+fn message_id_name(account: AccountId, channel: Snowflake, message: Snowflake) -> String {
+    format!("message-{account}-{channel}-{message}")
 }
+
+/// Notifications kept up per channel; older ones are taken down.
+const PER_CHANNEL: usize = 5;
+/// How long a notification waits for the sender's avatar (it shares the media
+/// download queue) before it goes without one.
+const AVATAR_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn call_id_name(channel: Snowflake) -> String {
     format!("call-{channel}")
@@ -259,12 +268,17 @@ impl AppState {
         if !prefs.notify_desktop {
             return;
         }
-        let id = channel_id_name(account, channel_id);
+        let id = message_id_name(account, channel_id, message_id);
         let target = action_target(account, channel_id, message_id);
-        self.notifications
-            .borrow_mut()
-            .channels
-            .insert((account, channel_id));
+        let expired = {
+            let mut shown = self.notifications.borrow_mut();
+            let ids = shown.channels.entry((account, channel_id)).or_default();
+            ids.push_back(id.clone());
+            (ids.len() > PER_CHANNEL).then(|| ids.pop_front()).flatten()
+        };
+        if let Some(old) = expired {
+            self.withdraw_desktop(&old);
+        }
         self.count_unseen();
         let app = self.clone();
         let send = move |icon: Option<std::path::PathBuf>| {
@@ -277,9 +291,31 @@ impl AppState {
                 prepared.reason.is_mention(),
             );
         };
+        // Sent once: with the avatar when it arrives in time, else without.
+        let pending: std::rc::Rc<std::cell::RefCell<Option<Box<dyn FnOnce(Option<std::path::PathBuf>)>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Some(Box::new(send))));
+        let fire = move |icon: Option<std::path::PathBuf>| {
+            let send = pending.borrow_mut().take();
+            if let Some(send) = send {
+                send(icon);
+            }
+        };
         match prepared.avatar.clone() {
-            Some(url) if !dry_run() => self.images.file(&url, "png", send),
-            _ => send(None),
+            Some(url) if !dry_run() => {
+                let with_icon = fire.clone();
+                self.images.file(&url, "png", with_icon);
+                glib::timeout_add_local_once(AVATAR_WAIT, move || fire(None));
+            }
+            _ => fire(None),
+        }
+    }
+
+    fn withdraw_desktop(&self, id: &str) {
+        if dry_run() {
+            return;
+        }
+        if let Some(application) = self.window.application() {
+            application.withdraw_notification(id);
         }
     }
 
@@ -316,21 +352,16 @@ impl AppState {
         application.send_notification(Some(id), &notification);
     }
 
-    /// Takes a channel's notification off the desktop (it was opened).
+    /// Takes a channel's notifications off the desktop (it was opened).
     pub(crate) fn withdraw_channel_notification(&self, account: AccountId, channel_id: Snowflake) {
-        if !self
+        let ids = self
             .notifications
             .borrow_mut()
             .channels
             .remove(&(account, channel_id))
-        {
-            return;
-        }
-        if dry_run() {
-            return;
-        }
-        if let Some(application) = self.window.application() {
-            application.withdraw_notification(&channel_id_name(account, channel_id));
+            .unwrap_or_default();
+        for id in ids {
+            self.withdraw_desktop(&id);
         }
     }
 
