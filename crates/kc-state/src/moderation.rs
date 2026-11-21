@@ -331,6 +331,29 @@ mod tests {
     }
 
     #[test]
+    fn slowmode_applies_unless_manage_messages_or_channel_exempts() {
+        let mut state = state();
+        let text = |id: &str, slowmode: u32, overwrites: serde_json::Value| {
+            json!({"id": id, "type": 0, "name": "t", "guild_id": GUILD.to_string(),
+                   "rate_limit_per_user": slowmode, "permission_overwrites": overwrites})
+        };
+        state.apply("CHANNEL_CREATE", &text("30", 15, json!([])));
+        state.apply("CHANNEL_CREATE", &text("31", 0, json!([])));
+        // The Mod role gets Manage Messages here, which exempts it.
+        state.apply(
+            "CHANNEL_CREATE",
+            &text(
+                "32",
+                15,
+                json!([{"id": "101", "type": 0, "allow": MANAGE_MESSAGES.to_string(), "deny": "0"}]),
+            ),
+        );
+        assert_eq!(state.slowmode(id(30)), Some(15));
+        assert_eq!(state.slowmode(id(31)), None, "no slowmode set");
+        assert_eq!(state.slowmode(id(32)), None, "Manage Messages exempts");
+    }
+
+    #[test]
     fn hierarchy_decides_who_may_act_on_whom() {
         let state = state();
         let guild = id(GUILD);

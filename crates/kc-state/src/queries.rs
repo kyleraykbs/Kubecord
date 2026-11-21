@@ -286,6 +286,21 @@ impl State {
         granted & permissions::VIEW_CHANNEL != 0 && granted & needed != 0
     }
 
+    /// The slowmode that applies to the account in a channel, in seconds:
+    /// `None` when the channel has none, or when Manage Messages or Manage
+    /// Channel exempts the account (as Discord does).
+    pub fn slowmode(&self, channel_id: Snowflake) -> Option<u32> {
+        let seconds = self
+            .channels
+            .get(&channel_id)?
+            .rate_limit_per_user
+            .filter(|seconds| *seconds > 0)?;
+        let exempt = self.permissions_in(channel_id)
+            & (permissions::MANAGE_MESSAGES | permissions::MANAGE_CHANNELS)
+            != 0;
+        (!exempt).then_some(seconds)
+    }
+
     // -- names and colours -----------------------------------------------
 
     pub fn role(&self, guild_id: Snowflake, role_id: Snowflake) -> Option<&Role> {

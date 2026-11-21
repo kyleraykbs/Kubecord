@@ -78,6 +78,19 @@ impl Error {
         )
     }
 
+    /// Discord's slowmode refused this (code 20016, or 20028 for a channel
+    /// write limit): the seconds until it allows the next one.
+    pub fn slowmode_wait(&self) -> Option<f64> {
+        match self {
+            Self::Api {
+                code: Some(20016 | 20028),
+                retry_after,
+                ..
+            } => Some(retry_after.unwrap_or(0.0)),
+            _ => None,
+        }
+    }
+
     pub fn is_unauthorized(&self) -> bool {
         self.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
     }

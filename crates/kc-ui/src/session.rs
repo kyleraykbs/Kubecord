@@ -106,6 +106,8 @@ pub struct Session {
     pub selected_channel: Option<Snowflake>,
     pub dm_mode: bool,
     pub last_typing: Option<Instant>,
+    /// When slowmode lets the account post again, per channel.
+    pub slowmode_until: HashMap<Snowflake, Instant>,
     /// Channels whose history has already been requested this run.
     pub fetched: HashSet<Snowflake>,
     /// Guilds whose channel lists were requested through REST.
@@ -169,6 +171,7 @@ impl Session {
             selected_channel: None,
             dm_mode: false,
             last_typing: None,
+            slowmode_until: HashMap::new(),
             fetched: HashSet::new(),
             loading_guild_channels: HashSet::new(),
             loaded_guild_channels: HashSet::new(),

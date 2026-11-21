@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gtk::prelude::*;
 
@@ -222,11 +222,20 @@ impl AppState {
                         Some((format!("Replying to {name}"), true, id))
                     })
                 };
-                Some((
-                    format!("Message {prefix}{title}"),
-                    state.can_send(channel_id),
-                    context,
-                ))
+                let mut hint = format!("Message {prefix}{title}");
+                if let Some(seconds) = state.slowmode(channel_id) {
+                    hint = match session.slowmode_until.get(&channel_id) {
+                        Some(until) if *until > Instant::now() => format!(
+                            "Slowmode · you can send again in {}",
+                            slowmode_text(until.saturating_duration_since(Instant::now()))
+                        ),
+                        _ => format!(
+                            "{hint} · Slowmode {}",
+                            slowmode_text(Duration::from_secs(seconds.into()))
+                        ),
+                    };
+                }
+                Some((hint, state.can_send(channel_id), context))
             })
         });
         let Some((hint, can_send, context)) = info.flatten() else {
@@ -310,6 +319,56 @@ impl AppState {
 
     // -- sending ---------------------------------------------------------
 
+    /// Time left before slowmode lets the account post in `channel` again.
+    pub(crate) fn slowmode_left(&self, channel: Snowflake) -> Option<Duration> {
+        self.with_session(|session| session.slowmode_until.get(&channel).copied())
+            .flatten()
+            .map(|until| until.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+    }
+
+    /// Starts `channel`'s slowmode cooldown: `wait` when Discord named one,
+    /// else the channel's own slowmode if it applies to the account. The
+    /// composer's hint counts it down, once a second.
+    fn start_slowmode(self: &Rc<Self>, channel: Snowflake, wait: Option<Duration>) {
+        let wait = wait.or_else(|| {
+            self.with_session(|session| session.store.read(|state| state.slowmode(channel)))
+                .flatten()
+                .map(|seconds| Duration::from_secs(seconds.into()))
+        });
+        let Some(wait) = wait.filter(|wait| !wait.is_zero()) else {
+            return;
+        };
+        self.with_session_mut(|session| {
+            session.slowmode_until.insert(channel, Instant::now() + wait);
+        });
+        self.render_composer();
+        let app = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_secs(1), move || {
+            let Some(app) = app.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let running = app.slowmode_left(channel).is_some();
+            if !running {
+                app.clear_slowmode(channel);
+            }
+            if app.with_session(|session| session.selected_channel) == Some(Some(channel)) {
+                app.render_composer();
+            }
+            if running {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    fn clear_slowmode(&self, channel: Snowflake) {
+        self.with_session_mut(|session| {
+            session.slowmode_until.remove(&channel);
+        });
+    }
+
     pub(crate) fn send_current(self: &Rc<Self>) {
         let typed = self.composer_text();
         let mut content = typed.trim().to_owned();
@@ -341,6 +400,17 @@ impl AppState {
         }
         if content.chars().count() > 2000 {
             self.set_status("Messages are limited to 2000 characters");
+            return;
+        }
+        // Slowmode: keep the text and say how long, rather than sending a
+        // message Discord would refuse. (Edits are not slowed.)
+        if editing.is_none()
+            && let Some(left) = self.slowmode_left(channel)
+        {
+            self.set_status(&format!(
+                "Slowmode is on: you can send again in {}",
+                slowmode_text(left)
+            ));
             return;
         }
 
@@ -427,6 +497,7 @@ impl AppState {
                 nonce
             });
         self.follow_sent_message(channel);
+        self.start_slowmode(channel, None);
 
         let OutgoingDraft {
             content,
@@ -473,24 +544,45 @@ impl AppState {
                         }
                     }
                 }
-                Err(error) => match &nonce {
-                    // The row stays, now marked failed with Retry / Delete.
-                    Some(nonce) => {
-                        if let Some((_, _, store)) = app.active() {
-                            store.set_send_state(channel, nonce, kc_state::SendState::Failed);
+                Err(error) => {
+                    // Slowmode refused it: count down from Discord's own wait.
+                    // Any other failure means nothing was posted, so no
+                    // cooldown applies.
+                    let status = match error.slowmode_wait() {
+                        Some(wait) => {
+                            let wait = Duration::from_secs_f64(wait.max(0.0));
+                            app.start_slowmode(channel, Some(wait));
+                            format!(
+                                "Message not sent: slowmode is on, you can send again in {}",
+                                slowmode_text(wait)
+                            )
                         }
-                        app.set_status(&format!("Message not sent: {error}"));
+                        None => {
+                            app.clear_slowmode(channel);
+                            format!("Message not sent: {error}")
+                        }
+                    };
+                    // The optimistic row stays, now marked failed with Retry /
+                    // Delete; without one (an attachments-only or
+                    // jumped-to-present send) it is only reported.
+                    if let (Some(nonce), Some((_, _, store))) = (&nonce, app.active()) {
+                        store.set_send_state(channel, nonce, kc_state::SendState::Failed);
                     }
-                    // No optimistic row (an attachments-only or
-                    // jumped-to-present send); just report it.
-                    None => app.set_status(&format!("Message not sent: {error}")),
-                },
+                    app.set_status(&status);
+                }
             },
         );
     }
 
     /// Re-sends a message whose send failed, dropping the failed row first.
     pub(crate) fn retry_send(self: &Rc<Self>, channel: Snowflake, nonce: &str) {
+        if let Some(left) = self.slowmode_left(channel) {
+            self.set_status(&format!(
+                "Slowmode is on: you can retry in {}",
+                slowmode_text(left)
+            ));
+            return;
+        }
         let draft = self.chat.borrow_mut().pending_sends.remove(nonce);
         if let Some((_, _, store)) = self.active() {
             store.drop_pending(channel, nonce);
@@ -1642,6 +1734,18 @@ fn gif_flow() -> gtk::FlowBox {
     flow
 }
 
+/// A slowmode duration as Discord words it: "45s", "2m 5s", "1h 30m".
+fn slowmode_text(left: Duration) -> String {
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 if seconds % 60 == 0 => format!("{}m", seconds / 60),
+        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ if seconds % 3600 / 60 == 0 => format!("{}h", seconds / 3600),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
 fn remember_token(display: String, raw: String) {
     TOKENS.with_borrow_mut(|tokens| {
         if !tokens.iter().any(|(known, _)| *known == display) {
@@ -1733,5 +1837,20 @@ fn group_title(group: emojis::Group) -> &'static str {
         emojis::Group::Objects => "Objects",
         emojis::Group::Symbols => "Symbols",
         emojis::Group::Flags => "Flags",
+    }
+}
+
+#[cfg(test)]
+mod slowmode_tests {
+    use super::*;
+
+    #[test]
+    fn slowmode_durations_read_like_discord() {
+        assert_eq!(slowmode_text(Duration::from_millis(4_200)), "5s");
+        assert_eq!(slowmode_text(Duration::from_secs(59)), "59s");
+        assert_eq!(slowmode_text(Duration::from_secs(120)), "2m");
+        assert_eq!(slowmode_text(Duration::from_secs(125)), "2m 5s");
+        assert_eq!(slowmode_text(Duration::from_secs(3600)), "1h");
+        assert_eq!(slowmode_text(Duration::from_secs(5400)), "1h 30m");
     }
 }

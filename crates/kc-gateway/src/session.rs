@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use kc_core::super_properties::SuperProperties;
@@ -9,6 +10,87 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 use crate::{DEFAULT_GATEWAY, GATEWAY_VERSION};
+
+/// Discord closes a connection that sends more than this many messages in
+/// [`SEND_WINDOW`] (close code 4008).
+const SEND_LIMIT: usize = 120;
+const SEND_WINDOW: Duration = Duration::from_secs(60);
+/// Kept free of commands, so heartbeats always fit.
+const HEARTBEAT_RESERVE: usize = 10;
+
+/// What one connection has sent in the last minute.
+#[derive(Default)]
+struct SendBudget {
+    sent: VecDeque<Instant>,
+}
+
+impl SendBudget {
+    fn record(&mut self, now: Instant) {
+        self.sent.push_back(now);
+    }
+
+    /// How long until another command may go, or `None` if it may now. Only
+    /// `SEND_LIMIT - HEARTBEAT_RESERVE` of the window go to commands.
+    fn command_wait(&mut self, now: Instant) -> Option<Duration> {
+        while self
+            .sent
+            .front()
+            .is_some_and(|sent| *sent + SEND_WINDOW <= now)
+        {
+            self.sent.pop_front();
+        }
+        let allowed = SEND_LIMIT - HEARTBEAT_RESERVE;
+        if self.sent.len() < allowed {
+            return None;
+        }
+        // The oldest sends must age out until one slot is free.
+        let freeing = self.sent[self.sent.len() - allowed];
+        Some((freeing + SEND_WINDOW).saturating_duration_since(now))
+    }
+}
+
+/// Queues a command, folding it into one already waiting where only the
+/// newest matters: one presence update, one voice state per server (or for
+/// DMs), and one member-list subscription per server with the channels merged.
+fn enqueue(pending: &mut VecDeque<Value>, payload: Value) {
+    let op = payload["op"].as_i64();
+    let guild = payload["d"]["guild_id"].clone();
+    match op {
+        Some(3) => {
+            pending.retain(|queued| queued["op"].as_i64() != Some(3));
+        }
+        Some(4) => {
+            pending.retain(|queued| {
+                !(queued["op"].as_i64() == Some(4) && queued["d"]["guild_id"] == guild)
+            });
+        }
+        Some(14) => {
+            if let Some(queued) = pending
+                .iter_mut()
+                .find(|queued| queued["op"].as_i64() == Some(14) && queued["d"]["guild_id"] == guild)
+            {
+                let mut merged = queued.clone();
+                if let (Some(into), Some(from)) = (
+                    merged["d"]["channels"].as_object_mut(),
+                    payload["d"]["channels"].as_object(),
+                ) {
+                    for (channel, ranges) in from {
+                        into.insert(channel.clone(), ranges.clone());
+                    }
+                }
+                for key in ["typing", "activities", "threads"] {
+                    if !payload["d"][key].is_null() {
+                        merged["d"][key] = payload["d"][key].clone();
+                    }
+                }
+                *queued = merged;
+                return;
+            }
+        }
+        _ => {}
+    }
+    pending.push_back(payload);
+}
 
 /// Events a gateway connection publishes to its consumer.
 #[derive(Clone, Debug)]
@@ -346,24 +428,47 @@ impl Gateway {
         // is the simplest way to stay inside the allowed window.
         heartbeat.tick().await;
         let mut awaiting_ack = false;
+        // Discord's send limit, per connection: the identify/resume counts.
+        let mut budget = SendBudget::default();
+        budget.record(Instant::now());
+        // Commands over the budget wait here instead of risking a 4008 close.
+        let mut pending: VecDeque<Value> = VecDeque::new();
 
         loop {
+            // Send what the budget allows; a timer wakes for the rest.
+            while !pending.is_empty() && budget.command_wait(Instant::now()).is_none() {
+                let Some(payload) = pending.pop_front() else {
+                    break;
+                };
+                budget.record(Instant::now());
+                if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
+                    warn!(%error, "gateway command send failed");
+                    return Outcome::Reconnect { resumable: true };
+                }
+            }
+            let throttled = if pending.is_empty() {
+                None
+            } else {
+                budget.command_wait(Instant::now())
+            };
+            if let Some(wait) = throttled {
+                debug!(queued = pending.len(), ?wait, "gateway send budget spent; holding commands");
+            }
             tokio::select! {
                 command = commands.recv(), if !commands.is_closed() => {
                     let Some(payload) = command else {
                         continue;
                     };
-                    if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
-                        warn!(%error, "gateway command send failed");
-                        return Outcome::Reconnect { resumable: true };
-                    }
+                    enqueue(&mut pending, payload);
                 }
+                _ = tokio::time::sleep(throttled.unwrap_or(Duration::ZERO)), if throttled.is_some() => {}
                 _ = heartbeat.tick() => {
                     if awaiting_ack {
                         warn!("gateway heartbeat not acknowledged; reconnecting");
                         return Outcome::Reconnect { resumable: true };
                     }
                     let payload = json!({ "op": 1, "d": session.seq });
+                    budget.record(Instant::now());
                     if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
                         warn!(%error, "gateway heartbeat send failed");
                         return Outcome::Reconnect { resumable: true };
@@ -420,6 +525,7 @@ impl Gateway {
                                 }
                                 1 => {
                                     let payload = json!({ "op": 1, "d": session.seq });
+                                    budget.record(Instant::now());
                                     if write.send(Message::Text(payload.to_string().into())).await.is_err() {
                                         return Outcome::Reconnect { resumable: true };
                                     }
@@ -532,6 +638,43 @@ fn fatal_or_reconnect(code: Option<u16>, reason: String) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_stop_short_of_the_limit_leaving_room_for_heartbeats() {
+        let mut budget = SendBudget::default();
+        let start = Instant::now();
+        for _ in 0..SEND_LIMIT - HEARTBEAT_RESERVE - 1 {
+            budget.record(start);
+        }
+        assert_eq!(budget.command_wait(start), None, "one command slot left");
+        budget.record(start);
+        let wait = budget.command_wait(start).expect("commands must wait now");
+        assert!(wait <= SEND_WINDOW && wait > SEND_WINDOW - Duration::from_secs(1));
+        // Once the window has passed, the old sends age out.
+        assert_eq!(budget.command_wait(start + SEND_WINDOW), None);
+    }
+
+    #[test]
+    fn queued_commands_fold_where_only_the_newest_matters() {
+        let mut pending = VecDeque::new();
+        let subscribe = |channel: &str| {
+            json!({"op": 14, "d": {"guild_id": "1", "channels": {channel: [[0, 99]]}, "typing": true}})
+        };
+        enqueue(&mut pending, subscribe("10"));
+        enqueue(&mut pending, subscribe("11"));
+        enqueue(&mut pending, json!({"op": 14, "d": {"guild_id": "2", "channels": {"20": [[0, 99]]}}}));
+        enqueue(&mut pending, json!({"op": 3, "d": {"status": "idle"}}));
+        enqueue(&mut pending, json!({"op": 3, "d": {"status": "online"}}));
+        enqueue(&mut pending, json!({"op": 4, "d": {"guild_id": "1", "channel_id": "5"}}));
+        enqueue(&mut pending, json!({"op": 4, "d": {"guild_id": "1", "channel_id": null}}));
+        // One subscription per server, channels merged; the newest presence
+        // and voice state only.
+        assert_eq!(pending.len(), 4, "{pending:?}");
+        let merged = pending.iter().find(|p| p["d"]["guild_id"] == "1" && p["op"] == 14).unwrap();
+        assert!(merged["d"]["channels"]["10"].is_array() && merged["d"]["channels"]["11"].is_array());
+        assert_eq!(pending.iter().find(|p| p["op"] == 3).unwrap()["d"]["status"], "online");
+        assert!(pending.iter().find(|p| p["op"] == 4).unwrap()["d"]["channel_id"].is_null());
+    }
 
     #[test]
     fn identify_has_user_client_shape() {

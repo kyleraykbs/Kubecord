@@ -226,7 +226,21 @@ impl HttpClient {
             self.limiter.update(&route, &headers);
 
             if status == StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = parse_retry_after(&headers, response).await;
+                let (retry_after, body) = parse_retry_after(&headers, response).await;
+                // Slowmode (or a channel write limit) is not a pacing problem
+                // to wait out and retry: the person has to wait. Hand it back
+                // at once with its wait, rather than sending the message late.
+                if let Some(body) = &body
+                    && matches!(body.code, Some(20016 | 20028))
+                {
+                    debug!(route, retry_after, code = body.code, "slowmode");
+                    return Err(Error::Api {
+                        status,
+                        code: body.code,
+                        message: body.message.clone(),
+                        retry_after: Some(retry_after),
+                    });
+                }
                 if headers
                     .get("x-ratelimit-global")
                     .and_then(|value| value.to_str().ok())
@@ -1545,20 +1559,24 @@ pub(crate) fn browser_headers(
         .header("x-debug-options", "bugReporterEnabled")
 }
 
-async fn parse_retry_after(headers: &HeaderMap, response: reqwest::Response) -> f64 {
+/// The wait a 429 asks for (the body's precise `retry_after`, else the
+/// header's, else a second) and its body, which names the cause (slowmode's
+/// code 20016, for instance).
+async fn parse_retry_after(
+    headers: &HeaderMap,
+    response: reqwest::Response,
+) -> (f64, Option<ApiErrorBody>) {
     let from_header = headers
         .get("retry-after")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<f64>().ok());
-    if let Some(value) = from_header {
-        return value;
-    }
-    response
-        .json::<ApiErrorBody>()
-        .await
-        .ok()
+    let body = response.json::<ApiErrorBody>().await.ok();
+    let wait = body
+        .as_ref()
         .and_then(|body| body.retry_after)
-        .unwrap_or(1.0)
+        .or(from_header)
+        .unwrap_or(1.0);
+    (wait, body)
 }
 
 /// Discord's snowflake epoch is 1420070400000 ms; a locally unique nonce only
