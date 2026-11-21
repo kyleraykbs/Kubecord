@@ -422,9 +422,17 @@ mod tests {
 
     #[test]
     fn discord_palette_parses_in_both_themes() {
+        // GTK needs a display; a sandboxed build (Nix) has none, so there only
+        // the palette's shape is checked.
+        let display = std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some();
         for dark in [true, false] {
             let css = discord_palette(dark);
             assert!(css.contains("--window-bg-color:") && css.contains(".kc-rail"));
+            assert_eq!(css.matches('{').count(), css.matches('}').count());
+            if !display {
+                continue;
+            }
             // Parse it with GTK, on gtk-rs's shared test thread (other tests
             // use it too; initialising GTK on this thread would take GTK's
             // main context from them).
