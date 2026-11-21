@@ -82,6 +82,9 @@ pub(crate) struct FavoriteTarget<'a> {
 
 const EMBED_MAX_WIDTH: i32 = 520;
 
+/// The invite card's maximum width, so it does not stretch across the chat.
+const INVITE_WIDTH: i32 = 432;
+
 /// Largest inline media preview, in logical pixels.
 const MEDIA_MAX_WIDTH: f64 = 420.0;
 const MEDIA_MAX_HEIGHT: f64 = 300.0;
@@ -603,7 +606,7 @@ impl AppState {
 
         if let Some(cached) = INVITE_CACHE.with_borrow(|cache| cache.get(code).cloned()) {
             self.fill_invite_card(&frame, code, cached.as_ref());
-            return frame.upcast();
+            return max_width(&frame, INVITE_WIDTH).upcast();
         }
 
         let spinner = gtk::Spinner::new();
@@ -614,7 +617,7 @@ impl AppState {
         frame.append(&spinner);
 
         let Some((_, http, _)) = self.active() else {
-            return frame.upcast();
+            return max_width(&frame, INVITE_WIDTH).upcast();
         };
         let code = code.to_owned();
         let request_code = code.clone();
@@ -645,7 +648,7 @@ impl AppState {
                 }
             },
         );
-        frame.upcast()
+        max_width(&frame, INVITE_WIDTH).upcast()
     }
 
     /// Populates (or, on `None`, marks invalid) an invite card frame.
@@ -666,9 +669,14 @@ impl AppState {
         text.set_valign(gtk::Align::Center);
         text.append(&label(&info.name, &["heading"]));
         let counts = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        counts.append(&status_dot("online"));
+        // The status dots default to bottom-aligned; centre them with the text.
+        let online_dot = status_dot("online");
+        online_dot.set_valign(gtk::Align::Center);
+        counts.append(&online_dot);
         counts.append(&label(&format!("{} Online", info.online), &["caption", "dim-label"]));
-        counts.append(&status_dot("offline"));
+        let offline_dot = status_dot("offline");
+        offline_dot.set_valign(gtk::Align::Center);
+        counts.append(&offline_dot);
         counts.append(&label(
             &format!("{} Members", info.members),
             &["caption", "dim-label"],
@@ -796,10 +804,8 @@ impl AppState {
             let animate_url = animate_url.clone();
             move || {
                 if animated {
-                    // Show the (resized) still immediately as a fallback, then
-                    // animate from the original once its bytes are in -- driven
-                    // frame by frame (a single-frame GIF just keeps the still).
-                    app.images.set_picture(&picture, &still);
+                    // Animate from the original GIF, exactly like the picker tiles
+                    // (which do animate). A single-frame GIF shows as a still.
                     app.images.set_animated_picture(&picture, &animate_url);
                 } else {
                     app.images.set_picture(&picture, &still);

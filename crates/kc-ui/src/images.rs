@@ -224,18 +224,31 @@ impl ImageCache {
     /// previews, the viewer); `set_picture` stays the still-only path.
     pub(crate) fn set_animated_picture(&self, picture: &gtk::Picture, url: &str) {
         let weak = picture.downgrade();
+        let debug_url = url.to_owned();
         // Download to the disk cache under a `.gif` name (reuses dedup and the
         // on-disk cache), then decode the bytes on the main thread.
         self.file(url, "gif", move |path| {
-            let (Some(picture), Some(path)) = (weak.upgrade(), path) else {
+            let Some(picture) = weak.upgrade() else {
+                return;
+            };
+            let Some(path) = path else {
+                tracing::debug!(url = %debug_url, "animated picture: download failed");
                 return;
             };
             let Ok(bytes) = std::fs::read(&path) else {
+                tracing::debug!(url = %debug_url, "animated picture: read failed");
                 return;
             };
-            if crate::animation::is_gif(&bytes)
-                && let Some(animation) = crate::animation::decode(&bytes)
-            {
+            let gif = crate::animation::is_gif(&bytes);
+            let animation = gif.then(|| crate::animation::decode(&bytes)).flatten();
+            tracing::debug!(
+                url = %debug_url,
+                bytes = bytes.len(),
+                gif,
+                animated = animation.is_some(),
+                "animated picture decoded"
+            );
+            if let Some(animation) = animation {
                 // Multi-frame GIF: the player drives the picture and holds
                 // itself alive for the picture's lifetime (see `attach`). A
                 // single frame returns None, already painted as a still.
