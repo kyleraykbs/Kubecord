@@ -1573,7 +1573,7 @@ thread_local! {
 
 /// Whether `url` points at a video the pixbuf still-loader cannot render (so a
 /// tile must play it rather than fall back to a static preview).
-fn is_video_url(url: &str) -> bool {
+pub(crate) fn is_video_url(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
     path.ends_with(".mp4") || path.ends_with(".webm") || path.ends_with(".mov") || path.ends_with(".gifv")
 }

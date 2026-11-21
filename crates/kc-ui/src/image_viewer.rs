@@ -217,6 +217,12 @@ impl AppState {
             // A real GIF animates in the viewer (zoom/pan still work on the
             // animated frames); a still image keeps the plain texture path.
             self.images.set_animated_picture(&picture, url);
+        } else if crate::composer::is_video_url(url) {
+            // A video-backed "gif" (Klipy/Tenor `.mp4`/`.webm`/`.gifv`, or a
+            // video favourite) has no pixbuf form; play it as a looping video.
+            // The GStreamer paintable reports an intrinsic size, so zoom/pan
+            // keep working the same as for a still.
+            self.play_gif(&picture, url);
         } else {
             self.images.set_picture(&picture, url);
         }
