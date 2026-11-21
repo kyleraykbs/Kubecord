@@ -324,6 +324,38 @@ impl HttpClient {
 
     // -- guilds and channels --------------------------------------------
 
+    /// Creates a new guild owned by the account, from Discord's default
+    /// "Create My Own" template (a general text and voice channel). Returns the
+    /// new guild's id. `icon` is an optional base64 data URI.
+    pub async fn create_guild(&self, name: &str, icon: Option<&str>) -> Result<Snowflake> {
+        let value = self
+            .post(
+                "/guilds",
+                json!({
+                    "name": name,
+                    "icon": icon,
+                    "channels": [],
+                    "system_channel_id": null,
+                    // The stable code for the official "Create My Own" template.
+                    "guild_template_code": "2TffvPucqHkN",
+                }),
+            )
+            .await?;
+        value["id"]
+            .as_str()
+            .and_then(|id| id.parse().ok())
+            .ok_or_else(|| Error::Other("Discord did not return the new server".to_owned()))
+    }
+
+    /// Joins the guild an invite points to by accepting it. Returns the guild's
+    /// id when the response carries one (so the client can navigate to it).
+    pub async fn accept_invite(&self, code: &str) -> Result<Option<Snowflake>> {
+        let value = self
+            .post(&format!("/invites/{}", percent_encode(code)), json!({}))
+            .await?;
+        Ok(value["guild"]["id"].as_str().and_then(|id| id.parse().ok()))
+    }
+
     pub async fn guild(&self, guild_id: Snowflake) -> Result<Guild> {
         let value = self
             .get(&format!("/guilds/{guild_id}?with_counts=true"))

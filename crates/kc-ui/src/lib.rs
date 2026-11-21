@@ -28,6 +28,7 @@ mod profile;
 mod rail;
 mod rich;
 mod server;
+mod server_create;
 mod server_settings;
 mod session;
 mod settings;

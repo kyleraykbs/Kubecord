@@ -21,6 +21,15 @@ const CSS: &str = r#"
     transition: border-radius 120ms ease;
 }
 
+.kc-rail-add {
+    color: #3ba55d;
+}
+
+.kc-rail-add:hover {
+    background: #3ba55d;
+    color: #ffffff;
+}
+
 .kc-pill {
     min-width: 4px;
     border-radius: 0 4px 4px 0;
