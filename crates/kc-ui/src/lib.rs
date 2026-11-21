@@ -23,6 +23,7 @@ pub mod logging;
 mod logger;
 mod login;
 mod markdown;
+mod media_menu;
 mod members;
 mod menu;
 mod moderation;

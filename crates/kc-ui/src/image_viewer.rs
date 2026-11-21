@@ -374,6 +374,30 @@ impl AppState {
             app.tell("Link copied", 3);
         });
         header.pack_start(&copy);
+        let kind = if is_gif_url(url) {
+            crate::media_menu::MediaType::Gif
+        } else if crate::composer::is_video_url(url) {
+            crate::media_menu::MediaType::Video
+        } else {
+            crate::media_menu::MediaType::Image
+        };
+        let save = icon_button("document-save-symbolic", "Save (Ctrl+S)");
+        let link = url.to_owned();
+        let app = self.clone();
+        save.connect_clicked(move |button| {
+            if let Some(window) = button.root().and_downcast::<gtk::Window>() {
+                app.save_media(&link, kind, &window);
+            }
+        });
+        header.pack_start(&save);
+        self.attach_media_menu(
+            &picture,
+            crate::media_menu::MediaLinks {
+                link: url.to_owned(),
+                file: Some(url.to_owned()),
+                kind,
+            },
+        );
         let zoom_out = icon_button("zoom-out-symbolic", "Zoom Out (-)");
         let zoom_in = icon_button("zoom-in-symbolic", "Zoom In (+)");
         let fit = icon_button("zoom-fit-best-symbolic", "Fit to Window (0)");
@@ -405,7 +429,8 @@ impl AppState {
         let (window, _) = self.aux_window(&key, "Image", size, &view);
         let keys = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(&viewer);
-        keys.connect_key_pressed(move |_, key, _, _| {
+        let save_key = save.clone();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
             let Some(viewer) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
@@ -414,6 +439,9 @@ impl AppState {
                 Key::plus | Key::equal | Key::KP_Add => viewer.zoom_by(STEP, viewer.centre()),
                 Key::minus | Key::KP_Subtract => viewer.zoom_by(1.0 / STEP, viewer.centre()),
                 Key::_0 | Key::KP_0 => viewer.fit(),
+                Key::s | Key::S if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) => {
+                    save_key.emit_clicked();
+                }
                 _ => return glib::Propagation::Proceed,
             }
             glib::Propagation::Stop

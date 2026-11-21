@@ -1081,6 +1081,14 @@ impl AppState {
             let app = self.clone();
             let target = url.to_owned();
             play.connect_clicked(move |_| app.show_video(&target, ""));
+            self.attach_media_menu(
+                &row,
+                crate::media_menu::MediaLinks {
+                    link: url.to_owned(),
+                    file: Some(url.to_owned()),
+                    kind: crate::media_menu::MediaType::Video,
+                },
+            );
             return Some(row.upcast());
         }
 
@@ -1137,6 +1145,18 @@ impl AppState {
         click.connect_released(move |_, _, _, _| app.show_image(&target, &target));
         picture.add_controller(click);
         picture.set_cursor_from_name(Some("pointer"));
+        self.attach_media_menu(
+            &picture,
+            crate::media_menu::MediaLinks {
+                link: url.to_owned(),
+                file: Some(url.to_owned()),
+                kind: if kind == LinkMedia::Gif {
+                    crate::media_menu::MediaType::Gif
+                } else {
+                    crate::media_menu::MediaType::Image
+                },
+            },
+        );
         Some(clamp.upcast())
     }
 
@@ -1289,6 +1309,34 @@ impl AppState {
             MediaKind::Video { file_url: None } => OnClick::External(media.target.to_owned()),
             MediaKind::Gif { .. } => OnClick::Nothing,
         };
+        // Right-click: open, copy the link or picture, save the file.
+        {
+            use crate::media_menu::{MediaLinks, MediaType};
+            let links = match &media.kind {
+                MediaKind::Image => MediaLinks {
+                    link: media.target.to_owned(),
+                    file: Some(media.target.to_owned()),
+                    kind: MediaType::Image,
+                },
+                MediaKind::AnimatedGif => MediaLinks {
+                    link: media.target.to_owned(),
+                    file: Some(animate_url.clone()),
+                    kind: MediaType::Gif,
+                },
+                MediaKind::Video { file_url } => MediaLinks {
+                    link: media.target.to_owned(),
+                    file: file_url.clone(),
+                    kind: MediaType::Video,
+                },
+                // A GIF made of a video (Tenor, Klipy, gifv): saved as one.
+                MediaKind::Gif { video_url } => MediaLinks {
+                    link: media.target.to_owned(),
+                    file: Some(video_url.clone()),
+                    kind: MediaType::Video,
+                },
+            };
+            self.attach_media_menu(&picture, links);
+        }
         if !matches!(action, OnClick::Nothing) {
             let click = gtk::GestureClick::new();
             let app = self.clone();

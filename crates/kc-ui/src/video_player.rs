@@ -62,6 +62,15 @@ impl AppState {
             app.tell("Link copied", 3);
         });
         header.pack_start(&copy);
+        let save = icon_button("document-save-symbolic", "Save Video");
+        let link = url.to_owned();
+        let app = self.clone();
+        save.connect_clicked(move |button| {
+            if let Some(window) = button.root().and_downcast::<gtk::Window>() {
+                app.save_media(&link, crate::media_menu::MediaType::Video, &window);
+            }
+        });
+        header.pack_start(&save);
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header);

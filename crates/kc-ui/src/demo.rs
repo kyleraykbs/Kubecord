@@ -1153,6 +1153,12 @@ impl AppState {
                     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                         if let Some(window) = app.window_of(&format!("image:{url}")) {
                             eprintln!("demo: viewer modal={}", window.is_modal());
+                            // KUBECORD_MEDIA_MENU: the right-click menu over
+                            // the picture (saved as `<screenshot>.menu.png`),
+                            // and its Save (with KUBECORD_SAVE_TO).
+                            if std::env::var_os("KUBECORD_MEDIA_MENU").is_some() {
+                                app.demo_media_menu(window.upcast_ref(), url);
+                            }
                             let path = format!("{path}.viewer.png");
                             if let Err(error) =
                                 crate::app::save_window_png(&window, std::path::Path::new(&path))

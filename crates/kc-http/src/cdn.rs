@@ -134,15 +134,27 @@ pub fn resized(proxy_url: &str, width: u32, height: u32) -> String {
 
 /// Downloads a media URL without credentials.
 pub async fn fetch(url: &str) -> Result<Vec<u8>> {
+    fetch_up_to(url, MAX_DOWNLOAD_BYTES).await
+}
+
+/// The largest file saved on request (a video, say).
+const MAX_SAVE_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Downloads a media URL to save it: like [`fetch`], with room for videos.
+pub async fn fetch_to_save(url: &str) -> Result<Vec<u8>> {
+    fetch_up_to(url, MAX_SAVE_BYTES).await
+}
+
+async fn fetch_up_to(url: &str, most: usize) -> Result<Vec<u8>> {
     let response = CLIENT.get(url).send().await?.error_for_status()?;
     if response
         .content_length()
-        .is_some_and(|length| length as usize > MAX_DOWNLOAD_BYTES)
+        .is_some_and(|length| length as usize > most)
     {
         return Err(crate::Error::TooLarge);
     }
     let bytes = response.bytes().await?;
-    if bytes.len() > MAX_DOWNLOAD_BYTES {
+    if bytes.len() > most {
         return Err(crate::Error::TooLarge);
     }
     Ok(bytes.to_vec())
