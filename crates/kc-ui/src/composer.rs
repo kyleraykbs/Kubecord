@@ -68,6 +68,9 @@ struct Completion {
 /// Emoji size in the composer, drawn in Discord's art.
 const COMPOSER_EMOJI: i32 = 20;
 
+/// Corrections offered for a misspelled word.
+const SPELL_SUGGESTIONS: usize = 5;
+
 /// Typing paused this long starts a new undo step.
 const UNDO_PAUSE: Duration = Duration::from_secs(1);
 /// Undo steps kept.
@@ -199,6 +202,9 @@ thread_local! {
     /// Set while the composer is changed in ways the history must not
     /// record (drawing emoji, undoing, text put there by the app).
     static COMPOSER_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The misspelled word a correction menu is open for: its buffer range
+    /// and text.
+    static SPELL_TARGET: std::cell::RefCell<Option<(usize, usize, String)>> = const { std::cell::RefCell::new(None) };
     /// A `:` was just typed (it may close a `:shortcode:`).
     static COLON_TYPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A redraw of the composer's emoji is queued.
@@ -213,6 +219,8 @@ impl AppState {
     pub(crate) fn connect_composer(self: &Rc<Self>) {
         // GTK's undo cannot follow emoji drawn as images; ours does.
         self.composer.buffer().set_enable_undo(false);
+        // Right-clicking a misspelled word offers its corrections.
+        self.connect_spelling_menu();
         // A typed `:` may close a `:shortcode:`.
         self.composer
             .buffer()
@@ -359,6 +367,105 @@ impl AppState {
             text: self.composer_text(),
             cursor: expanded_text(&buffer.start_iter(), &cursor).chars().count(),
         }
+    }
+
+    /// The right-click menu for misspelled words: corrections (click one to
+    /// use it) and Add to Dictionary. Elsewhere the usual menu shows.
+    fn connect_spelling_menu(self: &Rc<Self>) {
+        let actions = gtk::gio::SimpleActionGroup::new();
+        let replace = gtk::gio::SimpleAction::new("replace", Some(glib::VariantTy::STRING));
+        let app = self.clone();
+        replace.connect_activate(move |_, value| {
+            let Some(word) = value.and_then(|value| value.get::<String>()) else {
+                return;
+            };
+            let Some((start, end, misspelled)) = SPELL_TARGET.take() else {
+                return;
+            };
+            let buffer = app.composer.buffer();
+            let mut from = buffer.iter_at_offset(start as i32);
+            let mut to = buffer.iter_at_offset(end as i32);
+            // Only if the word is still where it was.
+            if from.slice(&to) != misspelled {
+                return;
+            }
+            buffer.delete(&mut from, &mut to);
+            buffer.insert(&mut from, &word);
+            buffer.place_cursor(&from);
+        });
+        actions.add_action(&replace);
+        let add = gtk::gio::SimpleAction::new("add", None);
+        let app = self.clone();
+        add.connect_activate(move |_, _| {
+            if let Some((_, _, word)) = SPELL_TARGET.take() {
+                crate::spelling::add_word(&word);
+                app.recheck_spelling();
+            }
+        });
+        actions.add_action(&add);
+        self.composer.insert_action_group("spell", Some(&actions));
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let app = self.clone();
+        click.connect_pressed(move |gesture, _, x, y| {
+            if let Some(menu) = app.spelling_menu(x, y) {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                menu.popup();
+            }
+        });
+        self.composer.add_controller(click);
+    }
+
+    /// The corrections menu (not yet shown) for the misspelled word at
+    /// `x, y`, if there is one there.
+    pub(crate) fn spelling_menu(self: &Rc<Self>, x: f64, y: f64) -> Option<gtk::PopoverMenu> {
+        if !crate::spelling::enabled() {
+            return None;
+        }
+        let view = &self.composer;
+        let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+        let iter = view.iter_at_location(bx, by)?;
+        let offset = iter.offset().max(0) as usize;
+        let text = self.composer_positions();
+        let Some((start, end)) = crate::spelling::misspelled_spans(&text)
+            .into_iter()
+            .find(|(start, end)| (*start..*end).contains(&offset))
+        else {
+            return None;
+        };
+        let word: String = text.chars().skip(start).take(end - start).collect();
+
+        let corrections = gtk::gio::Menu::new();
+        let found = crate::spelling::suggestions(&word, SPELL_SUGGESTIONS);
+        if found.is_empty() {
+            // No action: shown greyed out.
+            corrections.append(Some("No Suggestions"), Some("spell.none"));
+        }
+        for suggestion in &found {
+            let item = gtk::gio::MenuItem::new(Some(suggestion), None);
+            item.set_action_and_target_value(Some("spell.replace"), Some(&suggestion.to_variant()));
+            corrections.append_item(&item);
+        }
+        let menu = gtk::gio::Menu::new();
+        menu.append_section(None, &corrections);
+        let more = gtk::gio::Menu::new();
+        more.append(Some("Add to Dictionary"), Some("spell.add"));
+        menu.append_section(None, &more);
+        SPELL_TARGET.set(Some((start, end, word)));
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(view);
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.connect_closed(|popover| {
+            // After the chosen item's action has run.
+            let popover = popover.clone();
+            glib::idle_add_local_once(move || popover.unparent());
+        });
+        Some(popover)
     }
 
     /// Turns a `:shortcode:` just closed at the cursor into its emoji (an

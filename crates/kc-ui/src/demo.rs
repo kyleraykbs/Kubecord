@@ -60,6 +60,7 @@
 //! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
 //! - `emoji-picker`: the emoji picker (opening on Standard) and emoji typed
 //!   in the composer, in Discord's art.
+//! - `spelling`: the right-click corrections for a misspelled word.
 //! - `shortcode`: `:smi` lists standard emoji; a closing `:` makes the emoji.
 //! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
 //! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
@@ -616,6 +617,48 @@ impl AppState {
                             {
                                 eprintln!("demo: could not save the picker: {error}");
                             }
+                        });
+                    }
+                });
+            }
+            "spelling" => {
+                // Right-click a misspelled word: its corrections, then Add to
+                // Dictionary.
+                self.open_channel(general);
+                self.set_composer_text("I recieve teh mesage");
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let started = std::time::Instant::now();
+                    let found = crate::spelling::suggestions("mesage", 5);
+                    eprintln!("demo: mesage -> {found:?} in {:?}", started.elapsed());
+                    let buffer = app.composer.buffer();
+                    let at = app.composer.iter_location(&buffer.iter_at_offset(11));
+                    let (x, y) = app.composer.buffer_to_window_coords(
+                        gtk::TextWindowType::Widget,
+                        at.x() + 2,
+                        at.y() + at.height() / 2,
+                    );
+                    let Some(popover) = app.spelling_menu(x as f64, y as f64) else {
+                        eprintln!("demo: no menu at teh");
+                        return;
+                    };
+                    // Without a real click the compositor may refuse the
+                    // popover's input grab, so show it without auto-hide.
+                    popover.set_autohide(false);
+                    popover.popup();
+                    if let Ok(path) = std::env::var("KUBECORD_POPOVER_SHOT") {
+                        glib::timeout_add_local_once(Duration::from_secs(1), move || {
+                            if let Err(error) =
+                                crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the menu: {error}");
+                            }
+                            // Pick the first correction, as a click would.
+                            let _ = popover.activate_action("spell.replace", Some(&"the".to_variant()));
+                            let app = app.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                                eprintln!("demo: after choosing = {:?}", app.composer_text());
+                            });
                         });
                     }
                 });

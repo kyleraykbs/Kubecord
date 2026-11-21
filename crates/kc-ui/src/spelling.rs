@@ -31,6 +31,30 @@ static BUILTIN: LazyLock<HashSet<String>> = LazyLock::new(|| {
         .collect()
 });
 
+/// How common words are, as SCOWL size levels (10 = the most common; see
+/// assets/SCOWL-COPYRIGHT.txt), for ranking suggestions.
+static TIERS: LazyLock<std::collections::HashMap<String, u8>> = LazyLock::new(|| {
+    let compressed: &[u8] = include_bytes!("../assets/word_tiers.txt.gz");
+    let mut text = String::new();
+    if flate2::read::GzDecoder::new(compressed)
+        .read_to_string(&mut text)
+        .is_err()
+    {
+        return std::collections::HashMap::new();
+    }
+    let mut tier = u8::MAX;
+    let mut tiers = std::collections::HashMap::new();
+    for line in text.lines() {
+        match line.strip_prefix('#') {
+            Some(level) => tier = level.parse().unwrap_or(u8::MAX),
+            None => {
+                tiers.insert(line.to_owned(), tier);
+            }
+        }
+    }
+    tiers
+});
+
 /// Words the user has added, mirrored to disk.
 static USER: LazyLock<RwLock<HashSet<String>>> =
     LazyLock::new(|| RwLock::new(load_user_words()));
@@ -48,6 +72,7 @@ pub(crate) fn enabled() -> bool {
 pub(crate) fn warm() {
     LazyLock::force(&BUILTIN);
     LazyLock::force(&USER);
+    LazyLock::force(&TIERS);
 }
 
 /// Whether `word` is spelled correctly (case-insensitive).
@@ -165,6 +190,103 @@ pub(crate) fn misspelled_spans(text: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// Up to `limit` dictionary words close to `word` (at most two edits away,
+/// a swap of neighbours counting as one), best first, cased like `word`.
+pub(crate) fn suggestions(word: &str, limit: usize) -> Vec<String> {
+    let lower = word.to_lowercase();
+    let target: Vec<char> = lower.chars().collect();
+    if target.is_empty() {
+        return Vec::new();
+    }
+    let mut letters = target.clone();
+    letters.sort_unstable();
+    let user = USER.read().map(|user| user.clone()).unwrap_or_default();
+    let mut scored: Vec<(usize, u8, bool, bool, usize, &str)> = Vec::new();
+    for candidate in BUILTIN.iter().chain(user.iter()) {
+        let length = candidate.chars().count();
+        if length.abs_diff(target.len()) > 2 {
+            continue;
+        }
+        let chars: Vec<char> = candidate.chars().collect();
+        let Some(distance) = edit_distance(&target, &chars, 2).filter(|distance| *distance > 0)
+        else {
+            continue;
+        };
+        // Ties: the more common word, then the same letters reordered (a
+        // slip), then the same first letter, then the closest length. Words
+        // the user added count as common.
+        let mut sorted = chars.clone();
+        sorted.sort_unstable();
+        let tier = if user.contains(candidate) {
+            0
+        } else {
+            TIERS.get(candidate).copied().unwrap_or(u8::MAX)
+        };
+        scored.push((
+            distance,
+            tier,
+            sorted != letters,
+            chars.first() != target.first(),
+            length.abs_diff(target.len()),
+            candidate.as_str(),
+        ));
+    }
+    scored.sort();
+    let capitalised = word.chars().next().is_some_and(char::is_uppercase);
+    let mut out: Vec<String> = Vec::new();
+    for (.., candidate) in scored {
+        let cased = if capitalised {
+            let mut chars = candidate.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        } else {
+            candidate.to_owned()
+        };
+        if !out.contains(&cased) {
+            out.push(cased);
+        }
+        if out.len() == limit {
+            break;
+        }
+    }
+    out
+}
+
+/// Edits between `a` and `b` (insert, delete, replace, or swap two
+/// neighbours), or `None` when more than `most`.
+fn edit_distance(a: &[char], b: &[char], most: usize) -> Option<usize> {
+    let (n, m) = (a.len(), b.len());
+    if n.abs_diff(m) > most {
+        return None;
+    }
+    let mut before = vec![0usize; m + 1];
+    let mut previous: Vec<usize> = (0..=m).collect();
+    let mut current = vec![0usize; m + 1];
+    for i in 1..=n {
+        current[0] = i;
+        let mut row_best = current[0];
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut value = (previous[j] + 1)
+                .min(current[j - 1] + 1)
+                .min(previous[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                value = value.min(before[j - 2] + 1);
+            }
+            current[j] = value;
+            row_best = row_best.min(value);
+        }
+        if row_best > most {
+            return None;
+        }
+        std::mem::swap(&mut before, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    (previous[m] <= most).then_some(previous[m])
+}
+
 fn user_dict_path() -> Option<PathBuf> {
     kc_core::paths::config_dir()
         .ok()
@@ -222,6 +344,24 @@ mod tests {
         // A leading multi-byte char must not shift the reported offsets.
         let spans = misspelled_spans("é teh");
         assert_eq!(spans, vec![(2, 5)]);
+    }
+
+    #[test]
+    fn suggestions_put_the_likely_word_first() {
+        assert_eq!(suggestions("teh", 3).first().map(String::as_str), Some("the"));
+        assert_eq!(suggestions("recieve", 3).first().map(String::as_str), Some("receive"));
+        assert_eq!(suggestions("Wrold", 3).first().map(String::as_str), Some("World"));
+        assert_eq!(suggestions("mesage", 3).first().map(String::as_str), Some("message"));
+        assert_eq!(suggestions("seperate", 3).first().map(String::as_str), Some("separate"));
+        assert!(suggestions("teh", 5).len() <= 5);
+    }
+
+    #[test]
+    fn edit_distance_counts_a_swap_as_one() {
+        let chars = |text: &str| text.chars().collect::<Vec<_>>();
+        assert_eq!(edit_distance(&chars("teh"), &chars("the"), 2), Some(1));
+        assert_eq!(edit_distance(&chars("cat"), &chars("cart"), 2), Some(1));
+        assert_eq!(edit_distance(&chars("abc"), &chars("xyz"), 2), None);
     }
 
     #[test]
