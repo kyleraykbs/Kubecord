@@ -184,10 +184,10 @@ pub struct CapturePreferences {
     /// (GIFs pause when unfocused, to save work).
     #[serde(default)]
     pub animate_gifs_unfocused: bool,
-    /// Follow the system's light/dark preference. On by default; off uses
-    /// `dark_scheme`.
+    /// Use the system's libadwaita colors (and its light/dark preference).
+    /// On by default; off uses Discord's own palette, in `dark_scheme`.
     pub follow_system_scheme: bool,
-    /// Dark (true) or light, when not following the system.
+    /// Discord's dark (true) or light theme, when not following the system.
     pub dark_scheme: bool,
     /// Use Discord's typeface (gg sans, downloaded on request). Off by default.
     pub discord_font: bool,

@@ -1,4 +1,4 @@
-//! Theming: whether to follow the system's light/dark preference, and the
+//! Theming: the system's libadwaita colors or Discord's own palette, and the
 //! optional use of Discord's own typeface (gg sans).
 //!
 //! gg sans is Discord's and is not shipped with kubecord. Like the sounds, it
@@ -32,6 +32,8 @@ static FONT_FACE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"@font-face\s*\{([^}]*)\}").unwrap());
 
 thread_local! {
+    /// Discord's palette, while the system's colors are not followed.
+    static PALETTE_CSS: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
     /// The stylesheet that puts gg sans on every widget, while it is on.
     static FONT_CSS: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
     /// gg sans has been registered with Pango this run (it cannot be taken
@@ -41,7 +43,8 @@ thread_local! {
     static FETCHING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Follows the system's light/dark preference, or forces one.
+/// Applies the colors: the system's libadwaita palette (and its light/dark
+/// preference), or Discord's own palette in its dark or light theme.
 pub(crate) fn apply_color_scheme(prefs: &CapturePreferences) {
     let scheme = if prefs.follow_system_scheme {
         adw::ColorScheme::Default
@@ -54,6 +57,139 @@ pub(crate) fn apply_color_scheme(prefs: &CapturePreferences) {
     if manager.color_scheme() != scheme {
         manager.set_color_scheme(scheme);
     }
+    let palette = (!prefs.follow_system_scheme).then(|| discord_palette(prefs.dark_scheme));
+    set_palette_css(palette.as_deref());
+}
+
+/// Discord's colors, as libadwaita's palette variables (so every widget
+/// follows) plus the surfaces kubecord draws itself: the server rail and the
+/// message box.
+pub(crate) fn discord_palette(dark: bool) -> String {
+    // Discord's names: tertiary (server rail), secondary (channel list and
+    // member list), primary (chat), the message box, menus, text.
+    struct Palette {
+        tertiary: &'static str,
+        secondary: &'static str,
+        primary: &'static str,
+        input: &'static str,
+        floating: &'static str,
+        text: &'static str,
+        header: &'static str,
+        muted: &'static str,
+        accent_text: &'static str,
+        shade: &'static str,
+    }
+    let p = if dark {
+        Palette {
+            tertiary: "#1e1f22",
+            secondary: "#2b2d31",
+            primary: "#313338",
+            input: "#383a40",
+            floating: "#111214",
+            text: "#dbdee1",
+            header: "#f2f3f5",
+            muted: "#949ba4",
+            accent_text: "#949cf7",
+            shade: "rgba(0, 0, 0, 0.24)",
+        }
+    } else {
+        Palette {
+            tertiary: "#e3e5e8",
+            secondary: "#f2f3f5",
+            primary: "#ffffff",
+            input: "#ebedef",
+            floating: "#ffffff",
+            text: "#313338",
+            header: "#060607",
+            muted: "#5c5e66",
+            accent_text: "#4752c4",
+            shade: "rgba(0, 0, 0, 0.08)",
+        }
+    };
+    format!(
+        ":root {{
+    --window-bg-color: {primary};
+    --window-fg-color: {text};
+    --view-bg-color: {primary};
+    --view-fg-color: {text};
+    --headerbar-bg-color: {primary};
+    --headerbar-fg-color: {header};
+    --headerbar-backdrop-color: {primary};
+    --headerbar-shade-color: {shade};
+    --headerbar-darker-shade-color: {shade};
+    --sidebar-bg-color: {secondary};
+    --sidebar-fg-color: {text};
+    --sidebar-backdrop-color: {secondary};
+    --sidebar-shade-color: {shade};
+    --secondary-sidebar-bg-color: {secondary};
+    --secondary-sidebar-fg-color: {text};
+    --secondary-sidebar-backdrop-color: {secondary};
+    --secondary-sidebar-shade-color: {shade};
+    --card-bg-color: {secondary};
+    --card-fg-color: {text};
+    --card-shade-color: {shade};
+    --dialog-bg-color: {primary};
+    --dialog-fg-color: {text};
+    --popover-bg-color: {floating};
+    --popover-fg-color: {text};
+    --popover-shade-color: {shade};
+    --thumbnail-bg-color: {secondary};
+    --thumbnail-fg-color: {text};
+    --shade-color: {shade};
+    --accent-bg-color: #5865f2;
+    --accent-fg-color: #ffffff;
+    --accent-color: {accent_text};
+    --destructive-bg-color: #da373c;
+    --destructive-fg-color: #ffffff;
+    --destructive-color: #f23f43;
+    --success-bg-color: #248046;
+    --success-fg-color: #ffffff;
+    --success-color: #23a55a;
+    --warning-bg-color: #f0b232;
+    --warning-fg-color: rgba(0, 0, 0, 0.8);
+    --warning-color: #f0b232;
+    --error-bg-color: #da373c;
+    --error-fg-color: #ffffff;
+    --error-color: #f23f43;
+}}
+.kc-rail {{ background-color: {tertiary}; }}
+.kc-composer {{ background-color: {input}; }}
+.dim-label, .kc-category {{ color: {muted}; opacity: 1; }}
+",
+        primary = p.primary,
+        secondary = p.secondary,
+        tertiary = p.tertiary,
+        input = p.input,
+        floating = p.floating,
+        text = p.text,
+        header = p.header,
+        muted = p.muted,
+        accent_text = p.accent_text,
+        shade = p.shade,
+    )
+}
+
+/// Installs (or, with `None`, removes) the palette stylesheet. It ranks just
+/// above kubecord's own stylesheet so its rail and message-box colors win.
+fn set_palette_css(css: Option<&str>) {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    PALETTE_CSS.with_borrow_mut(|slot| {
+        if let Some(old) = slot.take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        if let Some(css) = css {
+            let provider = gtk::CssProvider::new();
+            provider.load_from_string(css);
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+            *slot = Some(provider);
+        }
+    });
 }
 
 /// One `@font-face` of gg sans: its weight, whether italic, and its file.
@@ -283,6 +419,29 @@ fn set_font_css(family: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_palette_parses_in_both_themes() {
+        for dark in [true, false] {
+            let css = discord_palette(dark);
+            assert!(css.contains("--window-bg-color:") && css.contains(".kc-rail"));
+            // Parse it with GTK, on gtk-rs's shared test thread (other tests
+            // use it too; initialising GTK on this thread would take GTK's
+            // main context from them).
+            let errors = gtk::test_synced(move || {
+                let provider = gtk::CssProvider::new();
+                let errors = Rc::new(Cell::new(0));
+                let count = errors.clone();
+                provider.connect_parsing_error(move |_, _, error| {
+                    eprintln!("palette CSS error: {error}");
+                    count.set(count.get() + 1);
+                });
+                provider.load_from_string(&css);
+                errors.get()
+            });
+            assert_eq!(errors, 0, "palette CSS should parse (dark={dark})");
+        }
+    }
 
     #[test]
     fn stylesheets_are_read_last_first() {

@@ -826,12 +826,13 @@ impl AppState {
         let follow = adw::SwitchRow::new();
         follow.set_title("Follow System Color Scheme");
         follow.set_subtitle(
-            "Use the light or dark style your desktop asks for. Off, pick one below.",
+            "Use your system's libadwaita colors and its light or dark preference. Off, kubecord uses Discord's own colors.",
         );
         follow.set_subtitle_lines(0);
         follow.set_active(self.capture.borrow().follow_system_scheme);
         let scheme = adw::ComboRow::new();
-        scheme.set_title("Color Scheme");
+        scheme.set_title("Discord Theme");
+        scheme.set_subtitle("Used while not following the system's colors.");
         scheme.set_model(Some(&gtk::StringList::new(&["Dark", "Light"])));
         scheme.set_selected(if self.capture.borrow().dark_scheme { 0 } else { 1 });
         scheme.set_sensitive(!self.capture.borrow().follow_system_scheme);
