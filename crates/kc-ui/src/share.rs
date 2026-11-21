@@ -37,6 +37,49 @@ pub(crate) enum Mark {
     In,
     /// In the range but taken out: shown blocked out (or left out).
     Redacted,
+    /// Only in an export: this many messages between two shared ones were
+    /// not shared (the message given with it is the first of them).
+    Skipped(usize),
+}
+
+/// What to export from `messages` (oldest first, every message from the
+/// first shared to the last): the shared ones, with a [`Mark::Skipped`]
+/// wherever shared messages are not neighbours.
+pub(crate) fn export_items(
+    messages: Vec<Message>,
+    selection: &Selection,
+    leave_out_redacted: bool,
+) -> Vec<(Message, Mark)> {
+    let mut out: Vec<(Message, Mark)> = Vec::new();
+    let mut skipped: Option<(Message, usize)> = None;
+    for message in messages {
+        let mark = selection.mark(message.id);
+        let hidden = mark == Mark::Out || (mark == Mark::Redacted && leave_out_redacted);
+        if hidden {
+            // Only between shared messages (not before the first).
+            if !out.is_empty() {
+                match &mut skipped {
+                    Some((_, count)) => *count += 1,
+                    None => skipped = Some((message, 1)),
+                }
+            }
+            continue;
+        }
+        if let Some((first, count)) = skipped.take() {
+            out.push((first, Mark::Skipped(count)));
+        }
+        out.push((message, mark));
+    }
+    out
+}
+
+/// "1 message skipped", "12 messages skipped".
+fn skipped_text(count: usize) -> String {
+    if count == 1 {
+        "1 message skipped".to_owned()
+    } else {
+        format!("{count} messages skipped")
+    }
 }
 
 /// What is chosen: a range, single messages added outside it, and ones
@@ -260,6 +303,15 @@ pub(crate) fn format_text(
     for (message, mark) in items {
         match mark {
             Mark::Out => continue,
+            Mark::Skipped(count) => {
+                if options.markdown {
+                    out.push_str(&format!("\n*··· {} ···*\n", skipped_text(*count)));
+                } else {
+                    out.push_str(&format!("··· {} ···\n", skipped_text(*count)));
+                }
+                last_author = None;
+                continue;
+            }
             Mark::Redacted if options.leave_out_redacted => continue,
             Mark::Redacted => {
                 if options.markdown {
@@ -565,11 +617,11 @@ impl AppState {
                 return;
             };
             share.prompt.set_text(if selection.range.is_some() {
-                "Drag the handles to change the range. Right-click to redact a message, or add one outside it."
+                "Drag the handles to change the range. Right-click redacts a message in it, or picks a single one outside it."
             } else if selection.anchor.is_some() {
-                "Now click the last message."
+                "Now click the last message. Right-click picks single messages."
             } else {
-                "Click the first message to share, or drag across messages."
+                "Click the first message to share, or drag across messages. Right-click picks single messages."
             });
             share.export.set_visible(selection.has_any());
             let chosen = selection.range.is_some();
@@ -876,16 +928,9 @@ impl AppState {
                     .collect()
             })
         });
-        let items = move |messages: Vec<Message>| -> Vec<(Message, Mark)> {
-            messages
-                .into_iter()
-                .map(|message| {
-                    let mark = selection.mark(message.id);
-                    (message, mark)
-                })
-                .filter(|(_, mark)| *mark != Mark::Out)
-                .collect()
-        };
+        let leave_out = options.leave_out_redacted;
+        let items =
+            move |messages: Vec<Message>| export_items(messages, &selection, leave_out);
         if let Some(messages) = loaded {
             self.finish_export(items(messages), options, target);
             return;
@@ -1073,6 +1118,10 @@ impl AppState {
                 for (message, mark) in &items {
                     match mark {
                         Mark::Out => continue,
+                        Mark::Skipped(count) => {
+                            root.append(&skipped_row(*count));
+                            previous = None;
+                        }
                         Mark::Redacted if options.leave_out_redacted => continue,
                         Mark::Redacted => {
                             root.append(&redacted_row(message));
@@ -1159,8 +1208,8 @@ impl AppState {
             }
         };
         click(7);
-        click(1);
-        if let (Some((x, y, _)), Some((x2, y2, _))) = (centre(4), centre(0)) {
+        click(3);
+        if let (Some((x, y, _)), Some((x2, y2, _))) = (centre(5), centre(0)) {
             for (x, y) in [(x, y), (x2, y2)] {
                 if let Some(id) = self.share_row_at(x, y, false) {
                     with_selection(|selection| selection.toggle(id));
@@ -1261,6 +1310,26 @@ fn mark_body(body: &gtk::Box, mark: Mark, first: bool, last: bool) {
             body.remove_css_class(class);
         }
     }
+}
+
+/// The line in a picture between shared messages that were not
+/// neighbours: how many were in between.
+fn skipped_row(count: usize) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_margin_top(10);
+    row.set_margin_bottom(10);
+    row.set_margin_start(16);
+    row.set_margin_end(16);
+    let left = gtk::Separator::new(gtk::Orientation::Horizontal);
+    left.set_hexpand(true);
+    left.set_valign(gtk::Align::Center);
+    let right = gtk::Separator::new(gtk::Orientation::Horizontal);
+    right.set_hexpand(true);
+    right.set_valign(gtk::Align::Center);
+    row.append(&left);
+    row.append(&label(&skipped_text(count), &["kc-divider"]));
+    row.append(&right);
+    row
 }
 
 /// A redacted message in a picture: bars where its author and text were,
@@ -1393,6 +1462,45 @@ mod tests {
     }
 
     #[test]
+    fn messages_not_next_to_each_other_say_how_many_are_between() {
+        let message = |n: u64| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": n.to_string(), "channel_id": "1", "content": "",
+                "author": {"id": "1", "username": "a"}, "timestamp": "2026-11-21T10:00:00+00:00"
+            }))
+            .unwrap()
+        };
+        let mut selection = Selection::default();
+        // Picked singly: 2 and 6; a range 8..=9 with 9 redacted.
+        selection.toggle(id(2));
+        selection.toggle(id(6));
+        selection.finish(id(8), id(9));
+        selection.toggle(id(9));
+        let all: Vec<Message> = (1..=10).map(message).collect();
+        let marks = |items: Vec<(Message, Mark)>| -> Vec<(u64, Mark)> {
+            items.into_iter().map(|(message, mark)| (message.id.get(), mark)).collect()
+        };
+        assert_eq!(
+            marks(export_items(all.clone(), &selection, false)),
+            vec![
+                (2, Mark::In),
+                (3, Mark::Skipped(3)),
+                (6, Mark::In),
+                (7, Mark::Skipped(1)),
+                (8, Mark::In),
+                (9, Mark::Redacted),
+            ]
+        );
+        // Redacted ones left out are not shown, so they are not at the end
+        // either (nothing follows them).
+        assert_eq!(
+            marks(export_items(all, &selection, true)),
+            vec![(2, Mark::In), (3, Mark::Skipped(3)), (6, Mark::In), (7, Mark::Skipped(1)), (8, Mark::In)]
+        );
+        assert_eq!(skipped_text(1), "1 message skipped");
+    }
+
+    #[test]
     fn text_export_in_both_styles() {
         let message = |n: u64, author: u64, text: &str| -> Message {
             serde_json::from_value(serde_json::json!({
@@ -1409,6 +1517,7 @@ mod tests {
             (message(2, 7, "again"), Mark::In),
             (message(3, 8, "secret"), Mark::Redacted),
             (message(4, 8, "bye"), Mark::In),
+            (message(5, 8, ""), Mark::Skipped(2)),
             (call, Mark::In),
         ];
         let name = |m: &Message| m.author.username.clone();
@@ -1424,14 +1533,14 @@ mod tests {
         };
         assert_eq!(
             format_text(&items, &name, &body, &time, &system, options),
-            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye\n[10:00] user8 started a call.\n"
+            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye\n··· 2 messages skipped ···\n[10:00] user8 started a call.\n"
         );
         options.markdown = true;
         options.leave_out_redacted = true;
         options.times = false;
         assert_eq!(
             format_text(&items, &name, &body, &time, &system, options),
-            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye\n\n*user8 started a call.*\n"
+            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye\n\n*··· 2 messages skipped ···*\n\n*user8 started a call.*\n"
         );
     }
 }
