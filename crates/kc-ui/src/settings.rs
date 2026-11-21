@@ -191,6 +191,8 @@ pub struct CapturePreferences {
     pub dark_scheme: bool,
     /// Use Discord's typeface (gg sans, downloaded on request). Off by default.
     pub discord_font: bool,
+    /// Draw emoji with Twemoji, as Discord does. On by default.
+    pub discord_emoji: bool,
     /// Underline misspelled words in the message box. On by default.
     #[serde(default = "default_true")]
     pub spellcheck: bool,
@@ -316,6 +318,7 @@ impl Default for CapturePreferences {
             follow_system_scheme: true,
             dark_scheme: true,
             discord_font: false,
+            discord_emoji: true,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,

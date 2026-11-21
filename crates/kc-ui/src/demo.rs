@@ -57,6 +57,8 @@
 //! - `dm-hover` (both DM rows drawn as hovered, showing their ×),
 //!   `dm-leave` (the group's × clicked: the confirmation), `dm-deleted`
 //!   (the open DM is closed elsewhere: CHANNEL_DELETE arrives).
+//! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
+//! - `emoji-picker`: the composer's emoji picker, in Discord's art.
 //! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
 //!   server emoji (drawn as an image) -- then Edit Profile, where it is set.
 //! - `accounts` (the account menu with two accounts, each with a Log Out
@@ -325,7 +327,8 @@ fn gif_message(id: u64, author: u64) -> Value {
 }
 
 /// A signed Discord CDN attachment link to a GIF, for `gif-cdn-link`.
-const DEMO_CDN_GIF: &str = "https://cdn.discordapp.com/attachments/1/2/creakingwumpus.gif?ex=6b021b5e&is=6b00c9de&hm=00";
+const DEMO_CDN_GIF: &str =
+    "https://cdn.discordapp.com/attachments/1/2/creakingwumpus.gif?ex=6b021b5e&is=6b00c9de&hm=00";
 
 /// A message that is only a link to a GIF, as the GIF picker's favourites
 /// send: Discord turns it into an `image` embed whose proxy thumbnail is a
@@ -564,6 +567,67 @@ impl AppState {
                 let id = id_at(0, 42);
                 store.apply("MESSAGE_CREATE", &file_message(id, ADA));
                 self.open_channel(general);
+            }
+            "emoji" => {
+                // Unicode emoji in Discord's art: inline with a link and a
+                // hidden spoiler, a jumbo emoji-only message, code left as
+                // text, and a reaction.
+                store.apply(
+                    "MESSAGE_CREATE",
+                    &message(
+                        id_at(0, 41),
+                        ADA,
+                        "Shipping it today 🚀 notes at https://example.com ||surprise 🤫|| and `🚀` in code",
+                    ),
+                );
+                store.apply("MESSAGE_CREATE", &message(id_at(0, 42), GRACE, "👍🏽❤️🏳️‍🌈"));
+                let mut reacted = message(id_at(0, 43), ADA, "Plain text with © and #1 stays text");
+                reacted["reactions"] =
+                    json!([{"emoji": {"id": null, "name": "🎉"}, "count": 3, "me": true}]);
+                store.apply("MESSAGE_CREATE", &reacted);
+                self.open_channel(general);
+            }
+            "emoji-picker" => {
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    app.emoji_button.popup();
+                    let Some(popover) = app.emoji_button.popover() else {
+                        return;
+                    };
+                    // Its content is built once it shows.
+                    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                        // Open the Standard tab.
+                        let mut next = popover.first_child();
+                        let mut stack = None;
+                        let mut queue = Vec::new();
+                        while let Some(widget) = next.take().or_else(|| queue.pop()) {
+                            if let Some(found) = widget.downcast_ref::<adw::ViewStack>() {
+                                stack = Some(found.clone());
+                                break;
+                            }
+                            let mut child = widget.first_child();
+                            while let Some(c) = child {
+                                child = c.next_sibling();
+                                queue.push(c);
+                            }
+                        }
+                        if let Some(stack) = stack {
+                            stack.set_visible_child_name("standard");
+                        }
+                        // Popovers are their own surfaces: save this one apart.
+                        if let Ok(path) = std::env::var("KUBECORD_POPOVER_SHOT") {
+                            glib::timeout_add_local_once(Duration::from_secs(12), move || {
+                                if let Err(error) = crate::app::save_window_png(
+                                    &popover,
+                                    std::path::Path::new(&path),
+                                ) {
+                                    eprintln!("demo: could not save the picker: {error}");
+                                }
+                            });
+                        }
+                    });
+                });
             }
             "gif-link" => {
                 // A bare link to a GIF (an `image` embed), as favourites send.

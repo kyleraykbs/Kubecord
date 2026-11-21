@@ -834,7 +834,11 @@ impl AppState {
         scheme.set_title("Discord Theme");
         scheme.set_subtitle("Used while not following the system's colors.");
         scheme.set_model(Some(&gtk::StringList::new(&["Dark", "Light"])));
-        scheme.set_selected(if self.capture.borrow().dark_scheme { 0 } else { 1 });
+        scheme.set_selected(if self.capture.borrow().dark_scheme {
+            0
+        } else {
+            1
+        });
         scheme.set_sensitive(!self.capture.borrow().follow_system_scheme);
         let app = self.clone();
         let picker = scheme.clone();
@@ -868,6 +872,20 @@ impl AppState {
             app.apply_discord_font(on);
         });
         text.add(&font);
+        let emoji = adw::SwitchRow::new();
+        emoji.set_title("Use Discord's Emoji");
+        emoji.set_subtitle(
+            "Draw emoji with Discord's own artwork, fetched from Discord as needed, instead of your system's emoji font.",
+        );
+        emoji.set_subtitle_lines(0);
+        emoji.set_active(self.capture.borrow().discord_emoji);
+        let app = self.clone();
+        emoji.connect_active_notify(move |row| {
+            let on = row.is_active();
+            app.update_prefs(|prefs| prefs.discord_emoji = on);
+            app.apply_discord_emoji(on);
+        });
+        text.add(&emoji);
         page.append(&text);
         page
     }

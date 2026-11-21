@@ -554,10 +554,13 @@ impl AppState {
 
         self.connect_chat();
         self.connect_composer();
-        // Discord's font, if chosen (from the cache, or downloaded once).
+        // Discord's font, if chosen (from the cache, or downloaded once), and
+        // Discord's emoji (on by default).
         if self.capture.borrow().discord_font {
             self.apply_discord_font(true);
         }
+        let emoji = self.capture.borrow().discord_emoji;
+        self.apply_discord_emoji(emoji);
 
         // Search runs on the server when the entry is submitted.
         let app = self.clone();
@@ -1424,7 +1427,6 @@ impl AppState {
             });
             self.account_popover_box.append(&button);
         }
-
 
         self.account_popover_box
             .append(&gtk::Separator::new(gtk::Orientation::Horizontal));

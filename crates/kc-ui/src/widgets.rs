@@ -214,6 +214,9 @@ pub fn status_emoji_widget(
 ) -> gtk::Widget {
     match emoji {
         kc_state::StatusEmoji::Unicode(text) => {
+            if let Some(image) = crate::discord_emoji::image(text, size) {
+                return image.upcast();
+            }
             let glyph = gtk::Label::new(Some(text));
             glyph.set_valign(gtk::Align::Center);
             glyph.upcast()

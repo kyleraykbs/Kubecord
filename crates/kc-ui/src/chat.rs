@@ -1288,7 +1288,10 @@ impl AppState {
                 format!("{name}:{id}")
             }
             None => {
-                content.append(&gtk::Label::new(Some(&name)));
+                match crate::discord_emoji::image(&name, 18) {
+                    Some(image) => content.append(&image),
+                    None => content.append(&gtk::Label::new(Some(&name))),
+                }
                 name.clone()
             }
         };
@@ -1790,7 +1793,12 @@ impl AppState {
                     .is_some_and(|history| history.loading)
             })
             .unwrap_or(false);
-        let shown = self.chat.borrow().rows.iter().any(|row| row.id == message_id);
+        let shown = self
+            .chat
+            .borrow()
+            .rows
+            .iter()
+            .any(|row| row.id == message_id);
         if loading && !shown {
             self.chat.borrow_mut().pending_jump = Some((channel_id, message_id));
         } else {

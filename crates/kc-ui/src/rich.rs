@@ -1158,6 +1158,18 @@ fn push_text(pieces: &mut Vec<Piece>, text: &str, style: &Style) {
 // ---------------------------------------------------------------------------
 
 /// Accumulates Pango markup while tracking line state for quotes and blocks.
+/// `text` with each emoji replaced by a block (its joiners, selectors and
+/// skin tones dropped), for hidden spoilers.
+fn cover_emoji(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c as u32 {
+            0x200d | 0xfe0e | 0xfe0f | 0x20e3 | 0x1f3fb..=0x1f3ff | 0xe0020..=0xe007f => None,
+            0x2300..=0x23ff | 0x2600..=0x27bf | 0x2b00..=0x2bff | 0x1f000.. => Some('\u{2588}'),
+            _ => Some(c),
+        })
+        .collect()
+}
+
 struct MarkupWriter<'a> {
     out: String,
     resolver: &'a dyn Resolver,
@@ -1197,6 +1209,15 @@ impl MarkupWriter<'_> {
     /// Writes escaped text. Quoted text is written line by line so that the
     /// quote prefix sits outside the styling of every line.
     fn text(&mut self, text: &str, style: &Style) {
+        // Color emoji ignore the cover's text color, so hidden ones become
+        // blocks the cover does hide.
+        let covered;
+        let text = if self.hidden(style) {
+            covered = cover_emoji(text);
+            covered.as_str()
+        } else {
+            text
+        };
         if !style.quote {
             if !text.is_empty() {
                 let mut inner = String::with_capacity(text.len());
@@ -1580,6 +1601,14 @@ mod tests {
             Some(open) => Err(format!("unclosed <{open}>")),
             None => Ok(()),
         }
+    }
+
+    #[test]
+    fn hidden_spoilers_cover_their_emoji() {
+        assert_eq!(
+            cover_emoji("hi 🤫 👍🏽 🏳️‍🌈 ok"),
+            "hi \u{2588} \u{2588} \u{2588}\u{2588} ok"
+        );
     }
 
     #[test]

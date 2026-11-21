@@ -310,6 +310,12 @@ button.kc-link-button:hover {
     box-shadow: 0 2px 8px alpha(black, 0.35);
 }
 
+/* Message text with emoji images (a text view) reads like the labels. */
+.kc-rich,
+.kc-rich text {
+    background: none;
+}
+
 .kc-standard-emoji label {
     font-size: 1.45em;
 }

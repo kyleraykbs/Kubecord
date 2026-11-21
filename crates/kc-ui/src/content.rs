@@ -16,6 +16,7 @@ use kc_http::cdn;
 use kc_state::message::{Embed, EmbedMedia};
 use kc_state::{Attachment, State, StickerItem};
 
+use crate::discord_emoji::Segment;
 use crate::markdown::format_size;
 use crate::player::LoopingVideo;
 use crate::rich::{self, Piece};
@@ -293,10 +294,11 @@ fn is_gif_host(url: &str) -> bool {
 /// serves it.
 pub(crate) fn same_link(a: &str, b: &str) -> bool {
     let bare = |url: &str| {
-        url.split(['?', '#'])
-            .next()
-            .unwrap_or(url)
-            .replacen("//media.discordapp.net/", "//cdn.discordapp.com/", 1)
+        url.split(['?', '#']).next().unwrap_or(url).replacen(
+            "//media.discordapp.net/",
+            "//cdn.discordapp.com/",
+            1,
+        )
     };
     bare(a) == bare(b)
 }
@@ -354,27 +356,148 @@ fn fit(width: u32, height: u32) -> (i32, i32) {
     )
 }
 
-/// Replaces `<a href="…">` with an underlined span: text buffers reject the
-/// anchor tag that labels accept.
-fn without_anchors(markup: &str) -> String {
+/// Marks where a link starts and ends in markup put into a text view.
+const LINK_OPEN: char = '\u{e000}';
+const LINK_CLOSE: char = '\u{e001}';
+
+/// Text buffers do not take `<a>`: each anchor becomes a span (underlined
+/// for web links) bracketed by [`LINK_OPEN`]/[`LINK_CLOSE`], and its target
+/// is returned in order.
+fn mark_anchors(markup: &str) -> (String, Vec<String>) {
+    let markup = markup.replace([LINK_OPEN, LINK_CLOSE], "");
     let mut out = String::with_capacity(markup.len());
-    let mut rest = markup;
+    let mut uris = Vec::new();
+    let mut rest = markup.as_str();
     while let Some(start) = rest.find("<a href=\"") {
         out.push_str(&rest[..start]);
-        let after = &rest[start..];
-        match after.find("\">") {
-            Some(end) => {
-                out.push_str("<span underline=\"single\">");
-                rest = &after[end + 2..];
-            }
-            None => {
-                rest = "";
-                break;
-            }
-        }
+        let after = &rest[start + "<a href=\"".len()..];
+        let Some(end) = after.find("\">") else {
+            rest = "";
+            break;
+        };
+        let uri = unescape_markup(&after[..end]);
+        out.push_str(if uri.starts_with("http") {
+            "<span underline=\"single\">"
+        } else {
+            "<span>"
+        });
+        out.push(LINK_OPEN);
+        uris.push(uri);
+        rest = &after[end + 2..];
     }
     out.push_str(rest);
-    out.replace("</a>", "</span>")
+    (out.replace("</a>", &format!("{LINK_CLOSE}</span>")), uris)
+}
+
+fn unescape_markup(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// The links in a text view, as tags over their text.
+type Links = RefCell<Vec<(gtk::TextTag, String)>>;
+
+/// Appends `markup` to `buffer`, its links tagged and listed in `links`.
+fn insert_linked_markup(buffer: &gtk::TextBuffer, markup: &str, links: &Links) {
+    let (markup, uris) = mark_anchors(markup);
+    let start = buffer.end_iter().offset();
+    buffer.insert_markup(&mut buffer.end_iter(), &markup);
+    if uris.is_empty() {
+        return;
+    }
+    let text = buffer.text(&buffer.iter_at_offset(start), &buffer.end_iter(), true);
+    // Where the markers are, and the ranges they bound once removed.
+    let mut markers = Vec::new();
+    let mut open = Vec::new();
+    let mut ranges = Vec::new();
+    let mut opened = 0;
+    for (index, c) in text.chars().enumerate() {
+        let index = index as i32;
+        if c == LINK_OPEN {
+            open.push((opened, index - markers.len() as i32));
+            opened += 1;
+            markers.push(index);
+        } else if c == LINK_CLOSE {
+            if let Some((nth, from)) = open.pop() {
+                ranges.push((nth, from, index - markers.len() as i32));
+            }
+            markers.push(index);
+        }
+    }
+    for &index in markers.iter().rev() {
+        let at = start + index;
+        buffer.delete(
+            &mut buffer.iter_at_offset(at),
+            &mut buffer.iter_at_offset(at + 1),
+        );
+    }
+    for (nth, from, to) in ranges {
+        let Some(uri) = uris.get(nth) else {
+            continue;
+        };
+        let Some(tag) = buffer.create_tag(None, &[]) else {
+            continue;
+        };
+        if uri.starts_with("http") {
+            tag.set_foreground_rgba(Some(&adw::StyleManager::default().accent_color_rgba()));
+        }
+        buffer.apply_tag(
+            &tag,
+            &buffer.iter_at_offset(start + from),
+            &buffer.iter_at_offset(start + to),
+        );
+        links.borrow_mut().push((tag, uri.clone()));
+    }
+}
+
+/// The link under a point of a text view, if any.
+fn link_at(view: &gtk::TextView, links: &Links, x: f64, y: f64) -> Option<String> {
+    let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    let iter = view.iter_at_location(x, y)?;
+    let links = links.borrow();
+    iter.tags().iter().find_map(|tag| {
+        links
+            .iter()
+            .find(|(link, _)| link == tag)
+            .map(|(_, uri)| uri.clone())
+    })
+}
+
+/// Frames a text view is watched for after appearing or a resize.
+const SETTLE_FRAMES: u32 = 30;
+
+/// Asks a text view's parent to measure it again whenever its height (for
+/// its width) differs from what it was given, for [`SETTLE_FRAMES`] frames.
+fn settle_height(view: &gtk::TextView) {
+    let frames = std::cell::Cell::new(0);
+    view.add_tick_callback(move |view, _| {
+        let width = view.width();
+        if width > 0 {
+            let (height, ..) = view.measure(gtk::Orientation::Vertical, width);
+            if height != view.height() {
+                view.queue_resize();
+            }
+        }
+        frames.set(frames.get() + 1);
+        if frames.get() < SETTLE_FRAMES {
+            glib::ControlFlow::Continue
+        } else {
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+/// Whether any (non-code) text in `pieces` has an emoji drawn in Discord's art.
+fn has_discord_emoji(pieces: &[Piece]) -> bool {
+    crate::discord_emoji::active()
+        && pieces.iter().any(|piece| {
+            matches!(piece, Piece::Text { text, style }
+                if !style.code && !style.code_block && crate::discord_emoji::contains_emoji(text))
+        })
 }
 
 impl AppState {
@@ -394,8 +517,8 @@ impl AppState {
         if rich::is_emoji_only(&pieces) {
             return Some(self.jumbo_emoji(&pieces));
         }
-        if rich::has_custom_emoji(&pieces) {
-            return Some(self.emoji_text(&pieces, &resolver));
+        if rich::has_custom_emoji(&pieces) || has_discord_emoji(&pieces) {
+            return Some(self.emoji_text(pieces, guild, &resolver));
         }
 
         let text = gtk::Label::new(None);
@@ -461,12 +584,26 @@ impl AppState {
                     wrap.append(&image);
                 }
                 Piece::Text { text, .. } => {
-                    let text = text.trim();
-                    if !text.is_empty() {
-                        let emoji = gtk::Label::new(Some(text));
-                        emoji.add_css_class("kc-jumbo");
-                        emoji.set_selectable(true);
-                        wrap.append(&emoji);
+                    for segment in crate::discord_emoji::split(text) {
+                        let text = match segment {
+                            Segment::Emoji(emoji) => {
+                                if let Some(image) =
+                                    crate::discord_emoji::image(&emoji, JUMBO_EMOJI)
+                                {
+                                    wrap.append(&image);
+                                    continue;
+                                }
+                                emoji
+                            }
+                            Segment::Text(text) => text,
+                        };
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            let emoji = gtk::Label::new(Some(text));
+                            emoji.add_css_class("kc-jumbo");
+                            emoji.set_selectable(true);
+                            wrap.append(&emoji);
+                        }
                     }
                 }
                 _ => {}
@@ -475,42 +612,157 @@ impl AppState {
         wrap.upcast()
     }
 
-    /// Text with custom emoji images inline. Labels cannot embed widgets, so
-    /// this uses a read-only text view with the images at child anchors.
-    fn emoji_text(self: &Rc<Self>, pieces: &[Piece], resolver: &StateResolver) -> gtk::Widget {
+    /// Text with emoji images inline (custom ones, and Unicode ones in
+    /// Discord's art). Labels cannot embed widgets, so this uses a read-only
+    /// text view with the images at child anchors; links stay clickable, and
+    /// spoilers stay hidden until clicked.
+    fn emoji_text(
+        self: &Rc<Self>,
+        pieces: Vec<Piece>,
+        guild: Option<Snowflake>,
+        resolver: &StateResolver,
+    ) -> gtk::Widget {
         let view = gtk::TextView::new();
         view.set_editable(false);
         view.set_cursor_visible(false);
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         view.add_css_class("kc-rich");
+        let links: Rc<Links> = Rc::default();
+        let pieces = Rc::new(pieces);
+        self.fill_emoji_text(&view, &pieces, resolver, false, &links);
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        let app = self.clone();
+        let target = links.clone();
+        click.connect_released(move |gesture, _, x, y| {
+            let Some(view) = gesture.widget().and_downcast::<gtk::TextView>() else {
+                return;
+            };
+            // A drag selecting text is not a click on a link.
+            if view.buffer().has_selection() {
+                return;
+            }
+            let Some(uri) = link_at(&view, &target, x, y) else {
+                return;
+            };
+            if uri == "kubecord://spoiler" {
+                app.with_session(|session| {
+                    session.store.read(|state| {
+                        let resolver = StateResolver { state, guild };
+                        app.fill_emoji_text(&view, &pieces, &resolver, true, &target);
+                    })
+                });
+            } else {
+                app.activate_link(&uri, view.upcast_ref());
+            }
+        });
+        view.add_controller(click);
+
+        let motion = gtk::EventControllerMotion::new();
+        let hover = links.clone();
+        motion.connect_motion(move |motion, x, y| {
+            let Some(view) = motion.widget().and_downcast::<gtk::TextView>() else {
+                return;
+            };
+            let over = link_at(&view, &hover, x, y).is_some();
+            view.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
+        });
+        view.add_controller(motion);
+        // A text view first measures itself before it knows its width (so
+        // as if every word wrapped), and does not ask again once it does:
+        // ask on the next frame, when it has its real width.
+        // A text view first measures itself before it knows its width (as if
+        // every word wrapped) and does not ask its parent again once its text
+        // wraps at the real width, so check for a short while after it
+        // appears, and again when the window's width changes.
+        let resized: Rc<RefCell<Option<(gtk::Window, glib::SignalHandlerId)>>> = Rc::default();
+        let on_resize = resized.clone();
+        view.connect_map(move |view| {
+            settle_height(view);
+            if let Some(window) = view.root().and_downcast::<gtk::Window>() {
+                let weak = view.downgrade();
+                let id = window.connect_default_width_notify(move |_| {
+                    if let Some(view) = weak.upgrade() {
+                        settle_height(&view);
+                    }
+                });
+                on_resize.replace(Some((window, id)));
+            }
+        });
+        view.connect_unmap(move |_| {
+            if let Some((window, id)) = resized.take() {
+                window.disconnect(id);
+            }
+        });
+        view.upcast()
+    }
+
+    /// (Re)fills an [`AppState::emoji_text`] view.
+    fn fill_emoji_text(
+        self: &Rc<Self>,
+        view: &gtk::TextView,
+        pieces: &[Piece],
+        resolver: &StateResolver,
+        revealed: bool,
+        links: &Links,
+    ) {
         let buffer = view.buffer();
+        buffer.set_text("");
+        let table = buffer.tag_table();
+        for (tag, _) in links.borrow_mut().drain(..) {
+            table.remove(&tag);
+        }
 
         let mut run: Vec<Piece> = Vec::new();
         let flush = |run: &mut Vec<Piece>| {
-            if run.is_empty() {
-                return;
+            if !run.is_empty() {
+                insert_linked_markup(&buffer, &rich::to_markup(run, resolver, revealed), links);
+                run.clear();
             }
-            let markup = without_anchors(&rich::to_markup(run, resolver, true));
-            buffer.insert_markup(&mut buffer.end_iter(), &markup);
-            run.clear();
+        };
+        let place = |run: &mut Vec<Piece>, image: &gtk::Image| {
+            flush(run);
+            let anchor = buffer.create_child_anchor(&mut buffer.end_iter());
+            view.add_child_at_anchor(image, &anchor);
         };
         for piece in pieces {
             match piece {
                 Piece::Emoji { id, name, .. } => {
-                    flush(&mut run);
-                    let anchor = buffer.create_child_anchor(&mut buffer.end_iter());
                     let image = gtk::Image::new();
                     image.set_pixel_size(INLINE_EMOJI);
                     image.set_tooltip_text(Some(&format!(":{name}:")));
                     self.images
                         .set_image(&image, &cdn::emoji(*id, false, INLINE_EMOJI as u32 * 2));
-                    view.add_child_at_anchor(&image, &anchor);
+                    place(&mut run, &image);
+                }
+                // Code keeps its characters; a hidden spoiler keeps its
+                // emoji under the cover too.
+                Piece::Text { text, style }
+                    if !style.code && !style.code_block && (revealed || !style.spoiler) =>
+                {
+                    for segment in crate::discord_emoji::split(text) {
+                        match segment {
+                            Segment::Emoji(emoji) => {
+                                match crate::discord_emoji::image(&emoji, INLINE_EMOJI) {
+                                    Some(image) => place(&mut run, &image),
+                                    None => run.push(Piece::Text {
+                                        text: emoji,
+                                        style: style.clone(),
+                                    }),
+                                }
+                            }
+                            Segment::Text(text) => run.push(Piece::Text {
+                                text,
+                                style: style.clone(),
+                            }),
+                        }
+                    }
                 }
                 other => run.push(other.clone()),
             }
         }
         flush(&mut run);
-        view.upcast()
     }
 
     /// An image, video poster, audio or file card for one attachment.
@@ -717,7 +969,12 @@ impl AppState {
     }
 
     /// Populates (or, on `None`, marks invalid) an invite card frame.
-    fn fill_invite_card(self: &Rc<Self>, frame: &gtk::Box, code: &str, info: Option<&ResolvedInvite>) {
+    fn fill_invite_card(
+        self: &Rc<Self>,
+        frame: &gtk::Box,
+        code: &str,
+        info: Option<&ResolvedInvite>,
+    ) {
         let Some(info) = info else {
             frame.append(&label("Invalid or expired invite", &["dim-label"]));
             return;
@@ -738,7 +995,10 @@ impl AppState {
         let online_dot = status_dot("online");
         online_dot.set_valign(gtk::Align::Center);
         counts.append(&online_dot);
-        counts.append(&label(&format!("{} Online", info.online), &["caption", "dim-label"]));
+        counts.append(&label(
+            &format!("{} Online", info.online),
+            &["caption", "dim-label"],
+        ));
         let offline_dot = status_dot("offline");
         offline_dot.set_valign(gtk::Align::Center);
         counts.append(&offline_dot);
@@ -1021,9 +1281,7 @@ impl AppState {
                 }
                 match &action {
                     OnClick::Viewer(target) => app.show_image(target, &preview_url),
-                    OnClick::External(target) => {
-                        open_uri(Some(app.window.upcast_ref()), target)
-                    }
+                    OnClick::External(target) => open_uri(Some(app.window.upcast_ref()), target),
                     OnClick::PlayVideo(file) => app.show_video(file, &preview_url),
                     OnClick::Nothing => {}
                 }
@@ -1347,12 +1605,18 @@ mod tests {
     }
 
     #[test]
-    fn anchors_become_underlined_spans() {
-        assert_eq!(
-            without_anchors("a <a href=\"https://x.y/?a=1&amp;b=2\">link</a> b"),
-            "a <span underline=\"single\">link</span> b"
+    fn anchors_become_marked_spans() {
+        let (markup, uris) = mark_anchors(
+            "a <a href=\"https://x.y/?a=1&amp;b=2\">link</a> b <a href=\"kubecord://user/1\">@x</a>",
         );
-        assert_eq!(without_anchors("plain <b>bold</b>"), "plain <b>bold</b>");
+        assert_eq!(
+            markup,
+            "a <span underline=\"single\">\u{e000}link\u{e001}</span> b <span>\u{e000}@x\u{e001}</span>"
+        );
+        assert_eq!(uris, ["https://x.y/?a=1&b=2", "kubecord://user/1"]);
+        assert_eq!(mark_anchors("plain <b>bold</b>").0, "plain <b>bold</b>");
+        // Markers typed into a message cannot fake a link.
+        assert_eq!(mark_anchors("x\u{e000}y").0, "xy");
     }
 
     #[test]

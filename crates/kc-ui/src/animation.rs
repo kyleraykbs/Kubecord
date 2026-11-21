@@ -98,7 +98,7 @@ pub(crate) fn is_gif(bytes: &[u8]) -> bool {
 }
 
 /// Builds a texture from one decoded frame.
-fn pixbuf_texture(pixbuf: &Pixbuf) -> Option<gdk::Texture> {
+pub(crate) fn pixbuf_texture(pixbuf: &Pixbuf) -> Option<gdk::Texture> {
     let width = pixbuf.width();
     let height = pixbuf.height();
     if width <= 0 || height <= 0 {

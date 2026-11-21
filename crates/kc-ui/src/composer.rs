@@ -16,6 +16,8 @@ use crate::session::{Command, Upload};
 use crate::shell::AppState;
 use crate::widgets::{clear_box, clear_list, icon_button, label, snippet};
 
+/// Emoji size in the picker, when drawn in Discord's art.
+const PICKER_EMOJI_SIZE: i32 = 28;
 const MIB: usize = 1024 * 1024;
 /// Rows offered by autocomplete.
 const COMPLETIONS: usize = 8;
@@ -340,7 +342,9 @@ impl AppState {
             return;
         };
         self.with_session_mut(|session| {
-            session.slowmode_until.insert(channel, Instant::now() + wait);
+            session
+                .slowmode_until
+                .insert(channel, Instant::now() + wait);
         });
         self.render_composer();
         let app = Rc::downgrade(self);
@@ -817,14 +821,19 @@ impl AppState {
         // Standard emoji, built the first time the tab opens.
         let standard = gtk::Box::new(gtk::Orientation::Vertical, 6);
         stack.add_titled(&standard, Some("standard"), "Standard");
-        let built = Rc::new(std::cell::Cell::new(false));
+        // Built for which emoji style (rebuilt when Discord's emoji are
+        // switched on or off).
+        let built: Rc<std::cell::Cell<Option<u32>>> = Rc::default();
         let ensure_standard = {
             let app = self.clone();
             let standard = standard.clone();
             let stack = stack.clone();
             move || {
-                if stack.visible_child_name().as_deref() == Some("standard") && !built.replace(true)
+                let style = crate::discord_emoji::generation();
+                if stack.visible_child_name().as_deref() == Some("standard")
+                    && built.replace(Some(style)) != Some(style)
                 {
+                    crate::widgets::clear_box(&standard);
                     let target = app.clone();
                     app.fill_standard_emoji(
                         &standard,
@@ -888,7 +897,14 @@ impl AppState {
             let heading = label(&group_title(group).to_uppercase(), &["kc-category"]);
 
             // The nav button that scrolls this section's heading to the top.
-            let jump = gtk::Button::with_label(group_icon(group));
+            let jump = match crate::discord_emoji::image(group_icon(group), 20) {
+                Some(image) => {
+                    let jump = gtk::Button::new();
+                    jump.set_child(Some(&image));
+                    jump
+                }
+                None => gtk::Button::with_label(group_icon(group)),
+            };
             jump.add_css_class("flat");
             jump.add_css_class("kc-emoji-nav-button");
             jump.set_tooltip_text(Some(group_title(group)));
@@ -912,7 +928,14 @@ impl AppState {
                     .is_none_or(|tone| tone == emojis::SkinTone::Default)
                     && emoji.unicode_version() <= emojis::UnicodeVersion::new(15, 1)
             }) {
-                let button = gtk::Button::with_label(emoji.as_str());
+                let button = match crate::discord_emoji::image(emoji.as_str(), PICKER_EMOJI_SIZE) {
+                    Some(image) => {
+                        let button = gtk::Button::new();
+                        button.set_child(Some(&image));
+                        button
+                    }
+                    None => gtk::Button::with_label(emoji.as_str()),
+                };
                 button.add_css_class("flat");
                 button.add_css_class("kc-picker-emoji");
                 button.add_css_class("kc-standard-emoji");
@@ -1725,7 +1748,10 @@ thread_local! {
 /// tile must play it rather than fall back to a static preview).
 pub(crate) fn is_video_url(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
-    path.ends_with(".mp4") || path.ends_with(".webm") || path.ends_with(".mov") || path.ends_with(".gifv")
+    path.ends_with(".mp4")
+        || path.ends_with(".webm")
+        || path.ends_with(".mov")
+        || path.ends_with(".gifv")
 }
 
 /// A fresh GIF-tile flow (two columns), configured as the picker wants it.
