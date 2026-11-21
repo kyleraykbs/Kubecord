@@ -39,8 +39,8 @@ static FILES: LazyLock<regex::Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// A picture waiting for its emoji, and the pixel size to draw it at.
-type Waiter = (glib::WeakRef<gtk::Image>, i32);
+/// What to do once an emoji's SVG is on disk (given its path).
+type Waiter = Box<dyn FnOnce(&std::path::Path)>;
 
 thread_local! {
     /// The setting.
@@ -197,53 +197,88 @@ pub(crate) fn image(emoji: &str, size: i32) -> Option<gtk::Image> {
         image.set_paintable(Some(&texture));
         return Some(image);
     }
+    let weak = image.downgrade();
+    let drawn = asset.clone();
+    fetch(
+        asset,
+        Box::new(move |path| {
+            if let (Some(image), Some(texture)) = (weak.upgrade(), draw(&drawn, path, pixels)) {
+                image.set_paintable(Some(&texture));
+            }
+        }),
+    );
+    Some(image)
+}
+
+/// An inline picture of `emoji` for a text buffer, `size` pixels square, if
+/// its SVG is already on disk. Otherwise `None`, and when it has art the
+/// download starts and `ready` runs once it is in.
+pub(crate) fn paintable(
+    emoji: &str,
+    size: i32,
+    ready: impl FnOnce() + 'static,
+) -> Option<EmojiPaintable> {
+    if !active() {
+        return None;
+    }
+    let asset = asset_for(emoji)?;
+    let pixels = size * 2;
+    let path = emoji_dir()?.join(asset.trim_start_matches("/assets/"));
+    let cached = TEXTURES.with_borrow(|cache| cache.get(&(asset.clone(), pixels)).cloned());
+    let texture = cached.or_else(|| path.exists().then(|| draw(&asset, &path, pixels)).flatten());
+    match texture {
+        Some(texture) => Some(EmojiPaintable::new(emoji, &texture, size)),
+        None => {
+            fetch(asset, Box::new(move |_| ready()));
+            None
+        }
+    }
+}
+
+/// Downloads an emoji's SVG to the cache (once, however many ask), then
+/// calls `done` with its path. Failed downloads call nothing.
+fn fetch(asset: String, done: Waiter) {
     let first = WAITING.with_borrow_mut(|waiting| {
         let entry = waiting.entry(asset.clone()).or_default();
-        entry.push((image.downgrade(), pixels));
+        entry.push(done);
         entry.len() == 1
     });
-    if first {
-        let Some(dir) = emoji_dir() else {
-            return Some(image);
-        };
-        let url = format!("https://discord.com{asset}");
-        let path = dir.join(asset.trim_start_matches("/assets/"));
-        let Some(runtime) = RUNTIME.with_borrow(Clone::clone) else {
-            return Some(image);
-        };
-        let semaphore = DOWNLOADS.clone();
-        let download = runtime.spawn(async move {
-            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-                return Some(path);
-            }
-            let _permit = semaphore.acquire_owned().await.ok()?;
-            let bytes = kc_http::cdn::fetch(&url)
-                .await
-                .inspect_err(|error| tracing::debug!(%error, url, "could not get an emoji"))
-                .ok()?;
-            tokio::fs::create_dir_all(path.parent()?).await.ok()?;
-            let partial = path.with_extension("part");
-            tokio::fs::write(&partial, &bytes).await.ok()?;
-            tokio::fs::rename(&partial, &path).await.ok()?;
-            Some(path)
-        });
-        glib::spawn_future_local(async move {
-            let path = download.await.ok().flatten();
-            let waiters = WAITING
-                .with_borrow_mut(|waiting| waiting.remove(&asset))
-                .unwrap_or_default();
-            let Some(path) = path else {
-                return;
-            };
-            for (weak, pixels) in waiters {
-                if let (Some(image), Some(texture)) = (weak.upgrade(), draw(&asset, &path, pixels))
-                {
-                    image.set_paintable(Some(&texture));
-                }
-            }
-        });
+    if !first {
+        return;
     }
-    Some(image)
+    let (Some(dir), Some(runtime)) = (emoji_dir(), RUNTIME.with_borrow(Clone::clone)) else {
+        WAITING.with_borrow_mut(|waiting| waiting.remove(&asset));
+        return;
+    };
+    let url = format!("https://discord.com{asset}");
+    let path = dir.join(asset.trim_start_matches("/assets/"));
+    let semaphore = DOWNLOADS.clone();
+    let download = runtime.spawn(async move {
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Some(path);
+        }
+        let _permit = semaphore.acquire_owned().await.ok()?;
+        let bytes = kc_http::cdn::fetch(&url)
+            .await
+            .inspect_err(|error| tracing::debug!(%error, url, "could not get an emoji"))
+            .ok()?;
+        tokio::fs::create_dir_all(path.parent()?).await.ok()?;
+        let partial = path.with_extension("part");
+        tokio::fs::write(&partial, &bytes).await.ok()?;
+        tokio::fs::rename(&partial, &path).await.ok()?;
+        Some(path)
+    });
+    glib::spawn_future_local(async move {
+        let path = download.await.ok().flatten();
+        let waiters = WAITING
+            .with_borrow_mut(|waiting| waiting.remove(&asset))
+            .unwrap_or_default();
+        if let Some(path) = path {
+            for done in waiters {
+                done(&path);
+            }
+        }
+    });
 }
 
 /// Draws an emoji's SVG at `pixels`, remembering it.
@@ -377,6 +412,77 @@ impl AppState {
         self.redraw_times();
         self.render_members();
         self.render_user_bar();
+        self.queue_composer_emoji();
+    }
+}
+
+mod imp {
+    use std::cell::{Cell, RefCell};
+
+    use gtk::gdk;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct EmojiPaintable {
+        pub emoji: RefCell<String>,
+        pub texture: RefCell<Option<gdk::Texture>>,
+        pub size: Cell<i32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for EmojiPaintable {
+        const NAME: &'static str = "KcEmojiPaintable";
+        type Type = super::EmojiPaintable;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for EmojiPaintable {}
+
+    impl PaintableImpl for EmojiPaintable {
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::STATIC_SIZE | gdk::PaintableFlags::STATIC_CONTENTS
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            self.size.get()
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.size.get()
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            if let Some(texture) = &*self.texture.borrow() {
+                texture.snapshot(snapshot, width, height);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    /// An emoji drawn inline in a text buffer: shown at `size` pixels from a
+    /// sharper texture, and remembering the emoji it stands for.
+    pub struct EmojiPaintable(ObjectSubclass<imp::EmojiPaintable>)
+        @implements gdk::Paintable;
+}
+
+impl EmojiPaintable {
+    fn new(emoji: &str, texture: &gdk::Texture, size: i32) -> Self {
+        let paintable: Self = glib::Object::new();
+        let imp = gtk::subclass::prelude::ObjectSubclassIsExt::imp(&paintable);
+        imp.emoji.replace(emoji.to_owned());
+        imp.texture.replace(Some(texture.clone()));
+        imp.size.set(size);
+        paintable
+    }
+
+    /// The emoji this stands for.
+    pub(crate) fn emoji(&self) -> String {
+        gtk::subclass::prelude::ObjectSubclassIsExt::imp(self)
+            .emoji
+            .borrow()
+            .clone()
     }
 }
 

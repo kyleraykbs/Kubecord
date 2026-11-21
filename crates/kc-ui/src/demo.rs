@@ -58,7 +58,8 @@
 //!   `dm-leave` (the group's × clicked: the confirmation), `dm-deleted`
 //!   (the open DM is closed elsewhere: CHANNEL_DELETE arrives).
 //! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
-//! - `emoji-picker`: the composer's emoji picker, in Discord's art.
+//! - `emoji-picker`: the emoji picker (opening on Standard) and emoji typed
+//!   in the composer, in Discord's art.
 //! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
 //!   server emoji (drawn as an image) -- then Edit Profile, where it is set.
 //! - `accounts` (the account menu with two accounts, each with a Log Out
@@ -588,45 +589,35 @@ impl AppState {
                 self.open_channel(general);
             }
             "emoji-picker" => {
+                // The picker (opening on Standard) and emoji typed in the
+                // composer, drawn in Discord's art but sent as text.
                 self.open_channel(general);
+                self.composer
+                    .buffer()
+                    .set_text("Typing 🚀 with emoji 👍🏽 in the box");
                 let app = self.clone();
-                glib::timeout_add_local_once(Duration::from_millis(800), move || {
-                    app.emoji_button.popup();
+                glib::timeout_add_local_once(Duration::from_secs(3), move || {
+                    eprintln!("demo: composer text = {:?}", app.composer_text());
+                });
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     let Some(popover) = app.emoji_button.popover() else {
                         return;
                     };
-                    // Its content is built once it shows.
-                    glib::timeout_add_local_once(Duration::from_millis(500), move || {
-                        // Open the Standard tab.
-                        let mut next = popover.first_child();
-                        let mut stack = None;
-                        let mut queue = Vec::new();
-                        while let Some(widget) = next.take().or_else(|| queue.pop()) {
-                            if let Some(found) = widget.downcast_ref::<adw::ViewStack>() {
-                                stack = Some(found.clone());
-                                break;
+                    // Without a real click the compositor may refuse the popover's
+                    // input grab, so show it without auto-hide.
+                    popover.set_autohide(false);
+                    app.emoji_button.popup();
+                    // Popovers are their own surfaces: save this one apart.
+                    if let Ok(path) = std::env::var("KUBECORD_POPOVER_SHOT") {
+                        glib::timeout_add_local_once(Duration::from_secs(6), move || {
+                            if let Err(error) =
+                                crate::app::save_window_png(&popover, std::path::Path::new(&path))
+                            {
+                                eprintln!("demo: could not save the picker: {error}");
                             }
-                            let mut child = widget.first_child();
-                            while let Some(c) = child {
-                                child = c.next_sibling();
-                                queue.push(c);
-                            }
-                        }
-                        if let Some(stack) = stack {
-                            stack.set_visible_child_name("standard");
-                        }
-                        // Popovers are their own surfaces: save this one apart.
-                        if let Ok(path) = std::env::var("KUBECORD_POPOVER_SHOT") {
-                            glib::timeout_add_local_once(Duration::from_secs(12), move || {
-                                if let Err(error) = crate::app::save_window_png(
-                                    &popover,
-                                    std::path::Path::new(&path),
-                                ) {
-                                    eprintln!("demo: could not save the picker: {error}");
-                                }
-                            });
-                        }
-                    });
+                        });
+                    }
                 });
             }
             "gif-link" => {

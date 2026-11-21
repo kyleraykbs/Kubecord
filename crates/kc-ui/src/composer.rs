@@ -63,7 +63,49 @@ struct Completion {
     raw: String,
 }
 
+/// Emoji size in the composer, drawn in Discord's art.
+const COMPOSER_EMOJI: i32 = 20;
+
+/// Text between two iterators, emoji images turned back into their emoji.
+fn expanded_text(start: &gtk::TextIter, end: &gtk::TextIter) -> String {
+    let slice = start.slice(end);
+    if !slice.contains('\u{fffc}') {
+        return slice.to_string();
+    }
+    let mut out = String::with_capacity(slice.len());
+    let mut iter = *start;
+    for c in slice.chars() {
+        if c == '\u{fffc}' {
+            if let Some(emoji) = iter
+                .paintable()
+                .and_downcast::<crate::discord_emoji::EmojiPaintable>()
+            {
+                out.push_str(&emoji.emoji());
+            }
+        } else {
+            out.push(c);
+        }
+        iter.forward_char();
+    }
+    out
+}
+
+/// Puts the selection on the clipboard with its emoji images as text.
+/// False (doing nothing) when it has none, so the view copies as usual.
+fn copy_with_emoji(view: &gtk::TextView) -> bool {
+    let Some((start, end)) = view.buffer().selection_bounds() else {
+        return false;
+    };
+    if !start.slice(&end).contains('\u{fffc}') {
+        return false;
+    }
+    view.clipboard().set_text(&expanded_text(&start, &end));
+    true
+}
+
 thread_local! {
+    /// A redraw of the composer's emoji is queued.
+    static COMPOSER_EMOJI_QUEUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `display -> raw` pairs for mentions and emoji inserted through
     /// autocomplete or the picker, applied when the message is sent.
     static TOKENS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -119,6 +161,20 @@ impl AppState {
         });
         self.composer.add_controller(keys);
 
+        // Copying or cutting text with emoji images copies the emoji (the
+        // view's own copy would drop them).
+        self.composer.connect_copy_clipboard(|view| {
+            if copy_with_emoji(view) {
+                view.stop_signal_emission_by_name("copy-clipboard");
+            }
+        });
+        self.composer.connect_cut_clipboard(|view| {
+            if copy_with_emoji(view) {
+                view.buffer().delete_selection(true, view.is_editable());
+                view.stop_signal_emission_by_name("cut-clipboard");
+            }
+        });
+
         // Pasting an image attaches it instead of inserting nothing.
         let app = self.clone();
         self.composer.connect_paste_clipboard(move |view| {
@@ -159,11 +215,88 @@ impl AppState {
         self.build_gif_picker();
     }
 
+    /// The composer's text, emoji drawn as images turned back into text.
     pub(crate) fn composer_text(&self) -> String {
         let buffer = self.composer.buffer();
+        expanded_text(&buffer.start_iter(), &buffer.end_iter())
+    }
+
+    /// The composer's text with one character per buffer position (an emoji
+    /// drawn as an image is U+FFFC), so offsets in it are buffer offsets.
+    fn composer_positions(&self) -> String {
+        let buffer = self.composer.buffer();
         buffer
-            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .slice(&buffer.start_iter(), &buffer.end_iter(), true)
             .to_string()
+    }
+
+    /// Redraws the composer's emoji (soon, once): typed emoji become Discord's
+    /// art while it is on, and back into text when it is off.
+    pub(crate) fn queue_composer_emoji(self: &Rc<Self>) {
+        if COMPOSER_EMOJI_QUEUED.replace(true) {
+            return;
+        }
+        let app = self.clone();
+        glib::idle_add_local_once(move || {
+            COMPOSER_EMOJI_QUEUED.set(false);
+            app.redraw_composer_emoji();
+        });
+    }
+
+    fn redraw_composer_emoji(self: &Rc<Self>) {
+        let buffer = self.composer.buffer();
+        let text = self.composer_positions();
+        if !crate::discord_emoji::active() {
+            if !text.contains('\u{fffc}') {
+                return;
+            }
+            let mut iter = buffer.start_iter();
+            let mut drawn = Vec::new();
+            for c in text.chars() {
+                if c == '\u{fffc}'
+                    && let Some(emoji) = iter
+                        .paintable()
+                        .and_downcast::<crate::discord_emoji::EmojiPaintable>()
+                {
+                    drawn.push((iter.offset(), emoji.emoji()));
+                }
+                iter.forward_char();
+            }
+            for (offset, emoji) in drawn.into_iter().rev() {
+                let mut start = buffer.iter_at_offset(offset);
+                let mut end = buffer.iter_at_offset(offset + 1);
+                buffer.delete(&mut start, &mut end);
+                buffer.insert(&mut start, &emoji);
+            }
+            return;
+        }
+        let mut offset = 0;
+        let mut found = Vec::new();
+        for segment in crate::discord_emoji::split(&text) {
+            match segment {
+                crate::discord_emoji::Segment::Text(text) => offset += text.chars().count(),
+                crate::discord_emoji::Segment::Emoji(emoji) => {
+                    let length = emoji.chars().count();
+                    found.push((offset as i32, length as i32, emoji));
+                    offset += length;
+                }
+            }
+        }
+        // From the end, so earlier offsets stay right.
+        for (offset, length, emoji) in found.into_iter().rev() {
+            let app = self.clone();
+            let Some(picture) =
+                crate::discord_emoji::paintable(&emoji, COMPOSER_EMOJI, move || {
+                    app.queue_composer_emoji()
+                })
+            else {
+                continue;
+            };
+            let mut start = buffer.iter_at_offset(offset);
+            let mut end = buffer.iter_at_offset(offset + length);
+            buffer.delete(&mut start, &mut end);
+            buffer.insert_paintable(&mut start, &picture);
+        }
     }
 
     pub(crate) fn insert_composer_text(&self, text: &str) {
@@ -190,7 +323,7 @@ impl AppState {
         if !crate::spelling::enabled() {
             return;
         }
-        let text = self.composer_text();
+        let text = self.composer_positions();
         for (start, end) in crate::spelling::misspelled_spans(&text) {
             let (Ok(start), Ok(end)) = (i32::try_from(start), i32::try_from(end)) else {
                 continue;
@@ -278,6 +411,7 @@ impl AppState {
     fn on_composer_changed(self: &Rc<Self>) {
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
+        self.queue_composer_emoji();
         self.update_completion();
         self.recheck_spelling();
         if text.trim().is_empty() {
@@ -833,12 +967,18 @@ impl AppState {
                 if stack.visible_child_name().as_deref() == Some("standard")
                     && built.replace(Some(style)) != Some(style)
                 {
-                    crate::widgets::clear_box(&standard);
-                    let target = app.clone();
-                    app.fill_standard_emoji(
-                        &standard,
-                        Rc::new(move |text: &str| target.insert_composer_text(text)),
-                    );
+                    // Filled on the next idle so the popover opens at once
+                    // (the page has ~1,900 buttons).
+                    let app = app.clone();
+                    let standard = standard.clone();
+                    glib::idle_add_local_once(move || {
+                        crate::widgets::clear_box(&standard);
+                        let target = app.clone();
+                        app.fill_standard_emoji(
+                            &standard,
+                            Rc::new(move |text: &str| target.insert_composer_text(text)),
+                        );
+                    });
                 }
             }
         };
@@ -857,9 +997,9 @@ impl AppState {
                 .unwrap_or(true);
             server_page.set_visible(!in_dm);
             tabs.set_visible(!in_dm);
-            if in_dm {
-                stack.set_visible_child_name("standard");
-            } else {
+            // Opens on Standard; server emoji are a tab away.
+            stack.set_visible_child_name("standard");
+            if !in_dm {
                 entry.set_text("");
                 app.fill_emoji_sections(&target, "");
             }
@@ -1530,8 +1670,10 @@ impl AppState {
     fn completion_token(&self) -> Option<(char, String, i32)> {
         let buffer = self.composer.buffer();
         let cursor = buffer.iter_at_mark(&buffer.get_insert());
+        // One character per position (emoji images are U+FFFC), so the
+        // offset below is a buffer offset.
         let before = buffer
-            .text(&buffer.start_iter(), &cursor, false)
+            .slice(&buffer.start_iter(), &cursor, true)
             .to_string();
         let start = before
             .char_indices()
