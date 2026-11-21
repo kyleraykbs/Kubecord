@@ -67,6 +67,7 @@
 //!   the channel is shown again.
 //! - `share`: share mode with a range, a redaction and an added message,
 //!   exported to `KUBECORD_SHARE_EXPORT` (a folder) when set.
+//!   `KUBECORD_SHARE_GIF` adds a GIF to it (`video` for a GIF host's MP4).
 //! - `spelling`: the right-click corrections for a misspelled word.
 //! - `shortcode`: `:smi` lists standard emoji; a closing `:` makes the emoji.
 //! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
@@ -889,6 +890,26 @@ impl AppState {
                 ongoing["type"] = json!(3);
                 ongoing["call"] = json!({"participants": [GRACE.to_string()]});
                 store.apply("MESSAGE_CREATE", &ongoing);
+                // KUBECORD_SHARE_GIF: an animated GIF last, so pictures are
+                // drawn while it plays.
+                // `video`: a GIF host's MP4 (played as a looping video).
+                match std::env::var("KUBECORD_SHARE_GIF").as_deref() {
+                    Ok("video") => {
+                        let url = "https://static.klipy.com/ii/a15b48460c436e1e92c85ffc680932cc/d1/60/IgO8Znh3bKlSCc.mp4";
+                        let mut gif = gif_link_message(id_at(0, 57), ADA);
+                        gif["content"] = json!(url);
+                        gif["embeds"] = json!([{
+                            "type": "video", "url": url,
+                            "video": {
+                                "url": url, "width": 402, "height": 360,
+                                "content_type": "video/mp4", "flags": 0,
+                            },
+                        }]);
+                        store.apply("MESSAGE_CREATE", &gif);
+                    }
+                    Ok(_) => store.apply("MESSAGE_CREATE", &gif_message(id_at(0, 57), ADA)),
+                    Err(_) => {}
+                }
                 self.open_channel(general);
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {

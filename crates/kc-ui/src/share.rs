@@ -27,6 +27,12 @@ const TILE: i32 = 4096;
 const MAX_HIRES_HEIGHT: i32 = 30_000;
 /// A picture taller than this is saved in parts.
 const PART_HEIGHT: i32 = 30_000;
+/// How long a picture is laid out before it is drawn.
+const SETTLE: Duration = Duration::from_millis(300);
+/// The longest a picture waits on images and GIFs still loading.
+const MEDIA_WAIT: Duration = Duration::from_secs(5);
+/// Frames tried before giving up on drawing a picture.
+const MAX_CAPTURE_FRAMES: u32 = 20;
 /// Width of an exported picture (before scaling).
 const RENDER_WIDTH: i32 = 760;
 
@@ -1232,8 +1238,7 @@ impl AppState {
         self.message_overlay.add_overlay(&holder);
         self.set_status("Drawing the picture…");
         let app = self.clone();
-        glib::timeout_add_local_once(Duration::from_millis(600), move || {
-            let result = render_parts(&app.window, &root, options.high_resolution);
+        let drawn = move |result: Result<Vec<gtk::gdk::Texture>, String>| {
             app.message_overlay.remove_overlay(&holder);
             let parts = match result {
                 Ok(parts) => parts,
@@ -1256,6 +1261,15 @@ impl AppState {
                     app.save_files(pngs, &app.share_file_name(), "png");
                 }
             }
+        };
+        let window = self.window.clone();
+        let high_resolution = options.high_resolution;
+        when_media_loaded(&root, move |root| {
+            capture_after_paint(&root, high_resolution, move |captured| {
+                drawn(captured.and_then(|(node, width, height, scale)| {
+                    render_parts(&window, &node, width, height, scale)
+                }));
+            });
         });
     }
 }
@@ -1477,8 +1491,84 @@ fn redacted_row(message: &Message) -> gtk::Box {
     row
 }
 
-/// Renders `root` to pictures at most [`PART_HEIGHT`] tall each.
-fn render_parts(window: &libadwaita::ApplicationWindow, root: &gtk::Box, high_resolution: bool) -> Result<Vec<gtk::gdk::Texture>, String> {
+/// Calls `ready` once the pictures in `root` have loaded (a GIF or image
+/// still downloading would be left out), or after [`MEDIA_WAIT`] for any
+/// that never do.
+fn when_media_loaded(root: &gtk::Box, ready: impl FnOnce(gtk::Box) + 'static) {
+    let started = std::time::Instant::now();
+    let root = root.clone();
+    let mut ready = Some(ready);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let waited = started.elapsed();
+        if waited < SETTLE || (waited < MEDIA_WAIT && media_pending(root.upcast_ref())) {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(ready) = ready.take() {
+            ready(root.clone());
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// Whether a picture under `widget` is still waiting for its image. A
+/// spoiler not revealed never loads, so it is not waited for.
+fn media_pending(widget: &gtk::Widget) -> bool {
+    if let Some(picture) = widget.downcast_ref::<gtk::Picture>()
+        && picture.paintable().is_none()
+        && !picture.has_css_class("kc-unrevealed")
+    {
+        return true;
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if media_pending(&widget) {
+            return true;
+        }
+        child = widget.next_sibling();
+    }
+    false
+}
+
+/// What `root` looks like, taken right after the window draws a frame,
+/// with its size and scale. In between, a playing GIF or video that moved
+/// on a frame has thrown the last drawing away and there is nothing to
+/// take, so a fixed moment was a gamble with GIFs on screen.
+type Captured = (gtk::gsk::RenderNode, i32, i32, f64);
+
+fn capture_after_paint(root: &gtk::Box, high_resolution: bool, done: impl FnOnce(Result<Captured, String>) + 'static) {
+    let Some(clock) = root.frame_clock() else {
+        done(capture(root, high_resolution));
+        return;
+    };
+    let handler = Rc::new(RefCell::new(None));
+    let done = RefCell::new(Some(done));
+    let frames = std::cell::Cell::new(0);
+    let weak = root.downgrade();
+    let slot = handler.clone();
+    let id = clock.connect_after_paint(move |clock| {
+        let Some(root) = weak.upgrade() else {
+            return;
+        };
+        frames.set(frames.get() + 1);
+        let captured = capture(&root, high_resolution);
+        if captured.is_err() && frames.get() < MAX_CAPTURE_FRAMES {
+            root.queue_draw();
+            return;
+        }
+        if let Some(id) = slot.borrow_mut().take() {
+            clock.disconnect(id);
+        }
+        // Drawn outside the frame, once it is finished.
+        if let Some(done) = done.borrow_mut().take() {
+            glib::idle_add_local_once(move || done(captured));
+        }
+    });
+    *handler.borrow_mut() = Some(id);
+    root.queue_draw();
+}
+
+/// The drawing `root` was last drawn with, padding included.
+fn capture(root: &gtk::Box, high_resolution: bool) -> Result<Captured, String> {
     // The whole box, padding included: `width()`/`height()` leave the
     // padding out, and the paintable scales the box into whatever size it
     // is drawn at, which squashed the picture (more so vertically).
@@ -1497,6 +1587,17 @@ fn render_parts(window: &libadwaita::ApplicationWindow, root: &gtk::Box, high_re
     snapshot.scale(scale as f32, scale as f32);
     paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
     let node = snapshot.to_node().ok_or("nothing to draw")?;
+    Ok((node, width, height, scale))
+}
+
+/// Renders `node` to pictures at most [`PART_HEIGHT`] tall each.
+fn render_parts(
+    window: &libadwaita::ApplicationWindow,
+    node: &gtk::gsk::RenderNode,
+    width: i32,
+    height: i32,
+    scale: f64,
+) -> Result<Vec<gtk::gdk::Texture>, String> {
     let renderer = window.renderer().ok_or("no renderer")?;
     let full_width = (f64::from(width) * scale).ceil() as i32;
     let full_height = (f64::from(height) * scale).ceil() as i32;
@@ -1510,7 +1611,7 @@ fn render_parts(window: &libadwaita::ApplicationWindow, root: &gtk::Box, high_re
         while top < part_height {
             let tile = (part_height - top).min(TILE);
             let area = gtk::graphene::Rect::new(0.0, (part_top + top) as f32, full_width as f32, tile as f32);
-            let texture = renderer.render_texture(&node, Some(&area));
+            let texture = renderer.render_texture(node, Some(&area));
             let offset = top as usize * stride;
             texture.download(&mut pixels[offset..offset + stride * tile as usize], stride);
             top += tile;

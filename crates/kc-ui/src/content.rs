@@ -1271,10 +1271,17 @@ impl AppState {
             cover.set_halign(gtk::Align::Fill);
             cover.set_valign(gtk::Align::Fill);
             overlay.add_overlay(&cover);
+            // Not loaded until revealed (a picture being drawn of the chat
+            // does not wait for it).
+            picture.add_css_class("kc-unrevealed");
             let hidden = hidden.clone();
+            let shown = picture.downgrade();
             let click = gtk::GestureClick::new();
             click.connect_released(move |gesture, _, _, _| {
                 if hidden.replace(false) {
+                    if let Some(picture) = shown.upgrade() {
+                        picture.remove_css_class("kc-unrevealed");
+                    }
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                     if let Some(cover) = gesture.widget() {
                         cover.set_visible(false);
