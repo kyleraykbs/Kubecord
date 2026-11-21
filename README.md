@@ -103,6 +103,8 @@ In summary, we aren't doing anything malicious and that's where the main ban ris
     - Search (Including partial favorites search, matched by link)
 - Emoji (Server & Standard)
 - Stickers (all except the stock discord stickers)
+- Message logger
+- Share/export messages
 - Spellchecker
 - Shows typing
     - Ability to hide your own typing
