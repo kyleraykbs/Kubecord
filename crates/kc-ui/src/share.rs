@@ -252,6 +252,7 @@ pub(crate) fn format_text(
     name: &dyn Fn(&Message) -> String,
     body: &dyn Fn(&Message) -> String,
     time: &dyn Fn(&Message) -> String,
+    system: &dyn Fn(&Message) -> Option<String>,
     options: ExportOptions,
 ) -> String {
     let mut out = String::new();
@@ -270,6 +271,23 @@ pub(crate) fn format_text(
                 continue;
             }
             Mark::In => {}
+        }
+        // A call, pin, join...: its sentence on a line of its own.
+        if let Some(sentence) = system(message) {
+            if options.markdown {
+                out.push_str(&format!("\n*{sentence}*"));
+                if options.times {
+                    out.push_str(&format!(" · {}", time(message)));
+                }
+                out.push('\n');
+            } else {
+                if options.times {
+                    out.push_str(&format!("[{}] ", time(message)));
+                }
+                out.push_str(&format!("{sentence}\n"));
+            }
+            last_author = None;
+            continue;
         }
         let text = body(message);
         if options.markdown {
@@ -928,6 +946,14 @@ impl AppState {
                         &|message| state.display_name(guild, &message.author),
                         &|message| message_text(message, &resolver),
                         &|message| crate::content::format_time(&message.timestamp),
+                        &|message| {
+                            message.is_system().then(|| {
+                                let (_, markup) = self.system_text(message, guild, state);
+                                gtk::pango::parse_markup(&markup, '\0')
+                                    .map(|(_, text, _)| text.to_string())
+                                    .unwrap_or(markup)
+                            })
+                        },
                         options,
                     )
                 })
@@ -1133,7 +1159,7 @@ impl AppState {
             }
         };
         click(7);
-        click(2);
+        click(1);
         if let (Some((x, y, _)), Some((x2, y2, _))) = (centre(4), centre(0)) {
             for (x, y) in [(x, y), (x2, y2)] {
                 if let Some(id) = self.share_row_at(x, y, false) {
@@ -1350,15 +1376,19 @@ mod tests {
             }))
             .unwrap()
         };
+        let mut call = message(5, 8, "");
+        call.kind = 3;
         let items = vec![
             (message(1, 7, "hello\nthere"), Mark::In),
             (message(2, 7, "again"), Mark::In),
             (message(3, 8, "secret"), Mark::Redacted),
             (message(4, 8, "bye"), Mark::In),
+            (call, Mark::In),
         ];
         let name = |m: &Message| m.author.username.clone();
         let body = |m: &Message| m.content.clone();
         let time = |_: &Message| "10:00".to_owned();
+        let system = |m: &Message| (m.kind == 3).then(|| format!("{} started a call.", m.author.username));
         let mut options = ExportOptions {
             picture: false,
             times: true,
@@ -1367,15 +1397,15 @@ mod tests {
             high_resolution: false,
         };
         assert_eq!(
-            format_text(&items, &name, &body, &time, options),
-            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye\n"
+            format_text(&items, &name, &body, &time, &system, options),
+            "[10:00] user7: hello\n    there\n[10:00] user7: again\n[redacted message]\n[10:00] user8: bye\n[10:00] user8 started a call.\n"
         );
         options.markdown = true;
         options.leave_out_redacted = true;
         options.times = false;
         assert_eq!(
-            format_text(&items, &name, &body, &time, options),
-            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye\n"
+            format_text(&items, &name, &body, &time, &system, options),
+            "**user7**\nhello\nthere\nagain\n\n**user8**\nbye\n\n*user8 started a call.*\n"
         );
     }
 }

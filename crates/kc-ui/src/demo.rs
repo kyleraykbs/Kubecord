@@ -776,6 +776,16 @@ impl AppState {
             "share" => {
                 // Share mode: a range picked by two clicks, one message
                 // redacted in it and one added outside it; both exports.
+                // Two calls close the channel: one ended, one going on.
+                let mut ended = message(id_at(0, 41), ADA, "");
+                ended["type"] = json!(3);
+                ended["call"] = json!({"participants": [ADA.to_string()],
+                    "ended_timestamp": iso_of(id_at(0, 41) + ((12 * 60 * 1000) << 22))});
+                store.apply("MESSAGE_CREATE", &ended);
+                let mut ongoing = message(id_at(0, 55), GRACE, "");
+                ongoing["type"] = json!(3);
+                ongoing["call"] = json!({"participants": [GRACE.to_string()]});
+                store.apply("MESSAGE_CREATE", &ongoing);
                 self.open_channel(general);
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {

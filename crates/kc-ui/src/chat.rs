@@ -879,15 +879,16 @@ impl AppState {
         (row, body)
     }
 
-    /// Joins, pins, calls and the other messages Discord writes itself.
-    fn system_body(
-        self: &Rc<Self>,
+    /// The icon and sentence (Pango markup) for a message Discord writes
+    /// itself (joins, pins, calls...).
+    pub(crate) fn system_text(
+        &self,
         message: &Message,
         guild: Option<Snowflake>,
         state: &State,
-    ) -> gtk::Box {
+    ) -> (&'static str, String) {
         let name = glib::markup_escape_text(&state.display_name(guild, &message.author));
-        let (icon, text) = match message.kind {
+        match message.kind {
             1 => (
                 "list-add-symbolic",
                 format!("<b>{name}</b> added someone to the group."),
@@ -898,7 +899,16 @@ impl AppState {
             ),
             3 => (
                 "call-start-symbolic",
-                format!("<b>{name}</b> started a call."),
+                match message.call.as_ref().and_then(|call| {
+                    let ended = call.ended_timestamp.as_deref()?;
+                    crate::content::minutes_between(&message.timestamp, ended)
+                }) {
+                    Some(minutes) => format!(
+                        "<b>{name}</b> started a call that lasted {}.",
+                        crate::content::call_length(minutes)
+                    ),
+                    None => format!("<b>{name}</b> started a call."),
+                },
             ),
             4 => (
                 "document-edit-symbolic",
@@ -946,7 +956,17 @@ impl AppState {
                     glib::markup_escape_text(&message.content).to_string()
                 },
             ),
-        };
+        }
+    }
+
+    /// Joins, pins, calls and the other messages Discord writes itself.
+    fn system_body(
+        self: &Rc<Self>,
+        message: &Message,
+        guild: Option<Snowflake>,
+        state: &State,
+    ) -> gtk::Box {
+        let (icon, text) = self.system_text(message, guild, state);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         row.add_css_class("kc-system");
         let image = gtk::Image::from_icon_name(icon);
@@ -1245,6 +1265,9 @@ impl AppState {
         guild: Option<Snowflake>,
         state: &State,
     ) -> gtk::Box {
+        if message.is_system() {
+            return self.system_body(message, guild, state);
+        }
         self.message_body(message, headed, guild, state)
     }
 

@@ -249,10 +249,23 @@ pub struct Message {
     /// The older form of `interaction_metadata`, which names the command.
     #[serde(default)]
     pub interaction: Option<MessageInteraction>,
+    /// For a call message: who joined, and when it ended.
+    #[serde(default)]
+    pub call: Option<MessageCall>,
     /// Local send progress for a message shown before Discord confirms it.
     /// Never sent by Discord; always [`SendState::Sent`] for its messages.
     #[serde(skip)]
     pub send_state: SendState,
+}
+
+/// A DM call a message records.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MessageCall {
+    #[serde(default)]
+    pub participants: Vec<Snowflake>,
+    /// Unset while the call is still going.
+    #[serde(default)]
+    pub ended_timestamp: Option<String>,
 }
 
 /// What a bot's message answers: an interaction, and who started it.
@@ -348,6 +361,7 @@ impl Message {
             application_id: None,
             interaction_metadata: None,
             interaction: None,
+            call: None,
             send_state: SendState::Sending,
         }
     }

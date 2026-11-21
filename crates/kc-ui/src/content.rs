@@ -337,6 +337,24 @@ pub(crate) fn day_key(iso: &str) -> i32 {
     local_time(iso).map_or(0, |time| time.year() * 1000 + time.day_of_year())
 }
 
+/// Whole minutes from `start` to `end` (ISO 8601 times), if both read.
+pub(crate) fn minutes_between(start: &str, end: &str) -> Option<i64> {
+    let start = glib::DateTime::from_iso8601(start, None).ok()?;
+    let end = glib::DateTime::from_iso8601(end, None).ok()?;
+    Some(end.difference(&start).as_minutes())
+}
+
+/// "a few seconds", "1 minute", "2 hours".
+pub(crate) fn call_length(minutes: i64) -> String {
+    match minutes {
+        ..1 => "a few seconds".to_owned(),
+        1 => "a minute".to_owned(),
+        2..60 => format!("{minutes} minutes"),
+        60..120 => "an hour".to_owned(),
+        _ => format!("{} hours", minutes / 60),
+    }
+}
+
 fn local_time(iso: &str) -> Option<glib::DateTime> {
     glib::DateTime::from_iso8601(iso, None)
         .ok()?
