@@ -491,6 +491,28 @@ pub fn run() -> glib::ExitCode {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
                 app_state.show_settings_page(&page);
+                // `KUBECORD_SETTINGS_SCROLL=bottom`: the page's end, for a
+                // screenshot of what is below the fold.
+                if std::env::var("KUBECORD_SETTINGS_SCROLL").as_deref() == Ok("bottom") {
+                    let window = app_state.window.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                        let mut stack: Vec<gtk::Widget> = vec![window.upcast()];
+                        while let Some(widget) = stack.pop() {
+                            if let Some(scroll) = widget.downcast_ref::<gtk::ScrolledWindow>()
+                                && scroll.is_mapped()
+                                && scroll.ancestor(adw::Dialog::static_type()).is_some()
+                            {
+                                let adjustment = scroll.vadjustment();
+                                adjustment.set_value(adjustment.upper());
+                            }
+                            let mut child = widget.first_child();
+                            while let Some(next) = child {
+                                child = next.next_sibling();
+                                stack.push(next);
+                            }
+                        }
+                    });
+                }
             });
         }
         if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {

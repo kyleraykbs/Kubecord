@@ -913,30 +913,60 @@ impl AppState {
         let limits = adw::PreferencesGroup::new();
         limits.set_title("Size Limits");
         limits.set_description(Some(
-            "Past a limit, the largest attachments go first; then text, oldest first: everything else before messages that would notify, and those before channels you were viewing. Only kinds with Clean Up on are removed. 0 means no limit.",
+            "Past a limit, attachments go first, the largest first, until none are left to drop; only then text, oldest first: everything else before messages that would notify, and those before channels you were viewing. Only kinds with Clean Up on are removed.",
         ));
         type Limit = fn(&mut LoggerPrefs) -> &mut u32;
-        let sizes: [(&str, &str, Limit); 4] = [
+        // (title, subtitle, setting, step in MB)
+        let sizes: [(&str, &str, Limit, f64); 4] = [
             (
                 "Media per Message",
-                "MB kept from one message; the largest attachments are left out first.",
+                "Kept from one message; the largest attachments are left out first.",
                 |prefs| &mut prefs.per_message_mb,
+                1.0,
             ),
-            ("Per Week", "MB the log may hold of the last week.", |prefs| &mut prefs.week_mb),
-            ("Per Month", "MB the log may hold of the last month.", |prefs| &mut prefs.month_mb),
-            ("Per Year", "MB the log may hold of the last year.", |prefs| &mut prefs.year_mb),
+            (
+                "Per Week",
+                "The most the log may hold of what arrived in the last week.",
+                |prefs| &mut prefs.week_cap_mb,
+                256.0,
+            ),
+            (
+                "Per Month",
+                "The most the log may hold of what arrived in the last month.",
+                |prefs| &mut prefs.month_cap_mb,
+                256.0,
+            ),
+            (
+                "Per Year",
+                "The most the log may hold of what arrived in the last year.",
+                |prefs| &mut prefs.year_cap_mb,
+                1024.0,
+            ),
         ];
-        for (title, subtitle, limit) in sizes {
-            let row = adw::SpinRow::with_range(0.0, 1_000_000.0, 1.0);
+        for (title, subtitle, limit, step) in sizes {
+            let row = adw::ActionRow::new();
             row.set_title(title);
             row.set_subtitle(subtitle);
-            row.set_digits(0);
-            row.set_value(f64::from(*limit(&mut self.capture.borrow_mut().logger)));
+            row.set_subtitle_lines(0);
+            let spin = gtk::SpinButton::with_range(0.0, 10_000_000.0, step);
+            spin.set_digits(0);
+            spin.set_valign(gtk::Align::Center);
+            spin.set_width_chars(9);
+            spin.set_numeric(false);
+            // Shown as "No limit", "500 MB" or "2 GB"; typed the same way.
+            spin.connect_output(|spin| {
+                spin.set_text(&crate::logger::size_text(spin.value().round().max(0.0) as u32));
+                glib::Propagation::Stop
+            });
+            spin.connect_input(|spin| crate::logger::parse_size(&spin.text()).map(|mb| Ok(f64::from(mb))));
+            spin.set_value(f64::from(*limit(&mut self.capture.borrow_mut().logger)));
             let app = self.clone();
-            row.connect_value_notify(move |row| {
-                let value = row.value().round().max(0.0) as u32;
+            spin.connect_value_changed(move |spin| {
+                let value = spin.value().round().max(0.0) as u32;
                 app.update_prefs(|prefs| *limit(&mut prefs.logger) = value);
             });
+            row.add_suffix(&spin);
+            row.set_activatable_widget(Some(&spin));
             limits.add(&row);
         }
         page.append(&limits);

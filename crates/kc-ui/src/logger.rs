@@ -104,12 +104,42 @@ pub struct LoggerPrefs {
     /// attachments are left out first.
     pub per_message_mb: u32,
     /// The most the log may hold of what arrived in the last week, month
-    /// and year, in MB (0: no limit).
-    pub week_mb: u32,
-    pub month_mb: u32,
-    pub year_mb: u32,
+    /// and year, in MB (0: no limit). Named apart from the first version of
+    /// these settings, whose zeros (no limit) were its defaults.
+    pub week_cap_mb: u32,
+    pub month_cap_mb: u32,
+    pub year_cap_mb: u32,
     /// Which kinds the size limits may remove.
     pub collect: Collect,
+}
+
+/// A size limit as shown: "No limit", "500 MB", "1 GB", "1.5 GB".
+pub(crate) fn size_text(mb: u32) -> String {
+    match mb {
+        0 => "No limit".to_owned(),
+        mb if mb >= 1024 => {
+            let gb = format!("{:.2}", f64::from(mb) / 1024.0);
+            format!("{} GB", gb.trim_end_matches('0').trim_end_matches('.'))
+        }
+        mb => format!("{mb} MB"),
+    }
+}
+
+/// A size limit as typed ("2 GB", "500", "500mb", "no limit"), in MB.
+pub(crate) fn parse_size(text: &str) -> Option<u32> {
+    let text = text.trim().to_lowercase();
+    if text.is_empty() || text.starts_with("no") || text == "none" {
+        return Some(0);
+    }
+    let (number, factor) = if let Some(number) = text.strip_suffix("gb") {
+        (number, 1024.0)
+    } else if let Some(number) = text.strip_suffix("mb") {
+        (number, 1.0)
+    } else {
+        (text.as_str(), 1.0)
+    };
+    let value: f64 = number.trim().parse().ok()?;
+    (value >= 0.0).then(|| (value * factor).round() as u32)
 }
 
 /// Which kinds of message the size limits may remove.
@@ -147,9 +177,9 @@ impl Default for LoggerPrefs {
                 media: Keep::Off,
             },
             per_message_mb: 20,
-            week_mb: 0,
-            month_mb: 0,
-            year_mb: 0,
+            week_cap_mb: 1024,
+            month_cap_mb: 2 * 1024,
+            year_cap_mb: 20 * 1024,
             collect: Collect::default(),
         }
     }
@@ -297,7 +327,7 @@ pub(crate) fn set_prefs(prefs: LoggerPrefs, notify: NotifyPrefs) {
         Err(_) => false,
     };
     // Tighter limits apply at once (off the interface's thread).
-    if changed && prefs.week_mb + prefs.month_mb + prefs.year_mb > 0 {
+    if changed && prefs.week_cap_mb + prefs.month_cap_mb + prefs.year_cap_mb > 0 {
         std::thread::spawn(move || enforce_limits(&prefs));
     }
 }
@@ -422,7 +452,7 @@ fn download_media(message: &Message, prefs: LoggerPrefs) {
             }
         }
         // New media may take the log past a limit.
-        if prefs.week_mb + prefs.month_mb + prefs.year_mb > 0 {
+        if prefs.week_cap_mb + prefs.month_cap_mb + prefs.year_cap_mb > 0 {
             let _ = tokio::task::spawn_blocking(move || enforce_limits(&prefs)).await;
         }
     });
@@ -481,7 +511,7 @@ fn enforce_on(db: &Connection, prefs: &LoggerPrefs, now: i64) -> rusqlite::Resul
     }
     let ranks_sql = ranks.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     const DAY: i64 = 24 * 60 * 60;
-    let windows: Vec<(i64, i64)> = [(7, prefs.week_mb), (30, prefs.month_mb), (365, prefs.year_mb)]
+    let windows: Vec<(i64, i64)> = [(7, prefs.week_cap_mb), (30, prefs.month_cap_mb), (365, prefs.year_cap_mb)]
         .into_iter()
         .filter(|(_, mb)| *mb > 0)
         .map(|(days, mb)| (now - days * DAY, i64::from(mb) * 1024 * 1024))
@@ -1053,7 +1083,7 @@ mod tests {
             params![mb, mb / 2],
         )
         .unwrap();
-        let mut prefs = LoggerPrefs { week_mb: 1, ..LoggerPrefs::default() };
+        let mut prefs = LoggerPrefs { week_cap_mb: 1, month_cap_mb: 0, year_cap_mb: 0, ..LoggerPrefs::default() };
         prefs.collect = Collect { viewed: true, notifying: true, other: true };
         let removed = enforce_on(&db, &prefs, 40).unwrap();
         assert_eq!(removed, vec!["big".to_owned()]);
@@ -1097,7 +1127,7 @@ mod tests {
         db.execute("INSERT INTO logged_edits (message_id, edited_at, content) VALUES (1, 't', 'before')", [])
             .unwrap();
         // Over the month's 1 MB (2.6 MB) and the week's 0.5 MB (0.6 MB).
-        let prefs = LoggerPrefs { week_mb: 0, month_mb: 1, ..LoggerPrefs::default() };
+        let prefs = LoggerPrefs { week_cap_mb: 0, month_cap_mb: 1, year_cap_mb: 0, ..LoggerPrefs::default() };
         let removed = enforce_on(&db, &prefs, now).unwrap();
         // Dropping the old media was enough for the month: no text went.
         assert_eq!(removed, vec!["old".to_owned()]);
@@ -1105,14 +1135,31 @@ mod tests {
         assert_eq!(rows, 2);
         // A week limit below the text: no media is left, so text goes,
         // with its earlier versions.
-        let prefs = LoggerPrefs { week_mb: 0, month_mb: 0, year_mb: 0, ..LoggerPrefs::default() };
+        let prefs = LoggerPrefs { week_cap_mb: 0, month_cap_mb: 0, year_cap_mb: 0, ..LoggerPrefs::default() };
         assert!(enforce_on(&db, &prefs, now).unwrap().is_empty());
         db.execute("UPDATE logged SET json = ?1 WHERE id = 1", params!["x".repeat(2 * 1024 * 1024)]).unwrap();
-        let prefs = LoggerPrefs { week_mb: 1, ..LoggerPrefs::default() };
+        let prefs = LoggerPrefs { week_cap_mb: 1, month_cap_mb: 0, year_cap_mb: 0, ..LoggerPrefs::default() };
         enforce_on(&db, &prefs, now).unwrap();
         let edits: i64 = db.query_row("SELECT COUNT(*) FROM logged_edits", [], |row| row.get(0)).unwrap();
         let left: i64 = db.query_row("SELECT COUNT(*) FROM logged", [], |row| row.get(0)).unwrap();
         assert_eq!((left, edits), (1, 0));
+    }
+
+    #[test]
+    fn sizes_read_and_show_in_mb_or_gb() {
+        assert_eq!(size_text(0), "No limit");
+        assert_eq!(size_text(20), "20 MB");
+        assert_eq!(size_text(1024), "1 GB");
+        assert_eq!(size_text(1536), "1.5 GB");
+        assert_eq!(size_text(20 * 1024), "20 GB");
+        assert_eq!(parse_size("2 GB"), Some(2048));
+        assert_eq!(parse_size("1.5gb"), Some(1536));
+        assert_eq!(parse_size("500"), Some(500));
+        assert_eq!(parse_size("500 MB"), Some(500));
+        assert_eq!(parse_size("No limit"), Some(0));
+        assert_eq!(parse_size("lots"), None);
+        let defaults = LoggerPrefs::default();
+        assert_eq!((defaults.week_cap_mb, defaults.month_cap_mb, defaults.year_cap_mb), (1024, 2048, 20480));
     }
 
     #[test]
