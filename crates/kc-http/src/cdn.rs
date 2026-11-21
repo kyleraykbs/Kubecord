@@ -65,6 +65,14 @@ pub fn guild_icon(guild_id: Snowflake, hash: &str, pixels: u32) -> String {
     )
 }
 
+/// An app's icon.
+pub fn app_icon(app_id: Snowflake, hash: &str, pixels: u32) -> String {
+    format!(
+        "{CDN_BASE}/app-icons/{app_id}/{hash}.png?size={}",
+        cdn_size(pixels)
+    )
+}
+
 /// Group DM icon.
 pub fn channel_icon(channel_id: Snowflake, hash: &str, pixels: u32) -> String {
     format!(

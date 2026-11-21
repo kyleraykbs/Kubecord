@@ -52,17 +52,22 @@ fn next_low() -> u32 {
 }
 
 /// One autocomplete suggestion.
-struct Completion {
+pub(crate) struct Completion {
     /// Shown in the list.
-    title: String,
-    detail: String,
-    icon: Option<String>,
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) icon: Option<String>,
     /// A standard emoji shown instead of an icon.
-    glyph: Option<String>,
+    pub(crate) glyph: Option<String>,
     /// Text placed in the composer.
-    display: String,
+    pub(crate) display: String,
     /// What `display` becomes when the message is sent.
-    raw: String,
+    pub(crate) raw: String,
+    /// The buffer range `display` replaces; `None` for the `@`/`#`/`:`
+    /// word at the cursor.
+    pub(crate) span: Option<(i32, i32)>,
+    /// Whether a space follows what is put in.
+    pub(crate) trail: bool,
 }
 
 /// Emoji size in the composer, drawn in Discord's art.
@@ -205,6 +210,9 @@ thread_local! {
     /// The misspelled word a correction menu is open for: its buffer range
     /// and text.
     static SPELL_TARGET: std::cell::RefCell<Option<(usize, usize, String)>> = const { std::cell::RefCell::new(None) };
+    /// The suggestions showing only hint (option names after a command):
+    /// Enter sends rather than taking one.
+    static COMPLETION_HINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A `:` was just typed (it may close a `:shortcode:`).
     static COLON_TYPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A redraw of the composer's emoji is queued.
@@ -254,9 +262,10 @@ impl AppState {
                     if modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
                         return glib::Propagation::Proceed;
                     }
-                    if completing {
+                    if completing && !COMPLETION_HINT.get() {
                         app.accept_completion();
                     } else {
+                        app.completion.popdown();
                         app.send_current();
                     }
                     glib::Propagation::Stop
@@ -429,12 +438,9 @@ impl AppState {
         let iter = view.iter_at_location(bx, by)?;
         let offset = iter.offset().max(0) as usize;
         let text = self.composer_positions();
-        let Some((start, end)) = crate::spelling::misspelled_spans(&text)
+        let (start, end) = crate::spelling::misspelled_spans(&text)
             .into_iter()
-            .find(|(start, end)| (*start..*end).contains(&offset))
-        else {
-            return None;
-        };
+            .find(|(start, end)| (*start..*end).contains(&offset))?;
         let word: String = text.chars().skip(start).take(end - start).collect();
 
         let corrections = gtk::gio::Menu::new();
@@ -862,6 +868,20 @@ impl AppState {
         let Some((_, http, _)) = self.active() else {
             return;
         };
+        // A slash command runs instead of being sent (a built-in one turns
+        // into the text to send).
+        if editing.is_none() && uploads.is_empty() && content.starts_with('/') {
+            match self.send_slash(&content) {
+                crate::slash::Sent::Handled => {
+                    if self.composer_text().is_empty() {
+                        TOKENS.with_borrow_mut(Vec::clear);
+                    }
+                    return;
+                }
+                crate::slash::Sent::Text(text) => content = text,
+                crate::slash::Sent::NotCommand => {}
+            }
+        }
         if content.is_empty() && uploads.is_empty() {
             return;
         }
@@ -1065,6 +1085,11 @@ impl AppState {
         if let Some((_, _, store)) = self.active() {
             store.drop_pending(channel, nonce);
         }
+    }
+
+    /// Puts a command that failed back, to fix and run again.
+    pub(crate) fn restore_command(&self, text: &str) {
+        self.restore_draft(text);
     }
 
     /// Puts unsent text back unless the user has already typed something new.
@@ -2027,7 +2052,20 @@ impl AppState {
         Some((trigger, query.to_lowercase(), offset))
     }
 
+    /// Shows suggestions again for what is typed now.
+    pub(crate) fn refresh_completion(self: &Rc<Self>) {
+        self.update_completion();
+    }
+
     fn update_completion(self: &Rc<Self>) {
+        // A command line has suggestions of its own.
+        let buffer = self.composer.buffer();
+        let cursor = buffer.iter_at_mark(&buffer.get_insert());
+        let before = buffer.slice(&buffer.start_iter(), &cursor, true).to_string();
+        if let Some((matches, hint)) = self.slash_completions(&before) {
+            self.show_completions(matches, hint);
+            return;
+        }
         let Some((trigger, query, _)) = self.completion_token() else {
             self.completion.popdown();
             return;
@@ -2066,6 +2104,8 @@ impl AppState {
                                     hit.then(|| Completion {
                                         display: format!("@{name}"),
                                         raw: format!("<@{}>", user.id),
+                                        span: None,
+                                        trail: true,
                                         detail: user.username.clone(),
                                         glyph: None,
                                         icon: Some(cdn::user_avatar(
@@ -2103,6 +2143,8 @@ impl AppState {
                                 glyph: None,
                                 display: format!("#{}", channel.display_name()),
                                 raw: format!("<#{}>", channel.id),
+                                span: None,
+                                trail: true,
                             })
                             .collect(),
                         // Server emoji first, then standard ones by shortcode
@@ -2121,6 +2163,8 @@ impl AppState {
                                     glyph: None,
                                     display: format!(":{}:", emoji.name),
                                     raw: emoji.mention(),
+                                    span: None,
+                                    trail: true,
                                 })
                                 .collect();
                             let room = COMPLETIONS.saturating_sub(found.len());
@@ -2147,6 +2191,13 @@ impl AppState {
             gateway.search_members(guild, &query, 10);
         }
 
+        self.show_completions(matches, false);
+    }
+
+    /// Shows `matches` in the list above the composer (or hides it when
+    /// there are none). A `hint` list leaves Enter to send.
+    fn show_completions(&self, matches: Vec<Completion>, hint: bool) {
+        COMPLETION_HINT.set(hint);
         if matches.is_empty() {
             self.completion.popdown();
             return;
@@ -2199,11 +2250,30 @@ impl AppState {
             .map_or(0, |row| row.index()) as usize;
         let chosen = COMPLETIONS_SHOWN
             .with_borrow(|shown| shown.get(index).map(|c| (c.display.clone(), c.raw.clone())));
+        let span = COMPLETIONS_SHOWN
+            .with_borrow(|shown| shown.get(index).map(|c| (c.span, c.trail)));
+        let buffer = self.composer.buffer();
+        if let (Some((display, raw)), Some((Some((from, to)), trail))) = (chosen.clone(), span) {
+            let mut start = buffer.iter_at_offset(from);
+            let mut end = buffer.iter_at_offset(to);
+            buffer.delete(&mut start, &mut end);
+            buffer.insert(&mut start, &display);
+            if trail {
+                buffer.insert(&mut start, " ");
+            }
+            buffer.place_cursor(&start);
+            if display != raw {
+                remember_token(display, raw);
+            }
+            // What comes next (a subcommand, the options) may have
+            // suggestions of its own.
+            self.completion.popdown();
+            return;
+        }
         let (Some((display, raw)), Some((_, _, offset))) = (chosen, self.completion_token()) else {
             self.completion.popdown();
             return;
         };
-        let buffer = self.composer.buffer();
         let mut start = buffer.iter_at_offset(offset);
         let mut end = buffer.iter_at_mark(&buffer.get_insert());
         buffer.delete(&mut start, &mut end);
@@ -2286,6 +2356,8 @@ fn standard_emoji_matches(query: &str, limit: usize) -> Vec<Completion> {
             glyph: Some(emoji.as_str().to_owned()),
             display: emoji.as_str().to_owned(),
             raw: emoji.as_str().to_owned(),
+            span: None,
+            trail: true,
         })
         .collect()
 }

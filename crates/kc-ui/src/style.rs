@@ -310,6 +310,18 @@ button.kc-link-button:hover {
     box-shadow: 0 2px 8px alpha(black, 0.35);
 }
 
+/* App buttons: Discord's green "success" style; section thumbnails. */
+button.kc-success {
+    background-color: #248046;
+    color: white;
+}
+button.kc-success:hover {
+    background-color: #1a6334;
+}
+image.kc-thumbnail {
+    border-radius: 8px;
+}
+
 /* Message text with emoji images (a text view) reads like the labels. */
 .kc-rich,
 .kc-rich text {

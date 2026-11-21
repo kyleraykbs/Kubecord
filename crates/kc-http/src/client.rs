@@ -1065,6 +1065,28 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    /// The commands apps offer in `scope`.
+    pub async fn command_index(
+        &self,
+        scope: crate::commands::CommandScope,
+    ) -> Result<crate::commands::CommandIndex> {
+        let value = self.request_json(Method::GET, &scope.path(), None).await?;
+        Ok(crate::commands::CommandIndex::from_value(&value))
+    }
+
+    /// Sends an interaction built by [`crate::InteractionPlace`]. Discord
+    /// answers with no content; the outcome arrives on the gateway.
+    pub async fn interact(&self, body: &Value) -> Result<()> {
+        self.request_json(Method::POST, "/interactions", Some(body))
+            .await
+            .map(|_| ())
+    }
+
+    /// A fresh nonce, to match an interaction with its answer.
+    pub fn new_nonce() -> String {
+        nonce().to_string()
+    }
+
     pub async fn send_message(
         &self,
         channel_id: Snowflake,

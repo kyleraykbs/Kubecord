@@ -236,10 +236,38 @@ pub struct Message {
     /// Forwarded messages carry their content here.
     #[serde(default)]
     pub message_snapshots: Vec<MessageSnapshot>,
+    /// Bot buttons, select menus and (with [`Message::FLAG_COMPONENTS_V2`])
+    /// layout, as Discord sends them; the interface reads them as it draws.
+    #[serde(default)]
+    pub components: Vec<serde_json::Value>,
+    /// The app that sent this in answer to an interaction.
+    #[serde(default)]
+    pub application_id: Option<Snowflake>,
+    /// The command (or button) this message answers, and who used it.
+    #[serde(default)]
+    pub interaction_metadata: Option<MessageInteraction>,
+    /// The older form of `interaction_metadata`, which names the command.
+    #[serde(default)]
+    pub interaction: Option<MessageInteraction>,
     /// Local send progress for a message shown before Discord confirms it.
     /// Never sent by Discord; always [`SendState::Sent`] for its messages.
     #[serde(skip)]
     pub send_state: SendState,
+}
+
+/// What a bot's message answers: an interaction, and who started it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MessageInteraction {
+    #[serde(default)]
+    pub id: Option<Snowflake>,
+    /// 2 = a command, 3 = a button or menu, 5 = a submitted form.
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    /// The command as typed, subcommands included (`"music play"`).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub user: Option<crate::User>,
 }
 
 /// Where a message the user just sent is in its journey to Discord.
@@ -316,6 +344,10 @@ impl Message {
             webhook_id: None,
             nonce: Some(serde_json::Value::String(nonce)),
             message_snapshots: Vec::new(),
+            components: Vec::new(),
+            application_id: None,
+            interaction_metadata: None,
+            interaction: None,
             send_state: SendState::Sending,
         }
     }
@@ -325,6 +357,28 @@ impl Message {
     pub const CHAT_INPUT_COMMAND: u8 = 20;
     pub const CONTEXT_MENU_COMMAND: u8 = 23;
     pub const FLAG_SUPPRESS_EMBEDS: u64 = 1 << 2;
+    /// Only the user who used the command sees it.
+    pub const FLAG_EPHEMERAL: u64 = 1 << 6;
+    /// The app is still working on its answer ("is thinking…").
+    pub const FLAG_LOADING: u64 = 1 << 7;
+    /// Laid out with components alone (text, sections, containers...).
+    pub const FLAG_COMPONENTS_V2: u64 = 1 << 15;
+
+    /// The command this message answers (`/music play`), and who used it.
+    pub fn command_used(&self) -> Option<(String, Option<&crate::User>)> {
+        let interaction = self.interaction.as_ref().or(self.interaction_metadata.as_ref())?;
+        let name = self
+            .interaction
+            .as_ref()
+            .and_then(|old| old.name.clone())
+            .or_else(|| interaction.name.clone())?;
+        let user = self
+            .interaction_metadata
+            .as_ref()
+            .and_then(|meta| meta.user.as_ref())
+            .or(interaction.user.as_ref());
+        Some((name, user))
+    }
     pub const DEFAULT: u8 = 0;
 
     pub fn is_reply(&self) -> bool {

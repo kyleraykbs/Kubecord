@@ -271,6 +271,16 @@ pub static VOICE_COMMANDS: LazyLock<
 pub static GATEWAYS: LazyLock<Mutex<HashMap<AccountId, kc_gateway::session::GatewayHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Each account's gateway session id (from READY), which interactions
+/// name so Discord answers on this connection.
+pub static SESSION_IDS: LazyLock<Mutex<HashMap<AccountId, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The gateway session id of an account, once it is ready.
+pub fn session_id(account: AccountId) -> Option<String> {
+    SESSION_IDS.lock().ok()?.get(&account).cloned()
+}
+
 /// The gateway handle of an account, when it is connected.
 pub fn gateway(account: AccountId) -> Option<kc_gateway::session::GatewayHandle> {
     GATEWAYS.lock().ok()?.get(&account).cloned()
@@ -453,6 +463,13 @@ pub enum UiEvent {
     VoicePing {
         account: AccountId,
         millis: Option<u32>,
+    },
+    /// An app answered an interaction (success, failure, a form to fill
+    /// in, or autocomplete suggestions): the gateway event as sent.
+    Interaction {
+        account: AccountId,
+        name: String,
+        data: serde_json::Value,
     },
     /// A DM call started or stopped ringing us.
     CallRinging {
@@ -854,7 +871,26 @@ fn spawn_account(
                         GatewayEvent::Dispatch { name, data } => {
                             store.apply(&name, &data);
                             match name.as_str() {
+                                "INTERACTION_CREATE"
+                                | "INTERACTION_SUCCESS"
+                                | "INTERACTION_FAILURE"
+                                | "INTERACTION_MODAL_CREATE"
+                                | "INTERACTION_IFRAME_MODAL_CREATE"
+                                | "APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE" => {
+                                    let _ = ui
+                                        .send(UiEvent::Interaction {
+                                            account,
+                                            name: name.clone(),
+                                            data: data.clone(),
+                                        })
+                                        .await;
+                                }
                                 "READY" => {
+                                    if let (Some(id), Ok(mut ids)) =
+                                        (data["session_id"].as_str(), SESSION_IDS.lock())
+                                    {
+                                        ids.insert(account, id.to_owned());
+                                    }
                                     voice.self_user_id =
                                         serde_json::from_value(data["user"]["id"].clone()).ok();
                                     if voice.connection.is_some() {

@@ -60,6 +60,9 @@
 //! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
 //! - `emoji-picker`: the emoji picker (opening on Standard) and emoji typed
 //!   in the composer, in Discord's art.
+//! - `bot`: an app's messages (buttons, menus, a private reply, thinking,
+//!   a components layout) and the composer's command suggestions.
+//! - `bot-form`: a form an app opened.
 //! - `spelling`: the right-click corrections for a misspelled word.
 //! - `shortcode`: `:smi` lists standard emoji; a closing `:` makes the emoji.
 //! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
@@ -619,6 +622,127 @@ impl AppState {
                             }
                         });
                     }
+                });
+            }
+            "bot" | "bot-form" => {
+                // An app's messages: a command's answer with buttons and a
+                // menu, one only you see, one still thinking, and one laid
+                // out with components; then the composer's command list.
+                let bot = json!({"id": "900", "username": "Groovy", "bot": true});
+                let me = json!({"id": "1", "username": "demo"});
+                let mut played = message(id_at(0, 41), 2, "Now playing **Never Gonna Give You Up** 🎶");
+                played["author"] = bot.clone();
+                played["type"] = json!(20);
+                played["application_id"] = json!("900");
+                played["interaction_metadata"] = json!({"id": "5", "type": 2, "name": "music play", "user": me});
+                played["interaction"] = json!({"id": "5", "type": 2, "name": "music play", "user": me});
+                played["components"] = json!([
+                    {"type": 1, "components": [
+                        {"type": 2, "style": 1, "label": "Pause", "custom_id": "pause", "emoji": {"name": "⏸️"}},
+                        {"type": 2, "style": 2, "label": "Skip", "custom_id": "skip"},
+                        {"type": 2, "style": 3, "label": "Like", "custom_id": "like", "emoji": {"name": "👍"}},
+                        {"type": 2, "style": 4, "label": "Stop", "custom_id": "stop"},
+                        {"type": 2, "style": 5, "label": "Lyrics", "url": "https://example.com"},
+                        {"type": 2, "style": 2, "label": "Queue", "custom_id": "queue", "disabled": true}
+                    ]},
+                    {"type": 1, "components": [
+                        {"type": 3, "custom_id": "volume", "placeholder": "Volume", "options": [
+                            {"label": "Quiet", "value": "25", "description": "25%"},
+                            {"label": "Normal", "value": "50", "default": true},
+                            {"label": "Loud", "value": "100", "emoji": {"name": "🔊"}}
+                        ]}
+                    ]}
+                ]);
+                store.apply("MESSAGE_CREATE", &played);
+                let mut private = message(id_at(0, 42), 2, "Your playlist was saved.");
+                private["author"] = bot.clone();
+                private["type"] = json!(20);
+                private["flags"] = json!(64);
+                private["application_id"] = json!("900");
+                private["interaction_metadata"] = json!({"id": "6", "type": 2, "user": me});
+                private["interaction"] = json!({"id": "6", "type": 2, "name": "playlist save", "user": me});
+                store.apply("MESSAGE_CREATE", &private);
+                let mut thinking = message(id_at(0, 43), 2, "");
+                thinking["author"] = bot.clone();
+                thinking["type"] = json!(20);
+                thinking["flags"] = json!(128);
+                thinking["application_id"] = json!("900");
+                thinking["interaction"] = json!({"id": "7", "type": 2, "name": "lyrics", "user": me});
+                store.apply("MESSAGE_CREATE", &thinking);
+                let mut laid_out = message(id_at(0, 44), 2, "");
+                laid_out["author"] = bot;
+                laid_out["flags"] = json!(1 << 15);
+                laid_out["application_id"] = json!("900");
+                laid_out["components"] = json!([
+                    {"type": 17, "accent_color": 5793266, "components": [
+                        {"type": 10, "content": "## Server Stats\nMembers online: **42**"},
+                        {"type": 14, "divider": true, "spacing": 1},
+                        {"type": 9, "components": [
+                            {"type": 10, "content": "Top track this week\n*Never Gonna Give You Up*"}
+                        ], "accessory": {"type": 2, "style": 1, "label": "Play", "custom_id": "play-top"}},
+                        {"type": 1, "components": [
+                            {"type": 5, "custom_id": "who", "placeholder": "Pick a member"}
+                        ]}
+                    ]}
+                ]);
+                store.apply("MESSAGE_CREATE", &laid_out);
+                self.open_channel(general);
+
+                self.seed_commands(kc_http::CommandIndex::from_value(&json!({
+                    "applications": [{"id": "900", "name": "Groovy"}],
+                    "application_commands": [
+                        {"id": "50", "application_id": "900", "version": "1", "type": 1, "name": "music",
+                         "description": "Play music", "options": [
+                            {"type": 1, "name": "play", "description": "Play a song", "options": [
+                                {"type": 3, "name": "song", "description": "What to play", "required": true},
+                                {"type": 5, "name": "loop", "description": "Repeat it"}
+                            ]},
+                            {"type": 1, "name": "stop", "description": "Stop playing"}
+                         ]},
+                        {"id": "51", "application_id": "900", "version": "1", "type": 1, "name": "mood",
+                         "description": "Set the mood", "options": [
+                            {"type": 3, "name": "kind", "description": "Which", "required": true,
+                             "choices": [{"name": "Chill", "value": "chill"}, {"name": "Party", "value": "party"}]}
+                         ]}
+                    ]
+                })));
+                let app = self.clone();
+                let form = mode == "bot-form";
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    if form {
+                        app.show_app_form(&json!({
+                            "id": "70", "nonce": "1", "channel_id": GENERAL.to_string(),
+                            "title": "Song Request", "custom_id": "request",
+                            "application": {"id": "900", "name": "Groovy"},
+                            "components": [
+                                {"type": 1, "components": [{"type": 4, "custom_id": "song", "style": 1,
+                                    "label": "Song name", "placeholder": "Never Gonna Give You Up",
+                                    "required": true, "min_length": 2, "max_length": 100}]},
+                                {"type": 10, "content": "Tell us why you like it."},
+                                {"type": 18, "label": "Why?", "description": "A few words",
+                                 "component": {"type": 4, "custom_id": "why", "style": 2, "required": false}},
+                                {"type": 18, "label": "Mood",
+                                 "component": {"type": 3, "custom_id": "mood", "options": [
+                                    {"label": "Chill", "value": "chill"}, {"label": "Party", "value": "party"}]}}
+                            ]
+                        }));
+                        return;
+                    }
+                    let buffer = app.composer.buffer();
+                    for (typed, label) in [
+                        ("/mu", "/mu"),
+                        ("sic ", "/music "),
+                        ("play ", "/music play "),
+                        ("never gonna lo", "/music play never gonna lo"),
+                    ] {
+                        buffer.insert_at_cursor(typed);
+                        app.refresh_completion();
+                        eprintln!("demo: {label:?} -> {:?}", crate::composer::completion_titles());
+                    }
+                    app.set_composer_text("/mood kind:Pa");
+                    app.refresh_completion();
+                    eprintln!("demo: \"/mood kind:Pa\" -> {:?}", crate::composer::completion_titles());
+                    app.set_composer_text("");
                 });
             }
             "spelling" => {

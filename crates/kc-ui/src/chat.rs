@@ -976,6 +976,10 @@ impl AppState {
     ) -> gtk::Box {
         let body = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
+        // An app's answer to a command says who used which.
+        if let Some((command, user)) = message.command_used() {
+            body.append(&self.command_preview(&command, user, guild, state));
+        }
         if let Some(reference) = &message.message_reference
             && message.message_snapshots.is_empty()
         {
@@ -1052,6 +1056,18 @@ impl AppState {
             row.append(&time);
         }
 
+        // The app is still working on its answer.
+        if message.flags & Message::FLAG_LOADING != 0 && message.content.is_empty() {
+            let thinking = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let spinner = gtk::Spinner::new();
+            spinner.start();
+            thinking.append(&spinner);
+            thinking.append(&label(
+                &format!("{} is thinking…", state.display_name(guild, &message.author)),
+                &["dim-label"],
+            ));
+            column.append(&thinking);
+        }
         if let Some(text) = self.text_widget(&message.content, guild, state) {
             // A message that is just a link to its own media embed shows only
             // the media, as the official client does.
@@ -1143,11 +1159,39 @@ impl AppState {
                 }
             }
         }
+        if let Some(components) = self.components_widget(message, guild, state) {
+            column.append(&components);
+        }
         for sticker in &message.sticker_items {
             column.append(&self.sticker_widget(sticker));
         }
         if !message.reactions.is_empty() {
             column.append(&self.reactions_row(message));
+        }
+        // Only this user sees it (Discord keeps no copy): it can be put away.
+        if message.flags & Message::FLAG_EPHEMERAL != 0 {
+            let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let eye = gtk::Image::from_icon_name("view-reveal-symbolic");
+            eye.set_pixel_size(12);
+            footer.append(&eye);
+            let only_you = gtk::Label::new(Some("Only you can see this ·"));
+            only_you.add_css_class("caption");
+            only_you.add_css_class("dim-label");
+            footer.append(&only_you);
+            let dismiss = link_button("Dismiss message");
+            dismiss.add_css_class("caption");
+            let app = self.clone();
+            let (channel_id, message_id) = (message.channel_id, message.id);
+            dismiss.connect_clicked(move |_| {
+                app.with_session(|session| {
+                    session.store.apply(
+                        "MESSAGE_DELETE",
+                        &serde_json::json!({"id": message_id, "channel_id": channel_id}),
+                    );
+                });
+            });
+            footer.append(&dismiss);
+            column.append(&footer);
         }
 
         // A message shown before Discord confirms it: greyed while sending,
@@ -1189,6 +1233,42 @@ impl AppState {
         row.append(&column);
         body.append(&row);
         body
+    }
+
+    /// The line above an app's answer: who used which command.
+    fn command_preview(
+        self: &Rc<Self>,
+        command: &str,
+        user: Option<&kc_state::User>,
+        guild: Option<Snowflake>,
+        state: &State,
+    ) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("kc-reply");
+        row.set_margin_start(56);
+        let text = gtk::Label::new(None);
+        match user {
+            Some(user) => {
+                let name = state.display_name(guild, user);
+                row.append(&self.images.avatar(
+                    16,
+                    &name,
+                    Some(&cdn::user_avatar(user.id, user.avatar.as_deref(), 32)),
+                ));
+                text.set_markup(&format!(
+                    "<b>{}</b> used <span foreground=\"#00a8fc\">/{}</span>",
+                    glib::markup_escape_text(&name),
+                    glib::markup_escape_text(command)
+                ));
+            }
+            None => text.set_markup(&format!(
+                "Used <span foreground=\"#00a8fc\">/{}</span>",
+                glib::markup_escape_text(command)
+            )),
+        }
+        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.append(&text);
+        row
     }
 
     /// The one-line quote above a reply.

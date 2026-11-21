@@ -1111,6 +1111,12 @@ impl State {
                 if let Some(flags) = data.get("flags").and_then(Value::as_u64) {
                     message.flags = flags;
                 }
+                if let Some(components) = data.get("components").and_then(Value::as_array) {
+                    message.components = components.clone();
+                }
+                if let Some(flags) = data.get("flags").and_then(Value::as_u64) {
+                    message.flags = flags;
+                }
             });
             if !updated {
                 return;

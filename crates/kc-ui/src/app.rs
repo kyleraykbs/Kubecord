@@ -1712,6 +1712,11 @@ impl AppState {
                     self.note_ping(millis);
                 }
             }
+            UiEvent::Interaction {
+                account,
+                name,
+                data,
+            } => self.on_interaction_event(account, &name, &data),
             UiEvent::CallRinging {
                 account,
                 channel_id,
@@ -2067,6 +2072,7 @@ fn event_label(event: &UiEvent) -> &'static str {
         UiEvent::VoiceError { .. } => "voice-error",
         UiEvent::VoicePing { .. } => "voice-ping",
         UiEvent::CallRinging { .. } => "call-ringing",
+        UiEvent::Interaction { .. } => "interaction",
         UiEvent::StreamStarted { .. } => "stream-started",
         UiEvent::StreamStopped { .. } => "stream-stopped",
         UiEvent::StreamError { .. } => "stream-error",
