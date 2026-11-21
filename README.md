@@ -4,8 +4,7 @@ A Discord client for Linux, built from scratch in Rust!
 
 The Linux community has been shackled by the official Discord client for far too long! I thought someone else would do it, but I guess if you want something done right (or done at all) you gotta do it yourself. Welcome to your liberation from electron! Please make issues if you have suggestions for features or find any bugs, I've tested the client extensively but I'm sure I missed *something*.
 
-<img width="1436" height="815" alt="image" src="https://github.com/user-attachments/assets/42b06599-ad76-43e1-a947-bfdaa6c2c8fc" />
-
+<img width="1440" height="884" alt="image" src="https://github.com/user-attachments/assets/1feb8354-b94a-44fa-888f-257a3d137bf9" />
 
 ## Warning
 Third-party clients are *kinda* (see below for more information) against Discord's TOS 
