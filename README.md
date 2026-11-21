@@ -50,7 +50,10 @@ Clients like Vesktop and Vencord also had done the same.
 
 **"trying to gain access to, intentionally overburdening, or attacking our systems"**
 ```
-Our client isn't attempting to bypass any rate limits or flood discords servers, although if something isn't impedimented yet on the clients end then it *could* appear like that on discords end, say if you are trying to spam and there is a rate limit I haven't yet implemented.
+Our client isn't attempting to bypass any rate limits or flood discords servers.
+Although if something isn't implemented yet on the clients end then it *could*
+appear like that on discords end, say if you are trying to spam and there is a
+rate limit I haven't yet implemented.
 ```
 
 In summary, we aren't doing anything malicious and that's where the main ban risk is. Discord only tends to ban from MASS calls or really suspect API behavior, our client tries to be respectful to the API but I can't ensure that all calls won't get flagged. From my own use however, it seems very unlikely. Be respectful and a ban is unlikely. Friending people is the most likely place to get a ban.
