@@ -781,17 +781,28 @@ impl AppState {
             _ => None,
         };
         let animated = matches!(media.kind, MediaKind::AnimatedGif);
+        // The resized media proxy can hand back a still (often WebP) frame for a
+        // GIF, which cannot animate. So animate from the original file, which is
+        // a true animated GIF; fall back to the (resized) still otherwise.
+        let animate_url = if animated && !media.target.is_empty() {
+            media.target.to_owned()
+        } else {
+            url.clone()
+        };
         let start = {
             let app = self.clone();
             let picture = picture.clone();
-            let url = url.clone();
+            let still = url.clone();
+            let animate_url = animate_url.clone();
             move || {
                 if animated {
-                    // A real animated GIF: driven frame by frame from its
-                    // bytes (falls back to a still if it has one frame).
-                    app.images.set_animated_picture(&picture, &url);
+                    // Show the (resized) still immediately as a fallback, then
+                    // animate from the original once its bytes are in -- driven
+                    // frame by frame (a single-frame GIF just keeps the still).
+                    app.images.set_picture(&picture, &still);
+                    app.images.set_animated_picture(&picture, &animate_url);
                 } else {
-                    app.images.set_picture(&picture, &url);
+                    app.images.set_picture(&picture, &still);
                 }
                 if let Some(video_url) = &gif_video {
                     app.play_gif(&picture, video_url);
@@ -835,9 +846,9 @@ impl AppState {
             PlayVideo(String),
         }
         let action = match &media.kind {
-            // A real GIF opens animated in the viewer, pointed at the GIF bytes
-            // (the proxy still URL) rather than a browser page.
-            MediaKind::AnimatedGif => OnClick::Viewer(url.clone()),
+            // A real GIF opens animated in the viewer, pointed at the original
+            // GIF file (the resized proxy can be a still) rather than a page.
+            MediaKind::AnimatedGif => OnClick::Viewer(animate_url.clone()),
             MediaKind::Image => OnClick::Viewer(media.target.to_owned()),
             MediaKind::Video {
                 file_url: Some(file),
