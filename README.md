@@ -1,24 +1,145 @@
 # Kubecord
 
-A Discord client for Linux, built from scratch in Rust.
+A Discord client for Linux, built from scratch in Rust!
 
+The Linux community has been shackled by the official Discord client for far too long! I thought someone else would do it, but I guess if you want something done right (or done at all) you gotta do it yourself. Welcome to your liberation from electron! Please make issues if you have suggestions for features or find any bugs, I've tested the client extensively but I'm sure I missed *something*.
+
+## Warning
+Third-party clients are *kinda* (see below for more information) against Discord's TOS 
+and *can* get the account banned. Though the risk is quite low as discord mainly tries
+to detect 'self-botting' and mass friending for scam prevention reasons.
+
+This client does it's best to adhere to the proper usage of the API. See below for more details.
+<details>
+<summary>Click to expand</summary>
+
+The specific lines in the Discord TOS that this *may* violate and a description of how:
+  
+**"using any unauthorized software designed to modify the services"**
+```
+While there technically are modifications to the original intent they are minor
+many other projects like Vesktop and Vencord allow for plugin modifications that
+do much more. Those clients and modifications are generally considered low risk.
+
+This project is slightly more risky as we are attempting to recreate the API
+interaction in full rather than just tacking onto the existing app.
+
+Our modifications are basic, and attempt to be respectful, to get an idea here's some:
+- Show people if you're typing or not
+- See stream details
+- Search GIF favorites 
+```
+
+**"scraping our services without our written consent, including by using any robot, spider, crawler, scraper, or other automatic device, process, or software"**
+```
+Our client doesn't attempt to automate any scraping or messaging. It simply allows for
+the *user* to interact with Discord just like they normally would. 
+```
+
+**"copying, dismantling, or reverse engineering any of our services or using our intellectual property without permission"**
+```
+You aren't reverse engineering anything while using this client, although we
+did use *other peoples* clients as a reference, and reverse engineering was
+required in the making of them. We never reverse engineered DiscordApp itself.
+
+Clients like Vesktop and Vencord also had done the same.
+```
+
+**"trying to gain access to, intentionally overburdening, or attacking our systems"**
+```
+Our client isn't attempting to bypass any rate limits or flood discords servers, although if something isn't impedimented yet on the clients end then it *could* appear like that on discords end, say if you are trying to spam and there is a rate limit I haven't yet implemented.
+```
+
+In summary, we aren't doing anything malicious and that's where the main ban risk is. Discord only tends to ban from MASS calls or really suspect API behavior, our client tries to be respectful to the API but I can't ensure that all calls won't get flagged. From my own use however, it seems very unlikely. Be respectful and a ban is unlikely. Friending people is the most likely place to get a ban.
+</details>
+
+
+## Features
+### 1 - Voice call support
+- Send/Receive audio
+    - See who is talking
+    - Control individual audio volume
+    - Audio volume boost up to 5x
+- Screenshare & Webcam
+    - Audio support!!
+      - Whole desktop
+      - Specific window
+      - Dummy node for any patchbay
+    - Debug details
+    - Screen-share preview shows the *encoded* video stream, what you see is what others see. (Barring connection stutters)
+    - Ability to see the debug data of screen-shares *you* are watching.
+    - MANY fine-tunable settings (you're in full control)
+- DM call support
+    - Shows when ringing the other party
+    - Group chat support
+- Noise suppression
+- Echo cancellation
+- Sensitivity
+
+### 2 - Text channel support
+- Receive and send texts
+- Media
+  - Images
+  - Video
+  - Embeds
+  - Attachments (with download)
+- Gifs
+    - All types, MP4, GIF, etc.
+    - Favorites
+    - Search (Including partial favorites search, matched by link)
+- Emoji (Server & Standard)
+- Stickers (all except the stock discord stickers)
+- Shows typing
+    - Ability to hide your own typing
+    - Shows both when *you* and other people are typing
+- All available admin tools
+- Edit admin channel settings
+
+### 3 - Profiles
+- Edit your own profile
+- View other peoples profiles
+- Status, Notes & Bio
+- Mutual friends
+- Mutual servers
+- Basic activity support
+
+### 4 - Whole app
+- Not built in electron! (Biggest feature of them all)
+- Built in GTK
+- Notifications
+- Login
+  - Token
+  - Username & Password
+  - 2FA
+  - SMS verification
+- Captcha support
+- Follows all GTK colors (Stylix compatible)
+- Full admin compatibility
+- Extensive settings
+
+## Unsupported
+- In call sound effects
+- Spellchecker (Coming soon)
+- Discord web games like it's golf game, chess, wordle, etc
+- Animated profile overlays
+
+## Technical Details
 The UI is GTK4/libadwaita and inherits the system Adwaita colours, so it follows
-stylix. Media is GStreamer. Voice uses Discord's UDP voice protocol directly:
+your GTK theme. Media is GStreamer. Voice uses Discord's UDP voice protocol directly:
 SRTP with `aead_xchacha20_poly1305_rtpsize` (or AES-256-GCM when offered) and
 DAVE end-to-end encryption through the `davey` crate. There is no Electron, no
 webview and no patched official client.
 
 ## Build and run
+NixOS/Nix
+```sh
+nix run
+```
 
+Development
 ```sh
 nix develop
 cargo run -p kubecord
-```
-
-or, from the flake:
-
-```sh
-nix run .
 ```
 
 The flake provides GTK4, libadwaita, GStreamer with the plugins the client uses,
@@ -58,11 +179,6 @@ specific monitor source if you route application audio through a virtual sink.
 Capturing the default monitor also captures the Discord client's own output, so
 use a virtual sink for a clean stream.
 
-## Warning
-
-Using a user token with a third-party client is against Discord's terms and can
-get the account banned. That risk is inherent to the project, not a bug.
-
 ## Layout
 
 ```
@@ -76,6 +192,3 @@ crates/kc-ui        GTK4/libadwaita application
 crates/kc-probe     protocol probe CLI
 crates/kubecord     application entry point
 ```
-
-`reference-projects/` holds cloned reverse-engineering projects used as
-protocol references; it is gitignored and not part of the build.
