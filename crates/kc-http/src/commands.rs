@@ -64,6 +64,10 @@ fn chat_input() -> u8 {
 
 impl Command {
     pub const CHAT_INPUT: u8 = 1;
+    /// Listed when right-clicking a user.
+    pub const USER: u8 = 2;
+    /// Listed in a message's menu.
+    pub const MESSAGE: u8 = 3;
 }
 
 /// An option (or subcommand) of a command.
@@ -227,6 +231,26 @@ impl InteractionPlace {
         body
     }
 
+    /// Runs a user or message command on `target_id`.
+    pub fn context_command(&self, command: &Command, target_id: Snowflake, nonce: &str) -> Value {
+        let mut body = self.body(
+            2,
+            nonce,
+            json!({
+                "version": command.version,
+                "id": command.id,
+                "name": command.name,
+                "type": command.kind,
+                "target_id": target_id,
+                "options": [],
+                "application_command": command.raw,
+                "attachments": [],
+            }),
+        );
+        body["analytics_location"] = json!("context_menu");
+        body
+    }
+
     /// Presses a button (no `values`) or chooses from a select menu.
     pub fn component(
         &self,
@@ -294,6 +318,12 @@ mod tests {
         assert_eq!(button["data"]["custom_id"], "next");
         assert!(button.get("guild_id").is_none());
         assert_eq!(button["nonce"], "99");
+        let raw = json!({"id": "1", "application_id": "10", "type": 3, "name": "Translate"});
+        let mut translate: Command = serde_json::from_value(raw.clone()).unwrap();
+        translate.raw = raw;
+        let run = place.context_command(&translate, Snowflake::new(55), "7");
+        assert_eq!(run["data"]["type"], 3);
+        assert_eq!(run["data"]["target_id"], "55");
         let form = place.modal(Snowflake::new(40), "form", vec![], "100");
         assert_eq!(form["type"], 5);
         assert_eq!(form["data"]["id"], "40");

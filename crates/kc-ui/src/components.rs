@@ -464,7 +464,7 @@ impl AppState {
 }
 
 /// The choices of a user, role, mentionable or channel select menu here.
-fn select_choices(
+pub(crate) fn select_choices(
     component_type: u64,
     guild: Option<Snowflake>,
     state: &State,

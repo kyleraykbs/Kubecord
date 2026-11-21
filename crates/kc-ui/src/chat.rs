@@ -1509,6 +1509,28 @@ impl AppState {
         });
         menu.append(&id);
 
+        // The message commands apps offer here.
+        let apps = self.context_commands(kc_http::Command::MESSAGE);
+        if !apps.is_empty() {
+            menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let heading = label("Apps", &["caption", "dim-label"]);
+            heading.set_xalign(0.0);
+            heading.set_margin_start(8);
+            menu.append(&heading);
+            for (command, app_name) in apps {
+                let run = item(&command.name);
+                run.set_tooltip_text((!app_name.is_empty()).then_some(app_name.as_str()));
+                let app = self.clone();
+                let inner = popover.clone();
+                run.connect_clicked(move |_| {
+                    inner.popdown();
+                    app.run_context_command(&command, message_id);
+                });
+                menu.append(&run);
+            }
+            menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+
         let can_pin = state
             .channels
             .get(&channel_id)

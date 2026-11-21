@@ -25,8 +25,18 @@ enum Field {
         labelled: bool,
     },
     Select {
+        /// The component type (3 strings, 5 users, 6 roles, 7 either, 8
+        /// channels).
+        kind: u64,
         custom_id: String,
         read: Box<dyn Fn() -> Vec<String>>,
+        required: bool,
+        min: usize,
+    },
+    /// Files to upload with the form.
+    Files {
+        custom_id: String,
+        files: Rc<RefCell<Vec<(String, glib::Bytes)>>>,
         required: bool,
         min: usize,
     },
@@ -49,6 +59,21 @@ impl Field {
                 let chosen = read().len();
                 !(*required && chosen < (*min).max(1))
             }
+            Field::Files { files, required, min, .. } => {
+                let chosen = files.borrow().len();
+                !(*required && chosen < (*min).max(1))
+            }
+        }
+    }
+
+    /// What the app gets back for this field; a file field names its files
+    /// by the ids given (their places among the form's uploads).
+    fn submitted_with(&self, file_ids: &[String]) -> Value {
+        match self {
+            Field::Files { custom_id, .. } => {
+                json!({"type": 18, "component": {"type": 19, "custom_id": custom_id, "values": file_ids}})
+            }
+            _ => self.submitted(),
         }
     }
 
@@ -68,9 +93,10 @@ impl Field {
                     json!({"type": 1, "components": [input]})
                 }
             }
-            Field::Select { custom_id, read, .. } => {
-                json!({"type": 18, "component": {"type": 3, "custom_id": custom_id, "values": read()}})
+            Field::Select { kind, custom_id, read, .. } => {
+                json!({"type": 18, "component": {"type": kind, "custom_id": custom_id, "values": read()}})
             }
+            Field::Files { .. } => self.submitted_with(&[]),
         }
     }
 }
@@ -197,6 +223,74 @@ fn select_input(select: &Value, changed: Rc<dyn Fn()>) -> (gtk::Widget, Box<dyn 
     }
 }
 
+/// A file field: a button to choose files and the names chosen.
+fn files_input(
+    window: &gtk::Window,
+    several: bool,
+    files: Rc<RefCell<Vec<(String, glib::Bytes)>>>,
+    changed: Rc<dyn Fn()>,
+) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let choose = gtk::Button::with_label(if several { "Choose Files…" } else { "Choose a File…" });
+    let names = gtk::Label::new(Some("No file chosen"));
+    names.add_css_class("dim-label");
+    names.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    names.set_hexpand(true);
+    names.set_xalign(0.0);
+    row.append(&choose);
+    row.append(&names);
+    let window = window.downgrade();
+    choose.connect_clicked(move |_| {
+        let dialog = gtk::FileDialog::new();
+        let files = files.clone();
+        let names = names.clone();
+        let changed = changed.clone();
+        let window = window.upgrade();
+        let done = move |chosen: Vec<gtk::gio::File>| {
+            let files = files.clone();
+            let names = names.clone();
+            let changed = changed.clone();
+            glib::spawn_future_local(async move {
+                let mut loaded = Vec::new();
+                for file in chosen {
+                    let name = file
+                        .basename()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".to_owned());
+                    if let Ok((bytes, _)) = file.load_bytes_future().await {
+                        loaded.push((name, bytes));
+                    }
+                }
+                let shown: Vec<String> = loaded.iter().map(|(name, _)| name.clone()).collect();
+                names.set_text(&if shown.is_empty() {
+                    "No file chosen".to_owned()
+                } else {
+                    shown.join(", ")
+                });
+                *files.borrow_mut() = loaded;
+                changed();
+            });
+        };
+        if several {
+            dialog.open_multiple(window.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
+                if let Ok(list) = result {
+                    let chosen = (0..list.n_items())
+                        .filter_map(|index| list.item(index).and_downcast::<gtk::gio::File>())
+                        .collect();
+                    done(chosen);
+                }
+            });
+        } else {
+            dialog.open(window.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    done(vec![file]);
+                }
+            });
+        }
+    });
+    row.upcast()
+}
+
 impl AppState {
     /// Shows a form an app opened (`INTERACTION_MODAL_CREATE`), and sends
     /// what is filled in when it is submitted.
@@ -289,12 +383,47 @@ impl AppState {
                                 labelled: true,
                             });
                         }
-                        Some(3) => {
-                            let (widget, read) = select_input(inner, check.clone());
+                        Some(kind @ (3 | 5..=8)) => {
+                            // Member, role and channel menus list what is here.
+                            let mut select = inner.clone();
+                            if kind != 3 {
+                                let choices = self
+                                    .with_session(|session| {
+                                        let guild = session.selected_guild.filter(|_| !session.dm_mode);
+                                        session.store.read(|state| {
+                                            crate::components::select_choices(kind, guild, state)
+                                        })
+                                    })
+                                    .unwrap_or_default();
+                                select["options"] = Value::Array(
+                                    choices
+                                        .into_iter()
+                                        .map(|(label, value, ..)| json!({"label": label, "value": value}))
+                                        .collect(),
+                                );
+                            }
+                            let (widget, read) = select_input(&select, check.clone());
                             field.append(&widget);
                             fields.borrow_mut().push(Field::Select {
+                                kind,
                                 custom_id: inner_id,
                                 read,
+                                required,
+                                min: inner["min_values"].as_u64().unwrap_or(1) as usize,
+                            });
+                        }
+                        Some(19) => {
+                            let files: Rc<RefCell<Vec<(String, glib::Bytes)>>> = Rc::default();
+                            let several = inner["max_values"].as_u64().unwrap_or(1) > 1;
+                            field.append(&files_input(
+                                self.window.upcast_ref(),
+                                several,
+                                files.clone(),
+                                check.clone(),
+                            ));
+                            fields.borrow_mut().push(Field::Files {
+                                custom_id: inner_id,
+                                files,
                                 required,
                                 min: inner["min_values"].as_u64().unwrap_or(1) as usize,
                             });
@@ -324,22 +453,67 @@ impl AppState {
             if response != "submit" {
                 return;
             }
-            let components: Vec<Value> = fields.borrow().iter().map(Field::submitted).collect();
+            // Files are numbered across the form, uploaded, then named.
+            let mut uploads: Vec<(String, String, glib::Bytes)> = Vec::new();
+            let components: Vec<Value> = fields
+                .borrow()
+                .iter()
+                .map(|field| match field {
+                    Field::Files { files, .. } => {
+                        let ids: Vec<String> = files
+                            .borrow()
+                            .iter()
+                            .map(|(name, bytes)| {
+                                let id = uploads.len().to_string();
+                                uploads.push((id.clone(), name.clone(), bytes.clone()));
+                                id
+                            })
+                            .collect();
+                        field.submitted_with(&ids)
+                    }
+                    _ => field.submitted(),
+                })
+                .collect();
             let Some((http, place)) = app.interaction_place(application_id) else {
                 app.set_status("Not connected yet: the form was not sent");
                 return;
             };
             let nonce = kc_http::HttpClient::new_nonce();
-            let body = place.modal(modal_id, &custom_id, components, &nonce);
-            app.send_interaction(
-                http,
-                body,
-                nonce,
-                Waiting::Outcome(Box::new(|outcome| {
-                    if let Outcome::Failed(reason) = outcome {
-                        tracing::info!(reason, "a form was not accepted");
+            let mut body = place.modal(modal_id, &custom_id, components, &nonce);
+            let waiting = Waiting::Outcome(Box::new(|outcome| {
+                if let Outcome::Failed(reason) = outcome {
+                    tracing::info!(reason, "a form was not accepted");
+                }
+            }));
+            if uploads.is_empty() {
+                app.send_interaction(http, body, nonce, waiting);
+                return;
+            }
+            app.set_status("Uploading…");
+            let channel = place.channel_id;
+            let uploader = http.clone();
+            crate::video_setup::spawn_local(
+                &app,
+                async move {
+                    let mut attachments = Vec::new();
+                    for (id, name, bytes) in uploads {
+                        let upload = uploader.upload_attachment(channel, &name, bytes.to_vec()).await?;
+                        attachments.push(json!({
+                            "id": id,
+                            "filename": name,
+                            "uploaded_filename": upload["upload_filename"],
+                        }));
                     }
-                })),
+                    Ok::<_, kc_http::Error>(attachments)
+                },
+                move |app, result| match result {
+                    Ok(attachments) => {
+                        app.set_status("");
+                        body["data"]["attachments"] = json!(attachments);
+                        app.send_interaction(http, body, nonce, waiting);
+                    }
+                    Err(error) => app.set_status(&format!("Could not upload the files: {error}")),
+                },
             );
         });
         dialog.present(Some(&self.window));
@@ -375,11 +549,23 @@ mod tests {
         };
         assert!(!short.is_filled());
         let select = Field::Select {
+            kind: 3,
             custom_id: "pick".to_owned(),
             read: Box::new(Vec::new),
             required: true,
             min: 1,
         };
         assert!(!select.is_filled());
+        let files = Field::Files {
+            custom_id: "proof".to_owned(),
+            files: Rc::default(),
+            required: true,
+            min: 1,
+        };
+        assert!(!files.is_filled());
+        assert_eq!(
+            files.submitted_with(&["0".to_owned()]),
+            json!({"type": 18, "component": {"type": 19, "custom_id": "proof", "values": ["0"]}})
+        );
     }
 }

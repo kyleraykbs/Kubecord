@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gtk::prelude::*;
 use kc_http::commands::option;
 use kc_http::{Command, CommandIndex, CommandOption, CommandScope, cdn};
 use serde_json::{Value, json};
@@ -25,6 +26,8 @@ const INDEX_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 const AUTOCOMPLETE_PAUSE: Duration = Duration::from_millis(250);
 /// Suggestions shown at once.
 const SHOWN: usize = 10;
+/// Marks the "Choose a File…" suggestion (followed by the option's name).
+pub(crate) const PICK_FILE: &str = "\u{1}pick-file:";
 
 /// One of Discord's own commands, done by the client.
 struct Builtin {
@@ -86,6 +89,9 @@ thread_local! {
     static ASKING: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Suggestions picked: (option, shown name) -> the value to send.
     static CHOSEN: RefCell<Vec<(String, String, Value)>> = const { RefCell::new(Vec::new()) };
+    /// Files picked for file options: (name, contents); an option's value
+    /// is the file's place in this list.
+    static FILES: RefCell<Vec<(String, glib::Bytes)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A command line taken apart up to some point.
@@ -253,7 +259,7 @@ fn convert(
         option::MENTIONABLE => mention_id(raw, &["<@&", "<@!", "<@"])
             .map(|id| json!(id))
             .ok_or_else(|| bad("a user or role")),
-        option::ATTACHMENT => Err(format!("{name} needs a file, which Kubecord cannot add to commands yet")),
+        option::ATTACHMENT => Err(format!("{name} needs a file: choose one from the suggestions")),
         _ => Ok(json!(raw)),
     }
 }
@@ -318,6 +324,22 @@ pub(crate) fn build_options(
         out = vec![json!({"type": sub.kind, "name": sub.name, "options": out})];
     }
     Ok(out)
+}
+
+/// The values of the file options in `options` (nested under subcommands).
+fn attachment_values(options: &[Value]) -> Vec<String> {
+    let mut found = Vec::new();
+    for option in options {
+        if option["type"] == option::ATTACHMENT
+            && let Some(value) = option["value"].as_str()
+        {
+            found.push(value.to_owned());
+        }
+        if let Some(nested) = option["options"].as_array() {
+            found.extend(attachment_values(nested));
+        }
+    }
+    found
 }
 
 /// What sending a line starting with `/` did.
@@ -597,6 +619,18 @@ impl AppState {
         if option.autocomplete {
             return self.app_suggestions(line, option, typed_trim, span);
         }
+        if option.kind == option::ATTACHMENT {
+            return vec![Completion {
+                title: "Choose a File…".to_owned(),
+                detail: option.description.clone(),
+                icon: None,
+                glyph: None,
+                display: String::new(),
+                raw: format!("{PICK_FILE}{}", option.name),
+                span,
+                trail: false,
+            }];
+        }
         let (guild, channel) = self
             .with_session(|session| {
                 (session.selected_guild.filter(|_| !session.dm_mode), session.selected_channel)
@@ -750,6 +784,81 @@ impl AppState {
         Vec::new()
     }
 
+    /// Opens a file chooser for the file option `option`; the file's name
+    /// goes in at `span` (buffer offsets) once one is chosen.
+    pub(crate) fn pick_command_file(self: &Rc<Self>, option: String, span: (i32, i32)) {
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title(&format!("Choose a File for {option}"));
+        let app = self.clone();
+        dialog.open(Some(&self.window), gtk::gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else {
+                return;
+            };
+            let name = file
+                .basename()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".to_owned());
+            let app = app.clone();
+            glib::spawn_future_local(async move {
+                let bytes = match file.load_bytes_future().await {
+                    Ok((bytes, _)) => bytes,
+                    Err(error) => {
+                        app.set_status(&format!("Could not read {name}: {error}"));
+                        return;
+                    }
+                };
+                let index = FILES.with_borrow_mut(|files| {
+                    files.push((name.clone(), bytes));
+                    files.len() - 1
+                });
+                CHOSEN.with_borrow_mut(|chosen| {
+                    chosen.retain(|(known, shown, _)| !(known == &option && shown == &name));
+                    chosen.push((option.clone(), name.clone(), json!(index.to_string())));
+                });
+                let buffer = app.composer.buffer();
+                let mut start = buffer.iter_at_offset(span.0);
+                let mut end = buffer.iter_at_offset(span.1);
+                buffer.delete(&mut start, &mut end);
+                buffer.insert(&mut start, &format!("{name} "));
+                buffer.place_cursor(&start);
+                app.composer.grab_focus();
+            });
+        });
+    }
+
+    /// The user (`Command::USER`) or message (`Command::MESSAGE`) commands
+    /// usable here, with their app's name, by name.
+    pub(crate) fn context_commands(self: &Rc<Self>, kind: u8) -> Vec<(Command, String)> {
+        let Some(index) = self.commands_here() else {
+            return Vec::new();
+        };
+        let mut found: Vec<(Command, String)> = index
+            .commands
+            .iter()
+            .filter(|command| command.kind == kind)
+            .map(|command| {
+                let app = index
+                    .app(command.application_id)
+                    .map(|app| app.name.clone())
+                    .unwrap_or_default();
+                (command.clone(), app)
+            })
+            .collect();
+        found.sort_by_key(|a| a.0.name.to_lowercase());
+        found
+    }
+
+    /// Runs a user or message command on `target_id`.
+    pub(crate) fn run_context_command(self: &Rc<Self>, command: &Command, target_id: kc_core::Snowflake) {
+        let Some((http, place)) = self.interaction_place(command.application_id) else {
+            self.set_status("Not connected yet: try again in a moment");
+            return;
+        };
+        let nonce = kc_http::HttpClient::new_nonce();
+        let body = place.context_command(command, target_id, &nonce);
+        self.send_interaction(http, body, nonce, Waiting::Outcome(Box::new(|_| {})));
+    }
+
     /// Runs the command line `text` (mentions already in their raw form).
     pub(crate) fn send_slash(self: &Rc<Self>, text: &str) -> Sent {
         let body = text.trim_start_matches('/');
@@ -781,21 +890,60 @@ impl AppState {
             self.set_status("Not connected yet: try again in a moment");
             return Sent::Handled;
         };
+        // Files given for file options: uploaded first, then named in the
+        // interaction by their place in the list.
+        let files: Vec<(String, String, glib::Bytes)> = attachment_values(&options)
+            .into_iter()
+            .filter_map(|index| {
+                let (name, bytes) = FILES.with_borrow(|files| files.get(index.parse::<usize>().ok()?).cloned())?;
+                Some((index, name, bytes))
+            })
+            .collect();
         let nonce = kc_http::HttpClient::new_nonce();
-        let request = place.command(command, options, false, &nonce);
+        let mut request = place.command(command, options, false, &nonce);
         let typed = text.to_owned();
         let app = self.clone();
-        self.send_interaction(
-            http,
-            request,
-            nonce,
-            Waiting::Outcome(Box::new(move |outcome| {
-                // Put a refused command back, to fix and try again.
-                if let Outcome::Failed(_) = outcome {
-                    app.restore_command(&typed);
-                }
-            })),
-        );
+        let waiting = Waiting::Outcome(Box::new(move |outcome| {
+            // Put a refused command back, to fix and try again.
+            if let Outcome::Failed(_) = outcome {
+                app.restore_command(&typed);
+            }
+        }));
+        if files.is_empty() {
+            self.send_interaction(http, request, nonce, waiting);
+        } else {
+            self.set_status("Uploading…");
+            let channel = place.channel_id;
+            let uploader = http.clone();
+            crate::video_setup::spawn_local(
+                self,
+                async move {
+                    let mut uploaded = Vec::new();
+                    for (index, name, bytes) in files {
+                        let upload = uploader.upload_attachment(channel, &name, bytes.to_vec()).await?;
+                        uploaded.push(json!({
+                            "id": index,
+                            "filename": name,
+                            "uploaded_filename": upload["upload_filename"],
+                        }));
+                    }
+                    Ok::<_, kc_http::Error>(uploaded)
+                },
+                move |app, result| match result {
+                    Ok(uploaded) => {
+                        app.set_status("");
+                        request["data"]["attachments"] = json!(uploaded);
+                        app.send_interaction(http, request, nonce, waiting);
+                    }
+                    Err(error) => {
+                        app.set_status(&format!("Could not upload the file: {error}"));
+                        if let Waiting::Outcome(done) = waiting {
+                            done(Outcome::Failed(error.to_string()));
+                        }
+                    }
+                },
+            );
+        }
         CHOSEN.with_borrow_mut(Vec::clear);
         self.set_composer_text("");
         Sent::Handled
@@ -876,6 +1024,15 @@ mod tests {
         let line = split_line("/music play nev", &command, 6);
         let options = build_options(&line, &nothing, Some(("song", "nev"))).unwrap();
         assert_eq!(options[0]["options"][0], json!({"type": 3, "name": "song", "value": "nev", "focused": true}));
+    }
+
+    #[test]
+    fn file_options_are_found_under_subcommands() {
+        let options = vec![json!({"type": 1, "name": "post", "options": [
+            {"type": 11, "name": "image", "value": "0"},
+            {"type": 3, "name": "caption", "value": "hi"}
+        ]})];
+        assert_eq!(attachment_values(&options), vec!["0".to_owned()]);
     }
 
     #[test]

@@ -2253,6 +2253,14 @@ impl AppState {
         let span = COMPLETIONS_SHOWN
             .with_borrow(|shown| shown.get(index).map(|c| (c.span, c.trail)));
         let buffer = self.composer.buffer();
+        // "Choose a File…" for a command's file option.
+        if let (Some((_, raw)), Some((Some(span), _))) = (chosen.as_ref(), span)
+            && let Some(option) = raw.strip_prefix(crate::slash::PICK_FILE)
+        {
+            self.completion.popdown();
+            self.pick_command_file(option.to_owned(), span);
+            return;
+        }
         if let (Some((display, raw)), Some((Some((from, to)), trail))) = (chosen.clone(), span) {
             let mut start = buffer.iter_at_offset(from);
             let mut end = buffer.iter_at_offset(to);

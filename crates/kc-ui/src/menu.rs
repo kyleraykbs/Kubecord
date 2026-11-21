@@ -233,6 +233,25 @@ impl AppState {
             }
         }
 
+        // -- the user commands apps offer here ------------------------------
+        let apps = self.context_commands(kc_http::Command::USER);
+        if !apps.is_empty() {
+            separator();
+            let heading = label("Apps", &["caption", "dim-label"]);
+            heading.set_xalign(0.0);
+            heading.set_margin_start(8);
+            menu.append(&heading);
+            for (command, _) in apps {
+                let name = command.name.clone();
+                add(
+                    &name,
+                    false,
+                    Box::new(move |app| app.run_context_command(&command, user_id)),
+                    self,
+                );
+            }
+        }
+
         // -- voice: your own video preview ---------------------------------
         if ctx.in_voice && ctx.is_me {
             separator();

@@ -699,6 +699,14 @@ impl AppState {
                             ]},
                             {"type": 1, "name": "stop", "description": "Stop playing"}
                          ]},
+                        {"id": "52", "application_id": "900", "version": "1", "type": 3, "name": "Add to Queue",
+                         "description": ""},
+                        {"id": "53", "application_id": "900", "version": "1", "type": 2, "name": "Show Top Tracks",
+                         "description": ""},
+                        {"id": "54", "application_id": "900", "version": "1", "type": 1, "name": "cover",
+                         "description": "Set the cover art", "options": [
+                            {"type": 11, "name": "image", "description": "The picture", "required": true}
+                         ]},
                         {"id": "51", "application_id": "900", "version": "1", "type": 1, "name": "mood",
                          "description": "Set the mood", "options": [
                             {"type": 3, "name": "kind", "description": "Which", "required": true,
@@ -723,7 +731,11 @@ impl AppState {
                                  "component": {"type": 4, "custom_id": "why", "style": 2, "required": false}},
                                 {"type": 18, "label": "Mood",
                                  "component": {"type": 3, "custom_id": "mood", "options": [
-                                    {"label": "Chill", "value": "chill"}, {"label": "Party", "value": "party"}]}}
+                                    {"label": "Chill", "value": "chill"}, {"label": "Party", "value": "party"}]}},
+                                {"type": 18, "label": "Dedicate it to",
+                                 "component": {"type": 5, "custom_id": "for", "required": false}},
+                                {"type": 18, "label": "Cover art", "description": "An image, if you have one",
+                                 "component": {"type": 19, "custom_id": "art", "required": false}}
                             ]
                         }));
                         return;
@@ -742,6 +754,20 @@ impl AppState {
                     app.set_composer_text("/mood kind:Pa");
                     app.refresh_completion();
                     eprintln!("demo: \"/mood kind:Pa\" -> {:?}", crate::composer::completion_titles());
+                    app.set_composer_text("/cover image:");
+                    app.refresh_completion();
+                    eprintln!("demo: \"/cover image:\" -> {:?}", crate::composer::completion_titles());
+                    let names = |kind| {
+                        app.context_commands(kind)
+                            .into_iter()
+                            .map(|(command, app)| format!("{} ({app})", command.name))
+                            .collect::<Vec<_>>()
+                    };
+                    eprintln!(
+                        "demo: message apps {:?}, user apps {:?}",
+                        names(kc_http::Command::MESSAGE),
+                        names(kc_http::Command::USER)
+                    );
                     app.set_composer_text("");
                 });
             }
