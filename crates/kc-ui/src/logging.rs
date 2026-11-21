@@ -79,7 +79,11 @@ fn file_wants(metadata: &Metadata<'_>) -> bool {
         && DETAILED.load(Ordering::Relaxed)
         && (target.starts_with("kc_voice")
             || target.starts_with("kc_media")
-            || target.starts_with("kc_ui::session"))
+            || target.starts_with("kc_ui::session")
+            // GIF playback: what was decoded, and when a player starts, stops
+            // or waits (off screen, or the window unfocused).
+            || target.starts_with("kc_ui::animation")
+            || target.starts_with("kc_ui::images"))
 }
 
 /// Writes to the log file, up to its size limit.

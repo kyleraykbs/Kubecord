@@ -273,6 +273,20 @@ pub(crate) fn discord_media_links(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether two links name the same thing, ignoring the query string (Discord
+/// signs attachment links with `?ex=..&is=..&hm=..`, drops that from an
+/// embed's `url`, and may re-sign it) and which of Discord's two media hosts
+/// serves it.
+pub(crate) fn same_link(a: &str, b: &str) -> bool {
+    let bare = |url: &str| {
+        url.split(['?', '#'])
+            .next()
+            .unwrap_or(url)
+            .replacen("//media.discordapp.net/", "//cdn.discordapp.com/", 1)
+    };
+    bare(a) == bare(b)
+}
+
 /// What a Discord media link points at, from its file extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinkMedia {
@@ -1346,5 +1360,14 @@ mod link_media_tests {
             link_media_kind("https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1"),
             Some(LinkMedia::Video)
         );
+        // An embed's url has no signature, and may use the other media host.
+        assert!(same_link(
+            "https://cdn.discordapp.com/attachments/1/2/w.gif?ex=1&is=2&hm=3",
+            "https://media.discordapp.net/attachments/1/2/w.gif"
+        ));
+        assert!(!same_link(
+            "https://cdn.discordapp.com/attachments/1/2/w.gif",
+            "https://cdn.discordapp.com/attachments/1/9/w.gif"
+        ));
     }
 }

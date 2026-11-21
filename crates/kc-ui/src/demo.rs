@@ -32,7 +32,8 @@
 //!   `gif-link` is a bare link to a GIF, which Discord turns into an
 //!   `image` embed (how a favourite sent from the picker arrives);
 //!   `gif-cdn-link` a signed `cdn.discordapp.com` attachment link Discord
-//!   sent no embed for, which the client shows itself.
+//!   sent no embed for, which the client shows itself; `gif-unfurl` that
+//!   link followed, a moment later, by Discord's update adding its preview.
 //! - `file`: a message with a non-image file attachment, so the file card
 //!   (left-aligned name and size, Download button on the right) can be seen.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
@@ -574,6 +575,34 @@ impl AppState {
                 message["embeds"] = json!([]);
                 store.apply("MESSAGE_CREATE", &message);
                 self.open_channel(general);
+            }
+            "gif-unfurl" => {
+                // The real sequence for a posted GIF link: the bare link first
+                // (shown by the client itself), then Discord's update adding
+                // its preview -- shaped as Discord sends it: the embed's `url`
+                // without the signature, the thumbnail's with it.
+                let id = id_at(0, 41);
+                let mut message = gif_link_message(id, ADA);
+                message["content"] = json!(DEMO_CDN_GIF);
+                message["embeds"] = json!([]);
+                store.apply("MESSAGE_CREATE", &message);
+                self.open_channel(general);
+                let store = store.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let bare = DEMO_CDN_GIF.split('?').next().unwrap_or(DEMO_CDN_GIF);
+                    let proxy = DEMO_CDN_GIF.replace("cdn.discordapp.com", "media.discordapp.net");
+                    message["embeds"] = json!([{
+                        "type": "image", "url": bare,
+                        "thumbnail": {
+                            "url": DEMO_CDN_GIF, "proxy_url": proxy,
+                            "width": 1280, "height": 966,
+                            "content_type": "image/gif", "flags": 0,
+                        },
+                        "content_scan_version": 4,
+                    }]);
+                    store.apply("MESSAGE_UPDATE", &message);
+                    eprintln!("demo: preview attached");
+                });
             }
             "gif" | "gif-viewer" => {
                 // A message with a real animated-GIF attachment. The still

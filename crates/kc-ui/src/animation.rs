@@ -197,6 +197,7 @@ impl GifPlayer {
         if mapped && awake() {
             self.start();
         } else {
+            tracing::debug!(mapped, awake = awake(), "gif player waiting");
             self.stop();
         }
     }
@@ -205,11 +206,14 @@ impl GifPlayer {
         if self.running.replace(true) {
             return;
         }
+        tracing::debug!("gif player started");
         self.schedule_next();
     }
 
     fn stop(&self) {
-        self.running.set(false);
+        if self.running.replace(false) {
+            tracing::debug!("gif player stopped");
+        }
         if let Some(source) = self.source.borrow_mut().take() {
             source.remove();
         }
