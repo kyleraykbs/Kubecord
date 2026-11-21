@@ -33,7 +33,8 @@
 //!   `image` embed (how a favourite sent from the picker arrives);
 //!   `gif-cdn-link` a signed `cdn.discordapp.com` attachment link Discord
 //!   sent no embed for, which the client shows itself; `gif-unfurl` that
-//!   link followed, a moment later, by Discord's update adding its preview.
+//!   link followed, a moment later, by Discord's update adding its preview;
+//!   `gif-video` a bare Klipy MP4 link (a `video` embed with only the video).
 //! - `file`: a message with a non-image file attachment, so the file card
 //!   (left-aligned name and size, Download button on the right) can be seen.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
@@ -573,6 +574,22 @@ impl AppState {
                 let mut message = gif_link_message(id_at(0, 41), ADA);
                 message["content"] = json!(DEMO_CDN_GIF);
                 message["embeds"] = json!([]);
+                store.apply("MESSAGE_CREATE", &message);
+                self.open_channel(general);
+            }
+            "gif-video" => {
+                // A bare link to a Klipy MP4, as Discord embeds it: a `video`
+                // embed carrying only the video.
+                let url = "https://static.klipy.com/ii/a15b48460c436e1e92c85ffc680932cc/d1/60/IgO8Znh3bKlSCc.mp4";
+                let mut message = gif_link_message(id_at(0, 41), ADA);
+                message["content"] = json!(url);
+                message["embeds"] = json!([{
+                    "type": "video", "url": url,
+                    "video": {
+                        "url": url, "width": 402, "height": 360,
+                        "content_type": "video/mp4", "flags": 0,
+                    },
+                }]);
                 store.apply("MESSAGE_CREATE", &message);
                 self.open_channel(general);
             }

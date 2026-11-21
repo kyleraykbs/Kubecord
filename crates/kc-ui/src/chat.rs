@@ -1052,8 +1052,16 @@ impl AppState {
             // the media, as the official client does.
             // Discord's embed carries the link without its signature query, so
             // compare the two with the query left off.
+            let bare_video = |embed: &kc_state::message::Embed| {
+                embed.kind.as_deref() == Some("video")
+                    && embed.title.is_none()
+                    && embed.thumbnail.is_none()
+                    && embed.image.is_none()
+                    && embed.video.is_some()
+            };
             let lone_media_link = (message.embeds.len() == 1
-                && matches!(message.embeds[0].kind.as_deref(), Some("image" | "gifv"))
+                && (matches!(message.embeds[0].kind.as_deref(), Some("image" | "gifv"))
+                    || bare_video(&message.embeds[0]))
                 && message.embeds[0].url.as_deref().is_some_and(|url| {
                     crate::content::same_link(url, message.content.trim())
                 }))

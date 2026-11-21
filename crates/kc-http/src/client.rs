@@ -1228,8 +1228,10 @@ impl HttpClient {
             .filter(|gif| !gif.src.is_empty())
             .map(|gif| Gif {
                 id: String::new(),
-                // Sent as the message when picked, and shown in the tile.
-                url: gif.src.clone(),
+                // Sent as the message when picked: the favourite's key, a GIF
+                // page Discord previews properly (as its own client sends),
+                // or the media itself when that is all the key is.
+                url: if gif.url.is_empty() { gif.src.clone() } else { gif.url.clone() },
                 src: gif.src.clone(),
                 gif_src: gif.src.clone(),
                 preview: gif.src.clone(),

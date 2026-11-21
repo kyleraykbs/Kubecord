@@ -17,6 +17,9 @@
 /// One favourite GIF read from the settings proto.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FavoriteGif {
+    /// The map key: what Discord's client posts when the GIF is picked -- a
+    /// GIF page (`tenor.com/view/...`) where there is one, else the media.
+    pub url: String,
     pub src: String,
     pub width: u32,
     pub height: u32,
@@ -122,6 +125,7 @@ fn walk(bytes: &[u8], mut on_field: impl FnMut(u64, u64, &[u8], &mut usize) -> b
 /// Parses one `FavoriteGif` message.
 fn parse_favorite(bytes: &[u8]) -> FavoriteGif {
     let mut gif = FavoriteGif {
+        url: String::new(),
         src: String::new(),
         width: 0,
         height: 0,
@@ -147,19 +151,26 @@ fn parse_favorite(bytes: &[u8]) -> FavoriteGif {
 }
 
 /// Parses one map entry (`{ string key = 1; FavoriteGif value = 2; }`),
-/// returning the value's `FavoriteGif` (the key is the GIF id, unused here).
+/// returning the value's `FavoriteGif` with the key as its `url`.
 fn parse_map_entry(bytes: &[u8]) -> Option<FavoriteGif> {
+    let mut key = String::new();
     let mut found = None;
     walk(bytes, |field, wire, data, pos| {
-        if field == 2
-            && wire == LEN
+        if wire == LEN
             && let Some(value) = read_len(data, pos)
         {
-            found = Some(parse_favorite(value));
+            match field {
+                1 => key = String::from_utf8_lossy(value).into_owned(),
+                2 => found = Some(parse_favorite(value)),
+                _ => {}
+            }
         }
         true
     });
-    found
+    found.map(|mut gif: FavoriteGif| {
+        gif.url = key;
+        gif
+    })
 }
 
 /// Parses the `FavoriteGifs` message (field 1 `map<string, FavoriteGif>`),
@@ -412,6 +423,7 @@ fn rewrite_favorite_gifs(bytes: &[u8], change: &Change) -> Option<Vec<u8>> {
             let entry = encode_map_entry(
                 url,
                 &FavoriteGif {
+                    url: (*url).to_owned(),
                     src: (*src).to_owned(),
                     width: *width,
                     height: *height,
@@ -611,6 +623,8 @@ mod tests {
         assert_eq!(gifs.len(), 3);
         // Ordered by `order` descending (newest first): c (2), b (1), a (0).
         assert_eq!(gifs[0].src, "https://media.tenor.com/c.mp4");
+        // The map key is kept: it is what gets posted when the GIF is picked.
+        assert_eq!(gifs[0].url, "vid-c");
         assert_eq!(gifs[0].format, 3); // video
         assert_eq!((gifs[0].width, gifs[0].height), (320, 240));
         assert_eq!(gifs[1].src, "https://media.tenor.com/b.gif");

@@ -273,6 +273,20 @@ pub(crate) fn discord_media_links(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `url` is served by a GIF provider (its videos are GIFs: short,
+/// silent, meant to loop).
+fn is_gif_host(url: &str) -> bool {
+    let host = url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ["klipy.com", "tenor.com", "giphy.com"]
+        .iter()
+        .any(|provider| host == *provider || host.ends_with(&format!(".{provider}")))
+}
+
 /// Whether two links name the same thing, ignoring the query string (Discord
 /// signs attachment links with `?ex=..&is=..&hm=..`, drops that from an
 /// embed's `url`, and may re-sign it) and which of Discord's two media hosts
@@ -1137,6 +1151,44 @@ impl AppState {
             );
         }
 
+        // A bare link to a video file arrives as a `video` embed carrying only
+        // the video (no title, thumbnail or image): show the video, not an
+        // empty card. From a GIF host it is a GIF -- play it inline, muted
+        // and looping; anything else gets a play button for the player.
+        if kind == "video"
+            && embed.title.is_none()
+            && embed.description.is_none()
+            && embed.thumbnail.is_none()
+            && embed.image.is_none()
+            && let Some(video) = &embed.video
+            && let Some(source) = video.url.clone().or_else(|| video.proxy_url.clone())
+        {
+            let (width, height) = (video.width.unwrap_or(400), video.height.unwrap_or(300));
+            let gif = is_gif_host(&source);
+            return Some(self.media_preview(Media {
+                still: "",
+                target: &source,
+                width,
+                height,
+                kind: if gif {
+                    MediaKind::Gif {
+                        video_url: source.clone(),
+                    }
+                } else {
+                    MediaKind::Video {
+                        file_url: Some(source.clone()),
+                    }
+                },
+                spoiler: false,
+                description: None,
+                favorite: gif.then_some(FavoriteTarget {
+                    url: &source,
+                    width,
+                    height,
+                }),
+            }));
+        }
+
         let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
         card.add_css_class("kc-embed");
         if let Some(color) = embed.color.filter(|color| *color != 0) {
@@ -1360,6 +1412,10 @@ mod link_media_tests {
             link_media_kind("https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1"),
             Some(LinkMedia::Video)
         );
+        assert!(is_gif_host("https://static.klipy.com/ii/a/d1/60/x.mp4"));
+        assert!(is_gif_host("https://media.tenor.com/x.webm"));
+        assert!(!is_gif_host("https://example.com/klipy.com/x.mp4"));
+        assert!(!is_gif_host("https://notklipy.com/x.mp4"));
         // An embed's url has no signature, and may use the other media host.
         assert!(same_link(
             "https://cdn.discordapp.com/attachments/1/2/w.gif?ex=1&is=2&hm=3",
