@@ -60,6 +60,7 @@
 //! - `emoji`: Unicode emoji in Discord's art (inline, jumbo, reaction).
 //! - `emoji-picker`: the emoji picker (opening on Standard) and emoji typed
 //!   in the composer, in Discord's art.
+//! - `shortcode`: `:smi` lists standard emoji; a closing `:` makes the emoji.
 //! - `emoji-undo`: undo/redo in the composer over an emoji drawn as an image.
 //! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
 //!   server emoji (drawn as an image) -- then Edit Profile, where it is set.
@@ -617,6 +618,27 @@ impl AppState {
                             }
                         });
                     }
+                });
+            }
+            "shortcode" => {
+                // `:smi` lists standard emoji; closing `:smile:` makes it one.
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    app.composer.grab_focus();
+                    app.composer.buffer().insert_at_cursor("hi :smi");
+                    let app = app.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        let shown = crate::composer::completion_titles();
+                        eprintln!("demo: list for :smi = {shown:?}");
+                        let buffer = app.composer.buffer();
+                        buffer.insert_at_cursor("le");
+                        buffer.insert_at_cursor(":");
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                            eprintln!("demo: after :smile: = {:?}", app.composer_text());
+                        });
+                    });
                 });
             }
             "emoji-undo" => {

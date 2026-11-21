@@ -17,7 +17,7 @@ use crate::images::ImageCache;
 use crate::player::LoopingVideo;
 use crate::session::{AccountId, Command, Session, UiEvent};
 use crate::settings::{CapturePreferences, SIDEBAR_MAX, SIDEBAR_MIN};
-use crate::widgets::{icon_available, icon_button, toggle_icon_button};
+use crate::widgets::{first_icon, icon_available, icon_button, toggle_icon_button};
 
 pub(crate) struct Model {
     pub accounts: AccountStore,
@@ -148,6 +148,8 @@ pub(crate) struct AppState {
     /// Whether others see you typing; mirrors the setting in Features.
     pub typing_toggle: gtk::Button,
     pub emoji_button: gtk::MenuButton,
+    /// Sends what is in the composer (as Enter does).
+    pub send_button: gtk::Button,
     pub blocked_label: gtk::Label,
     pub completion: gtk::Popover,
     pub completion_list: gtk::ListBox,
@@ -589,6 +591,13 @@ impl AppState {
             emoji_button.set_label("Emoji");
         }
 
+        let send_button = icon_button(
+            first_icon(&["paper-plane-symbolic", "document-send-symbolic", "mail-send-symbolic"]),
+            "Send Message",
+        );
+        send_button.add_css_class("circular");
+        send_button.set_valign(gtk::Align::Center);
+
         let composer_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         composer_box.add_css_class("kc-composer");
         composer_box.append(&attach_button);
@@ -596,10 +605,11 @@ impl AppState {
         composer_box.append(&typing_toggle);
         composer_box.append(&emoji_button);
         composer_box.append(&gif_button);
+        composer_box.append(&send_button);
         // Padding lives on the children so the rounded background reaches
         // the edges.
         attach_button.set_margin_start(6);
-        gif_button.set_margin_end(6);
+        send_button.set_margin_end(6);
 
         let completion_list = gtk::ListBox::new();
         completion_list.set_selection_mode(gtk::SelectionMode::Browse);
@@ -829,6 +839,7 @@ impl AppState {
             gif_button,
             typing_toggle,
             emoji_button,
+            send_button,
             blocked_label,
             completion,
             completion_list,

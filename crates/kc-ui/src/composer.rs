@@ -57,6 +57,8 @@ struct Completion {
     title: String,
     detail: String,
     icon: Option<String>,
+    /// A standard emoji shown instead of an icon.
+    glyph: Option<String>,
     /// Text placed in the composer.
     display: String,
     /// What `display` becomes when the message is sent.
@@ -197,6 +199,8 @@ thread_local! {
     /// Set while the composer is changed in ways the history must not
     /// record (drawing emoji, undoing, text put there by the app).
     static COMPOSER_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A `:` was just typed (it may close a `:shortcode:`).
+    static COLON_TYPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A redraw of the composer's emoji is queued.
     static COMPOSER_EMOJI_QUEUED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `display -> raw` pairs for mentions and emoji inserted through
@@ -209,6 +213,14 @@ impl AppState {
     pub(crate) fn connect_composer(self: &Rc<Self>) {
         // GTK's undo cannot follow emoji drawn as images; ours does.
         self.composer.buffer().set_enable_undo(false);
+        // A typed `:` may close a `:shortcode:`.
+        self.composer
+            .buffer()
+            .connect_insert_text(|_, _, text| {
+                if text == ":" && !COMPOSER_QUIET.get() {
+                    COLON_TYPED.set(true);
+                }
+            });
         let app = self.clone();
         self.composer.buffer().connect_changed(move |_| {
             app.on_composer_changed();
@@ -310,6 +322,11 @@ impl AppState {
         let app = self.clone();
         self.attach_button
             .connect_clicked(move |_| app.choose_files());
+        let app = self.clone();
+        self.send_button.connect_clicked(move |_| {
+            app.send_current();
+            app.composer.grab_focus();
+        });
 
         let app = self.clone();
         self.completion_list.connect_row_activated(move |_, _| {
@@ -342,6 +359,22 @@ impl AppState {
             text: self.composer_text(),
             cursor: expanded_text(&buffer.start_iter(), &cursor).chars().count(),
         }
+    }
+
+    /// Turns a `:shortcode:` just closed at the cursor into its emoji (an
+    /// undo step of its own, so Ctrl+Z gets the shortcode back).
+    fn close_shortcode(self: &Rc<Self>) {
+        let buffer = self.composer.buffer();
+        let cursor = buffer.iter_at_mark(&buffer.get_insert());
+        let before = buffer.slice(&buffer.start_iter(), &cursor, true);
+        let Some((emoji, length)) = closed_shortcode(&before) else {
+            return;
+        };
+        let mut start = buffer.iter_at_offset(cursor.offset() - length as i32);
+        let mut end = cursor;
+        buffer.delete(&mut start, &mut end);
+        buffer.insert(&mut start, emoji);
+        self.completion.popdown();
     }
 
     /// Puts `text` in the composer as the app (a draft, a message to edit, a
@@ -572,6 +605,10 @@ impl AppState {
             let now = self.composer_snapshot();
             HISTORY.with_borrow_mut(|history| history.record(now, Instant::now()));
         }
+        if COLON_TYPED.replace(false) {
+            let app = self.clone();
+            glib::idle_add_local_once(move || app.close_shortcode());
+        }
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
         self.queue_composer_emoji();
@@ -678,6 +715,28 @@ impl AppState {
             for (display, raw) in tokens {
                 content = content.replace(display, raw);
             }
+        });
+        // `:name:` typed or pasted without the list: standard emoji, then
+        // this server's (or, with Nitro, any) emoji of that name.
+        let server_emoji = self
+            .with_session(|session| {
+                let guild = session.selected_guild.filter(|_| !session.dm_mode);
+                let nitro = session.user.as_ref().is_some_and(|user| user.has_nitro());
+                session.store.read(|state| {
+                    state
+                        .sendable_emojis(guild, nitro)
+                        .into_iter()
+                        .flat_map(|(_, emojis)| emojis)
+                        .map(|emoji| (emoji.name.clone(), emoji.mention()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        content = expand_shortcodes(&content, &|name| {
+            server_emoji
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, mention)| mention.clone())
         });
 
         let Some((channel, editing, reply_to, uploads)) = self
@@ -1901,6 +1960,7 @@ impl AppState {
                                         display: format!("@{name}"),
                                         raw: format!("<@{}>", user.id),
                                         detail: user.username.clone(),
+                                        glyph: None,
                                         icon: Some(cdn::user_avatar(
                                             user.id,
                                             user.avatar.as_deref(),
@@ -1933,24 +1993,33 @@ impl AppState {
                                 title: format!("#{}", channel.display_name()),
                                 detail: String::new(),
                                 icon: None,
+                                glyph: None,
                                 display: format!("#{}", channel.display_name()),
                                 raw: format!("<#{}>", channel.id),
                             })
                             .collect(),
-                        _ => state
-                            .sendable_emojis(guild, nitro)
-                            .into_iter()
-                            .flat_map(|(_, emojis)| emojis)
-                            .filter(|emoji| emoji.name.to_lowercase().contains(&query))
-                            .take(COMPLETIONS)
-                            .map(|emoji| Completion {
-                                title: format!(":{}:", emoji.name),
-                                detail: String::new(),
-                                icon: Some(cdn::emoji(emoji.id, false, 48)),
-                                display: format!(":{}:", emoji.name),
-                                raw: emoji.mention(),
-                            })
-                            .collect(),
+                        // Server emoji first, then standard ones by shortcode
+                        // (those that start with the query before the rest).
+                        _ => {
+                            let mut found: Vec<Completion> = state
+                                .sendable_emojis(guild, nitro)
+                                .into_iter()
+                                .flat_map(|(_, emojis)| emojis)
+                                .filter(|emoji| emoji.name.to_lowercase().contains(&query))
+                                .take(COMPLETIONS)
+                                .map(|emoji| Completion {
+                                    title: format!(":{}:", emoji.name),
+                                    detail: String::new(),
+                                    icon: Some(cdn::emoji(emoji.id, false, 48)),
+                                    glyph: None,
+                                    display: format!(":{}:", emoji.name),
+                                    raw: emoji.mention(),
+                                })
+                                .collect();
+                            let room = COMPLETIONS.saturating_sub(found.len());
+                            found.extend(standard_emoji_matches(&query, room));
+                            found
+                        }
                     }
                 }))
             })
@@ -1980,7 +2049,12 @@ impl AppState {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.set_margin_top(2);
             row.set_margin_bottom(2);
-            if let Some(icon) = &completion.icon {
+            if let Some(glyph) = &completion.glyph {
+                match crate::discord_emoji::image(glyph, 24) {
+                    Some(image) => row.append(&image),
+                    None => row.append(&label(glyph, &["kc-completion-glyph"])),
+                }
+            } else if let Some(icon) = &completion.icon {
                 row.append(&self.images.avatar(24, &completion.title, Some(icon)));
             }
             row.append(&label(&completion.title, &[]));
@@ -2027,7 +2101,9 @@ impl AppState {
         let mut end = buffer.iter_at_mark(&buffer.get_insert());
         buffer.delete(&mut start, &mut end);
         buffer.insert(&mut start, &format!("{display} "));
-        remember_token(display, raw);
+        if display != raw {
+            remember_token(display, raw);
+        }
         self.completion.popdown();
     }
 }
@@ -2081,6 +2157,97 @@ fn slowmode_text(left: Duration) -> String {
         _ if seconds % 3600 / 60 == 0 => format!("{}h", seconds / 3600),
         _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
     }
+}
+
+/// Standard emoji whose shortcode holds `query`, those starting with it
+/// first, at most `limit`.
+fn standard_emoji_matches(query: &str, limit: usize) -> Vec<Completion> {
+    let mut hits: Vec<(bool, &str, &'static emojis::Emoji)> = emojis::iter()
+        .filter(|emoji| emoji.skin_tone().is_none_or(|tone| tone == emojis::SkinTone::Default))
+        .filter_map(|emoji| {
+            let code = emoji.shortcodes().find(|code| code.contains(query))?;
+            Some((!code.starts_with(query), code, emoji))
+        })
+        .collect();
+    hits.sort_by_key(|(later, code, _)| (*later, code.len()));
+    hits.into_iter()
+        .take(limit)
+        .map(|(_, code, emoji)| Completion {
+            title: format!(":{code}:"),
+            detail: String::new(),
+            icon: None,
+            glyph: Some(emoji.as_str().to_owned()),
+            display: emoji.as_str().to_owned(),
+            raw: emoji.as_str().to_owned(),
+        })
+        .collect()
+}
+
+/// `:name:` shortcodes in `text` made emoji: standard ones become the
+/// emoji, `custom(name)` gives others (server emoji) their `<:name:id>`.
+/// Code (`inline` and fenced) is left alone, as Discord does.
+fn expand_shortcodes(text: &str, custom: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        // Code spans pass through untouched.
+        if let Some(after) = rest.strip_prefix("```") {
+            let end = after.find("```").map_or(rest.len(), |end| end + 6);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`') {
+            let end = after.find('`').map_or(rest.len(), |end| end + 2);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix(':') {
+            let name_len = after
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+')))
+                .unwrap_or(after.len());
+            let name = &after[..name_len];
+            if !name.is_empty() && after[name_len..].starts_with(':') {
+                let found = emojis::get_by_shortcode(name)
+                    .map(|emoji| emoji.as_str().to_owned())
+                    .or_else(|| custom(name));
+                if let Some(found) = found {
+                    out.push_str(&found);
+                    rest = &after[name_len + 1..];
+                    continue;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The standard emoji for a `:name:` that has just been closed at the end
+/// of `before` (the text before the cursor), with its length in characters.
+/// Not inside inline code.
+fn closed_shortcode(before: &str) -> Option<(&'static str, usize)> {
+    let body = before.strip_suffix(':')?;
+    let start = body.rfind(':')?;
+    let name = &body[start + 1..];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
+        || before[..start].matches('`').count() % 2 == 1
+    {
+        return None;
+    }
+    let emoji = emojis::get_by_shortcode(name)?;
+    Some((emoji.as_str(), name.chars().count() + 2))
+}
+
+/// What the autocomplete list shows (for the demo's checks).
+pub(crate) fn completion_titles() -> Vec<String> {
+    COMPLETIONS_SHOWN.with_borrow(|shown| shown.iter().map(|c| c.title.clone()).collect())
 }
 
 fn remember_token(display: String, raw: String) {
@@ -2201,6 +2368,32 @@ mod tests {
             text: text.to_owned(),
             cursor: text.chars().count(),
         }
+    }
+
+    #[test]
+    fn shortcodes_become_emoji_outside_code() {
+        let custom = |name: &str| (name == "kubecord").then(|| "<:kubecord:42>".to_owned());
+        assert_eq!(
+            expand_shortcodes("hi :smile: and :kubecord: :nope: 12:30:45", &custom),
+            "hi 😄 and <:kubecord:42> :nope: 12:30:45"
+        );
+        assert_eq!(expand_shortcodes("`:smile:` ```\n:smile:\n```", &custom), "`:smile:` ```\n:smile:\n```");
+        assert_eq!(expand_shortcodes(":+1: :thumbsup:", &custom), "👍 👍");
+    }
+
+    #[test]
+    fn a_closing_colon_finishes_a_shortcode() {
+        assert_eq!(closed_shortcode("well :smile:"), Some(("😄", 7)));
+        assert_eq!(closed_shortcode("well :nope:"), None);
+        assert_eq!(closed_shortcode("`code :smile:"), None);
+        assert_eq!(closed_shortcode("time 12:"), None);
+    }
+
+    #[test]
+    fn standard_emoji_complete_by_shortcode() {
+        let found = standard_emoji_matches("smile", 5);
+        assert_eq!(found.first().map(|c| c.title.as_str()), Some(":smile:"));
+        assert!(found.iter().all(|c| c.glyph.is_some() && c.display == c.raw));
     }
 
     #[test]
