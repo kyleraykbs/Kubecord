@@ -578,7 +578,98 @@ impl AppState {
         });
         gifs.add(&unfocused);
         page.append(&gifs);
+
+        page.append(&self.spelling_group());
         page
+    }
+
+    /// The spell-check toggle and the manager for words added to the dictionary.
+    fn spelling_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Spelling");
+
+        let check = adw::SwitchRow::new();
+        check.set_title("Check Spelling");
+        check.set_subtitle("Underline misspelled words in the message box as you type.");
+        check.set_subtitle_lines(0);
+        check.set_active(self.capture.borrow().spellcheck);
+        let app = self.clone();
+        check.connect_active_notify(move |row| {
+            let on = row.is_active();
+            crate::spelling::set_enabled(on);
+            app.update_prefs(|prefs| prefs.spellcheck = on);
+            app.recheck_spelling();
+        });
+        group.add(&check);
+
+        // The words the user has taught the checker, each removable.
+        let added = adw::ExpanderRow::new();
+        added.set_title("Added Words");
+        let tracked: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // `repopulate` rebuilds the list; it is shared so the per-row remove
+        // buttons (built inside it) can trigger a rebuild after they delete.
+        let repopulate: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let builder: Rc<dyn Fn()> = {
+            let added = added.clone();
+            let tracked = tracked.clone();
+            let app = self.clone();
+            let repopulate = repopulate.clone();
+            Rc::new(move || {
+                for row in tracked.borrow_mut().drain(..) {
+                    added.remove(&row);
+                }
+                let words = crate::spelling::custom_words();
+                added.set_subtitle(&match words.len() {
+                    0 => "None yet".to_owned(),
+                    1 => "1 word".to_owned(),
+                    n => format!("{n} words"),
+                });
+                for word in words {
+                    let row = adw::ActionRow::new();
+                    row.set_title(&glib::markup_escape_text(&word));
+                    let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+                    remove.add_css_class("flat");
+                    remove.set_valign(gtk::Align::Center);
+                    remove.set_tooltip_text(Some("Remove"));
+                    let app = app.clone();
+                    let repopulate = repopulate.clone();
+                    let word = word.clone();
+                    remove.connect_clicked(move |_| {
+                        crate::spelling::remove_word(&word);
+                        app.recheck_spelling();
+                        if let Some(run) = repopulate.borrow().as_ref() {
+                            run();
+                        }
+                    });
+                    row.add_suffix(&remove);
+                    added.add_row(&row);
+                    tracked.borrow_mut().push(row);
+                }
+            })
+        };
+        *repopulate.borrow_mut() = Some(builder.clone());
+        builder();
+
+        // An entry to add a new word.
+        let add = adw::EntryRow::new();
+        add.set_title("Add a Word");
+        add.set_show_apply_button(true);
+        let app = self.clone();
+        let builder_apply = builder.clone();
+        add.connect_apply(move |entry| {
+            let text = entry.text();
+            let word = text.trim();
+            if !word.is_empty() {
+                crate::spelling::add_word(word);
+                entry.set_text("");
+                app.recheck_spelling();
+                builder_apply();
+            }
+        });
+        group.add(&add);
+        group.add(&added);
+        group
     }
 
     /// How far the User Volume slider in a person's menu goes.

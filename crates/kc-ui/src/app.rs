@@ -91,6 +91,10 @@ pub fn run() -> glib::ExitCode {
             return;
         }
 
+        // Decompress the spell-check dictionary off the main thread so the first
+        // keystroke does not stall.
+        std::thread::spawn(crate::spelling::warm);
+
         let accounts = match AccountStore::load() {
             Ok(accounts) => accounts,
             Err(error) => {

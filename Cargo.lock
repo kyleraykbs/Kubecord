@@ -2079,6 +2079,7 @@ dependencies = [
  "ashpd",
  "async-channel",
  "emojis",
+ "flate2",
  "glib",
  "gstreamer",
  "gtk4",

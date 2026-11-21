@@ -169,6 +169,38 @@ impl AppState {
         self.composer.grab_focus();
     }
 
+    /// Re-underlines misspelled words in the composer. Clears the marks when
+    /// spell checking is off. Called on every edit and when the setting or the
+    /// dictionary changes.
+    pub(crate) fn recheck_spelling(&self) {
+        let buffer = self.composer.buffer();
+        let tag = buffer
+            .tag_table()
+            .lookup("kc-misspelled")
+            .or_else(|| {
+                buffer.create_tag(
+                    Some("kc-misspelled"),
+                    &[("underline", &gtk::pango::Underline::Error)],
+                )
+            })
+            .expect("the misspelled tag");
+        buffer.remove_tag(&tag, &buffer.start_iter(), &buffer.end_iter());
+        if !crate::spelling::enabled() {
+            return;
+        }
+        let text = self.composer_text();
+        for (start, end) in crate::spelling::misspelled_spans(&text) {
+            let (Ok(start), Ok(end)) = (i32::try_from(start), i32::try_from(end)) else {
+                continue;
+            };
+            buffer.apply_tag(
+                &tag,
+                &buffer.iter_at_offset(start),
+                &buffer.iter_at_offset(end),
+            );
+        }
+    }
+
     /// Updates the composer for the selected channel: placeholder text,
     /// whether sending is allowed, and the reply/edit bar.
     pub(crate) fn render_composer(self: &Rc<Self>) {
@@ -236,6 +268,7 @@ impl AppState {
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
         self.update_completion();
+        self.recheck_spelling();
         if text.trim().is_empty() {
             return;
         }

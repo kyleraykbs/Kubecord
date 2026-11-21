@@ -164,6 +164,9 @@ pub struct CapturePreferences {
     /// (GIFs pause when unfocused, to save work).
     #[serde(default)]
     pub animate_gifs_unfocused: bool,
+    /// Underline misspelled words in the message box. On by default.
+    #[serde(default = "default_true")]
+    pub spellcheck: bool,
     /// Noise suppression: 0 off, 1 standard (WebRTC), 2 strong (RNNoise).
     pub noise_suppression: u32,
     pub echo_cancellation: bool,
@@ -264,6 +267,7 @@ impl Default for CapturePreferences {
             use_24_hour: false,
             unload_distant_messages: true,
             animate_gifs_unfocused: false,
+            spellcheck: true,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,
@@ -429,6 +433,7 @@ impl CapturePreferences {
         crate::content::set_24_hour(self.use_24_hour);
         kc_state::set_unload_distant(self.unload_distant_messages);
         crate::animation::set_animate_unfocused(self.animate_gifs_unfocused);
+        crate::spelling::set_enabled(self.spellcheck);
         crate::logging::configure(self.log_to_file, self.log_detailed);
         crate::logging::set_diagnostics(self.log_diagnostics);
         kc_media::devices::set_input_gain(self.input_volume);

@@ -34,6 +34,7 @@ mod settings;
 mod settings_panel;
 mod shell;
 mod sidebar;
+mod spelling;
 mod sounds;
 mod style;
 mod tile_grid;
