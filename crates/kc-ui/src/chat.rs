@@ -1050,9 +1050,15 @@ impl AppState {
         if let Some(text) = self.text_widget(&message.content, guild, state) {
             // A message that is just a link to its own media embed shows only
             // the media, as the official client does.
-            let lone_media_link = message.embeds.len() == 1
+            let lone_media_link = (message.embeds.len() == 1
                 && matches!(message.embeds[0].kind.as_deref(), Some("image" | "gifv"))
-                && message.embeds[0].url.as_deref() == Some(message.content.trim());
+                && message.embeds[0].url.as_deref() == Some(message.content.trim()))
+                // A bare Discord media link Discord did not unfurl: the client
+                // shows the media itself (below), so the link text goes too.
+                || (message.embeds.is_empty()
+                    && crate::content::discord_media_links(&message.content)
+                        .first()
+                        .is_some_and(|link| link == message.content.trim()));
             if !lone_media_link {
                 column.append(&text);
             }
@@ -1100,6 +1106,20 @@ impl AppState {
             for card in self.invite_cards(&message.content) {
                 card.set_margin_top(2);
                 column.append(&card);
+            }
+            // Links to Discord-hosted media that no embed already shows.
+            for link in crate::content::discord_media_links(&message.content) {
+                let covered = message.embeds.iter().any(|embed| {
+                    embed.url.as_deref() == Some(link.as_str())
+                        || [&embed.thumbnail, &embed.image, &embed.video]
+                            .into_iter()
+                            .flatten()
+                            .any(|media| media.url.as_deref() == Some(link.as_str()))
+                });
+                if !covered && let Some(widget) = self.link_media_widget(&link) {
+                    widget.set_margin_top(2);
+                    column.append(&widget);
+                }
             }
         }
         for sticker in &message.sticker_items {

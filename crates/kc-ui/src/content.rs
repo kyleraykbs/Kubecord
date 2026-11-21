@@ -255,6 +255,43 @@ fn invite_codes(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Links in `content` to media hosted on Discord's CDN
+/// (`cdn.discordapp.com` / `media.discordapp.net` attachments) that the client
+/// can show itself. Discord does not always unfurl these (signed
+/// `cdn.discordapp.com/attachments/...` links, as favourites taken from an
+/// uploaded GIF hold, get no embed at all).
+pub(crate) fn discord_media_links(content: &str) -> Vec<String> {
+    static LINK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"https://(?:cdn\.discordapp\.com|media\.discordapp\.net)/(?:ephemeral-)?attachments/[^\s<>]+",
+        )
+        .expect("a valid media link regex")
+    });
+    LINK.find_iter(content)
+        .map(|m| m.as_str().to_owned())
+        .filter(|url| link_media_kind(url).is_some())
+        .collect()
+}
+
+/// What a Discord media link points at, from its file extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkMedia {
+    Gif,
+    Image,
+    Video,
+}
+
+pub(crate) fn link_media_kind(url: &str) -> Option<LinkMedia> {
+    let path = url.split(['?', '#']).next()?.to_ascii_lowercase();
+    let extension = path.rsplit_once('.')?.1;
+    match extension {
+        "gif" => Some(LinkMedia::Gif),
+        "png" | "jpg" | "jpeg" | "webp" | "avif" => Some(LinkMedia::Image),
+        "mp4" | "webm" | "mov" | "m4v" => Some(LinkMedia::Video),
+        _ => None,
+    }
+}
+
 /// "Est. Nov 2026" from a guild's creation time (encoded in its id).
 fn established(guild_id: Snowflake) -> String {
     let seconds = (guild_id.timestamp() / 1000) as i64;
@@ -711,6 +748,90 @@ impl AppState {
             }
         });
         frame.append(&button);
+    }
+
+    /// Shows a Discord-hosted media link Discord did not unfurl: a GIF
+    /// animates, an image shows, a video gets a play card. The size is not
+    /// known until the image arrives, so the picture takes its fitted size
+    /// from the first frame.
+    pub(crate) fn link_media_widget(self: &Rc<Self>, url: &str) -> Option<gtk::Widget> {
+        let kind = link_media_kind(url)?;
+        if kind == LinkMedia::Video {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            row.add_css_class("kc-file");
+            row.set_halign(gtk::Align::Start);
+            let play = gtk::Button::from_icon_name("media-playback-start-symbolic");
+            play.add_css_class("circular");
+            play.set_valign(gtk::Align::Center);
+            play.set_tooltip_text(Some("Play"));
+            let name = url
+                .split(['?', '#'])
+                .next()
+                .and_then(|path| path.rsplit('/').next())
+                .unwrap_or("Video")
+                .to_owned();
+            row.append(&play);
+            row.append(&label(&name, &[]));
+            let app = self.clone();
+            let target = url.to_owned();
+            play.connect_clicked(move |_| app.show_video(&target, ""));
+            return Some(row.upcast());
+        }
+
+        let picture = gtk::Picture::new();
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_size_request(-1, 160);
+        picture.add_css_class("kc-media");
+        picture.set_overflow(gtk::Overflow::Hidden);
+        // Take the fitted size once, from the first frame (a GIF swaps the
+        // paintable every frame; resizing each time would be wasted work).
+        let sized = Rc::new(std::cell::Cell::new(false));
+        let overlay = gtk::Overlay::new();
+        let clamp = max_width(&overlay, MEDIA_MAX_WIDTH as i32);
+        let frame = clamp.downgrade();
+        picture.connect_paintable_notify(move |picture| {
+            if sized.get() {
+                return;
+            }
+            if let Some(paintable) = picture.paintable() {
+                let (width, height) = (paintable.intrinsic_width(), paintable.intrinsic_height());
+                if width > 0 && height > 0 {
+                    sized.set(true);
+                    let (width, height) = fit(width as u32, height as u32);
+                    picture.set_size_request(width, height);
+                    // Narrow the frame to the picture so the GIF tag sits on it.
+                    if let Some(frame) = frame.upgrade() {
+                        frame.set_maximum_size(width);
+                        frame.set_tightening_threshold(width);
+                    }
+                }
+            }
+        });
+        if kind == LinkMedia::Gif {
+            self.images.set_animated_picture(&picture, url);
+        } else {
+            self.images.set_picture(&picture, url);
+        }
+
+        overlay.set_child(Some(&picture));
+        if kind == LinkMedia::Gif {
+            let tag = gtk::Label::new(Some("GIF"));
+            tag.add_css_class("kc-media-tag");
+            tag.set_halign(gtk::Align::Start);
+            tag.set_valign(gtk::Align::Start);
+            tag.set_margin_start(6);
+            tag.set_margin_top(6);
+            tag.set_can_target(false);
+            overlay.add_overlay(&tag);
+        }
+        let click = gtk::GestureClick::new();
+        let app = self.clone();
+        let target = url.to_owned();
+        click.connect_released(move |_, _, _, _| app.show_image(&target, &target));
+        picture.add_controller(click);
+        picture.set_cursor_from_name(Some("pointer"));
+        Some(clamp.upcast())
     }
 
     /// A preview of an image, video or GIF, sized to keep its aspect.
@@ -1205,5 +1326,25 @@ mod tests {
             clock_text(hour, minute, None, true)
         );
         set_24_hour(false);
+    }
+}
+
+#[cfg(test)]
+mod link_media_tests {
+    use super::*;
+
+    #[test]
+    fn discord_media_links_are_found_and_classified() {
+        let text = "look https://cdn.discordapp.com/attachments/1/2/wumpus.gif?ex=6b&is=6b&hm=ab and \
+                    https://media.discordapp.net/attachments/3/4/a.PNG plus https://example.com/x.gif \
+                    and https://cdn.discordapp.com/attachments/5/6/notes.txt";
+        let links = discord_media_links(text);
+        assert_eq!(links.len(), 2, "{links:?}");
+        assert_eq!(link_media_kind(&links[0]), Some(LinkMedia::Gif));
+        assert_eq!(link_media_kind(&links[1]), Some(LinkMedia::Image));
+        assert_eq!(
+            link_media_kind("https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1"),
+            Some(LinkMedia::Video)
+        );
     }
 }

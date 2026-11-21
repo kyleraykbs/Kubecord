@@ -30,7 +30,9 @@
 //!   `gif-picker` fills the GIF picker with made-up animated results (the
 //!   demo REST cannot reach Tenor), saved to `<screenshot>.menu.png`.
 //!   `gif-link` is a bare link to a GIF, which Discord turns into an
-//!   `image` embed (how a favourite sent from the picker arrives).
+//!   `image` embed (how a favourite sent from the picker arrives);
+//!   `gif-cdn-link` a signed `cdn.discordapp.com` attachment link Discord
+//!   sent no embed for, which the client shows itself.
 //! - `file`: a message with a non-image file attachment, so the file card
 //!   (left-aligned name and size, Download button on the right) can be seen.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
@@ -318,6 +320,9 @@ fn gif_message(id: u64, author: u64) -> Value {
     })
 }
 
+/// A signed Discord CDN attachment link to a GIF, for `gif-cdn-link`.
+const DEMO_CDN_GIF: &str = "https://cdn.discordapp.com/attachments/1/2/creakingwumpus.gif?ex=6b021b5e&is=6b00c9de&hm=00";
+
 /// A message that is only a link to a GIF, as the GIF picker's favourites
 /// send: Discord turns it into an `image` embed whose proxy thumbnail is a
 /// still, with the original GIF as the thumbnail's `url`.
@@ -559,6 +564,15 @@ impl AppState {
             "gif-link" => {
                 // A bare link to a GIF (an `image` embed), as favourites send.
                 store.apply("MESSAGE_CREATE", &gif_link_message(id_at(0, 41), ADA));
+                self.open_channel(general);
+            }
+            "gif-cdn-link" => {
+                // A signed cdn.discordapp.com attachment link that Discord sent
+                // no embed for: the client shows the GIF itself.
+                let mut message = gif_link_message(id_at(0, 41), ADA);
+                message["content"] = json!(DEMO_CDN_GIF);
+                message["embeds"] = json!([]);
+                store.apply("MESSAGE_CREATE", &message);
                 self.open_channel(general);
             }
             "gif" | "gif-viewer" => {
