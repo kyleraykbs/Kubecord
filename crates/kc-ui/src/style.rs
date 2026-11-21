@@ -190,6 +190,11 @@ const CSS: &str = r#"
     background-color: alpha(currentColor, 0.25);
     border-radius: 999px;
 }
+.kc-redacted-note {
+    font-weight: bold;
+    font-style: italic;
+    opacity: 0.75;
+}
 .kc-redacted-bar {
     background-color: alpha(currentColor, 0.75);
     border-radius: 4px;

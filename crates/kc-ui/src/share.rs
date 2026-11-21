@@ -1225,8 +1225,30 @@ fn centre_of_last(app: &AppState) -> Option<f64> {
     Some(f64::from(bounds.y() + bounds.height() / 2.0))
 }
 
-/// Shows a row's part in the share.
+/// Shows a row's part in the share: classes for the highlight, and a
+/// "Redacted" note (not blurred) under a redacted message.
 fn mark_body(body: &gtk::Box, mark: Mark, first: bool, last: bool) {
+    let mut child = body.last_child();
+    let note = loop {
+        let Some(widget) = child else {
+            break None;
+        };
+        if widget.has_css_class("kc-redacted-note") {
+            break Some(widget);
+        }
+        child = widget.prev_sibling();
+    };
+    match (mark == Mark::Redacted, note) {
+        (true, None) => {
+            let note = gtk::Label::new(Some("Redacted"));
+            note.add_css_class("kc-redacted-note");
+            note.set_halign(gtk::Align::Start);
+            note.set_margin_start(56);
+            body.append(&note);
+        }
+        (false, Some(note)) => body.remove(&note),
+        _ => {}
+    }
     for (class, on) in [
         ("kc-share-selected", mark == Mark::In),
         ("kc-share-redacted", mark == Mark::Redacted),
@@ -1261,7 +1283,11 @@ fn redacted_row(message: &Message) -> gtk::Box {
         bar.set_halign(gtk::Align::Start);
         bar
     };
-    column.append(&bar(110));
+    // Said in words, so it reads as redacted rather than missing.
+    let note = gtk::Label::new(Some("Redacted"));
+    note.add_css_class("kc-redacted-note");
+    note.set_halign(gtk::Align::Start);
+    column.append(&note);
     let length = message.content.chars().count().max(12) as i32;
     let mut left = length * 7;
     while left > 0 {
