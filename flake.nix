@@ -39,7 +39,14 @@
           };
 
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
-          src = craneLib.cleanCargoSource ./.;
+          # Cargo sources plus the bundled asset files (e.g. the spell-check
+          # word list), which cleanCargoSource would otherwise drop.
+          src = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (builtins.match ".*/assets/.*" path != null) || (craneLib.filterCargoSources path type);
+          };
 
           gstPlugins = with pkgs.gst_all_1; [
             gstreamer
