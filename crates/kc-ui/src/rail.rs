@@ -164,6 +164,17 @@ impl AppState {
         separator.set_margin_end(20);
         self.guild_box.append(&separator);
 
+        // Add or join a server: first in the servers section.
+        let add = gtk::Button::new();
+        add.add_css_class("kc-rail-button");
+        add.add_css_class("flat");
+        add.add_css_class("kc-rail-add");
+        add.set_icon_name("list-add-symbolic");
+        add.set_tooltip_text(Some("Add a Server"));
+        let app = self.clone();
+        add.connect_clicked(move |_| app.add_server_dialog());
+        self.guild_box.append(&rail_slot(&add, false, false, 0));
+
         // Forget cached tiles for servers no longer present, so the cache
         // does not grow without bound.
         let present: std::collections::HashSet<Snowflake> = entries
@@ -258,17 +269,6 @@ impl AppState {
                 }
             }
         }
-
-        // Add or join a server.
-        let add = gtk::Button::new();
-        add.add_css_class("kc-rail-button");
-        add.add_css_class("flat");
-        add.add_css_class("kc-rail-add");
-        add.set_icon_name("list-add-symbolic");
-        add.set_tooltip_text(Some("Add a Server"));
-        let app = self.clone();
-        add.connect_clicked(move |_| app.add_server_dialog());
-        self.guild_box.append(&rail_slot(&add, false, false, 0));
     }
 
     /// A guild tile, reused from the cache when its drawn state is unchanged
