@@ -1371,8 +1371,32 @@ impl AppState {
             button
         };
 
+        // Your profile card (it has the Edit Profile button, where the custom
+        // status is set).
+        let profile = gtk::Button::new();
+        profile.add_css_class("flat");
+        let profile_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        profile_row.append(&gtk::Image::from_icon_name("avatar-default-symbolic"));
+        profile_row.append(&label("Profile", &[]));
+        profile.set_child(Some(&profile_row));
+        let app = self.clone();
+        let popover = self.account_popover.clone();
+        profile.connect_clicked(move |button| {
+            popover.popdown();
+            let me = app
+                .with_session(|session| session.store.read(|state| state.my_id()))
+                .flatten();
+            if let Some(me) = me {
+                app.show_profile(me, button.upcast_ref());
+            }
+        });
+        self.account_popover_box.append(&profile);
+        self.account_popover_box
+            .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
         let heading = label("STATUS", &["kc-category"]);
         heading.set_margin_start(6);
+        heading.set_margin_top(4);
         self.account_popover_box.append(&heading);
         for (status, text) in [
             ("online", "Online"),
@@ -1401,30 +1425,6 @@ impl AppState {
             self.account_popover_box.append(&button);
         }
 
-        let custom = gtk::Entry::new();
-        custom.set_placeholder_text(Some("Set a custom status"));
-        custom.set_margin_top(4);
-        custom.set_margin_bottom(4);
-        if let Some(text) = self
-            .with_session(|session| {
-                session.store.read(|state| {
-                    state
-                        .custom_status
-                        .as_ref()
-                        .and_then(|custom| custom.text.clone())
-                })
-            })
-            .flatten()
-        {
-            custom.set_text(&text);
-        }
-        let app = self.clone();
-        let popover = self.account_popover.clone();
-        custom.connect_activate(move |entry| {
-            popover.popdown();
-            app.set_custom_status(entry.text().to_string());
-        });
-        self.account_popover_box.append(&custom);
 
         self.account_popover_box
             .append(&gtk::Separator::new(gtk::Orientation::Horizontal));

@@ -211,31 +211,28 @@ impl Presence {
         self.status.as_deref().unwrap_or("offline")
     }
 
-    /// The custom status text (activity type 4), with its emoji when unicode.
+    /// The custom status text (activity type 4), with its emoji when unicode
+    /// (a server emoji has no text form; see [`Presence::status_line`]).
     pub fn custom_status(&self) -> Option<String> {
+        self.custom_status_line().map(|line| line.plain()).filter(|text| !text.is_empty())
+    }
+
+    /// The custom status (activity type 4): its emoji, Unicode or a server
+    /// emoji, and its text.
+    pub fn custom_status_line(&self) -> Option<StatusLine> {
         let activity = self
             .activities
             .iter()
             .find(|activity| activity["type"] == 4)?;
-        let text = activity["state"].as_str().unwrap_or("");
-        let emoji = activity
-            .pointer("/emoji/name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|_| {
-                activity
-                    .pointer("/emoji/id")
-                    .is_none_or(serde_json::Value::is_null)
-            })
-            .unwrap_or("");
-        let combined = format!("{emoji} {text}");
-        let combined = combined.trim();
-        (!combined.is_empty()).then(|| combined.to_owned())
+        let text = activity["state"].as_str().unwrap_or("").trim().to_owned();
+        let emoji = activity.get("emoji").and_then(StatusEmoji::from_json);
+        (emoji.is_some() || !text.is_empty()).then_some(StatusLine { emoji, text })
     }
 
-    /// A one-line description of what the user is doing: the custom status,
-    /// otherwise "Playing X" / "Listening to X" and so on.
-    pub fn summary(&self) -> Option<String> {
-        if let Some(custom) = self.custom_status() {
+    /// What to show under a name: the custom status, else what the user is
+    /// doing ("Playing ..."), with the custom status's emoji when it has one.
+    pub fn status_line(&self) -> Option<StatusLine> {
+        if let Some(custom) = self.custom_status_line() {
             return Some(custom);
         }
         let activity = self
@@ -250,7 +247,18 @@ impl Presence {
             5 => "Competing in",
             _ => "Playing",
         };
-        Some(format!("{verb} {name}"))
+        Some(StatusLine {
+            emoji: None,
+            text: format!("{verb} {name}"),
+        })
+    }
+
+    /// A one-line description of what the user is doing: the custom status,
+    /// otherwise "Playing X" / "Listening to X" and so on.
+    pub fn summary(&self) -> Option<String> {
+        self.status_line()
+            .map(|line| line.plain())
+            .filter(|text| !text.is_empty())
     }
 }
 
@@ -297,8 +305,79 @@ pub struct Stream {
     pub viewer_ids: Vec<Snowflake>,
 }
 
+/// The emoji beside a status: a Unicode emoji, or a server (custom) emoji.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum StatusEmoji {
+    Unicode(String),
+    Custom {
+        id: Snowflake,
+        name: String,
+        animated: bool,
+    },
+}
+
+impl StatusEmoji {
+    /// From an activity's or setting's `{"name", "id", "animated"}`.
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let name = value["name"].as_str().unwrap_or("").to_owned();
+        let id = value["id"].as_str().and_then(|id| id.parse().ok());
+        match id {
+            Some(id) => Some(Self::Custom {
+                id,
+                name,
+                animated: value["animated"].as_bool().unwrap_or(false),
+            }),
+            None => (!name.is_empty()).then_some(Self::Unicode(name)),
+        }
+    }
+}
+
+/// A status as shown under a name: an optional emoji, and text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StatusLine {
+    pub emoji: Option<StatusEmoji>,
+    pub text: String,
+}
+
+impl StatusLine {
+    /// The line as plain text: a Unicode emoji is kept, a server emoji (which
+    /// has no text form) is left out.
+    pub fn plain(&self) -> String {
+        match &self.emoji {
+            Some(StatusEmoji::Unicode(emoji)) if self.text.is_empty() => emoji.clone(),
+            Some(StatusEmoji::Unicode(emoji)) => format!("{emoji} {}", self.text),
+            _ => self.text.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_status_emoji_is_read_whether_unicode_or_a_server_emoji() {
+        let presence = |activities: serde_json::Value| Presence {
+            guild_id: None,
+            user_id: Snowflake(1),
+            status: Some("online".to_owned()),
+            activities: activities.as_array().cloned().unwrap_or_default(),
+        };
+        // A server emoji keeps its id; it has no text form.
+        let custom = presence(serde_json::json!([{"type": 4, "state": "in the lab",
+            "emoji": {"id": "236622542490566658", "name": "tanooki", "animated": true}}]));
+        let line = custom.status_line().expect("a status line");
+        assert_eq!(
+            line.emoji,
+            Some(StatusEmoji::Custom { id: Snowflake(236622542490566658), name: "tanooki".to_owned(), animated: true })
+        );
+        assert_eq!(line.plain(), "in the lab");
+        // A Unicode emoji is part of the plain text; an emoji alone counts.
+        let unicode = presence(serde_json::json!([{"type": 4, "emoji": {"name": "🚀"}}]));
+        assert_eq!(unicode.summary().as_deref(), Some("🚀"));
+        // Without a custom status, the activity.
+        let playing = presence(serde_json::json!([{"type": 0, "name": "Celeste"}]));
+        assert_eq!(playing.status_line().unwrap().text, "Playing Celeste");
+    }
+
     use super::*;
 
     #[test]

@@ -50,6 +50,8 @@ pub(crate) struct AppState {
     pub user_avatar_slot: gtk::Overlay,
     pub user_name_label: gtk::Label,
     pub user_status_label: gtk::Label,
+    /// Holds the custom status's emoji, ahead of the status text.
+    pub user_status_emoji: gtk::Box,
 
     // Voice controls.
     pub voice_panel: gtk::Box,
@@ -335,10 +337,16 @@ impl AppState {
         user_status_label.add_css_class("dim-label");
         user_status_label.add_css_class("caption");
 
+        let user_status_emoji = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        user_status_emoji.set_visible(false);
+        let user_status_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        user_status_row.append(&user_status_emoji);
+        user_status_row.append(&user_status_label);
+
         let user_text = gtk::Box::new(gtk::Orientation::Vertical, 0);
         user_text.set_valign(gtk::Align::Center);
         user_text.append(&user_name_label);
-        user_text.append(&user_status_label);
+        user_text.append(&user_status_row);
 
         let user_identity = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         user_identity.append(&user_avatar_slot);
@@ -758,6 +766,7 @@ impl AppState {
             user_avatar_slot,
             user_name_label,
             user_status_label,
+            user_status_emoji,
             voice_panel,
             voice_channel_label,
             voice_status_label,

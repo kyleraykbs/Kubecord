@@ -18,7 +18,9 @@ pub mod time;
 pub mod user;
 
 pub use channel::{Channel, ChannelType, Overwrite};
-pub use guild::{Emoji, Guild, Member, Presence, Relationship, Role, VoiceState};
+pub use guild::{
+    Emoji, Guild, Member, Presence, Relationship, Role, StatusEmoji, StatusLine, VoiceState,
+};
 pub use member_list::{MemberList, MemberListItem};
 pub use message::{
     Attachment, Embed, EmbedField, EmbedMedia, Message, MessageReference, Reaction, ReactionEmoji,

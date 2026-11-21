@@ -183,3 +183,51 @@ mod tests {
         assert_eq!(hex_color(255), "#0000ff");
     }
 }
+
+/// A status under a name: its emoji (a server emoji as a small image, a
+/// Unicode one as text) then its text, ellipsised. `classes` style the text.
+pub fn status_line_widget(
+    images: &crate::images::ImageCache,
+    line: &kc_state::StatusLine,
+    classes: &[&str],
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    if let Some(emoji) = &line.emoji {
+        row.append(&status_emoji_widget(images, emoji, 16));
+    }
+    if !line.text.is_empty() {
+        let text = label(&line.text, classes);
+        text.set_hexpand(true);
+        row.append(&text);
+    }
+    let plain = line.plain();
+    row.set_tooltip_text((!plain.is_empty()).then_some(plain.as_str()));
+    row
+}
+
+/// One status emoji at `size` pixels: an image for a server emoji, text for a
+/// Unicode one.
+pub fn status_emoji_widget(
+    images: &crate::images::ImageCache,
+    emoji: &kc_state::StatusEmoji,
+    size: i32,
+) -> gtk::Widget {
+    match emoji {
+        kc_state::StatusEmoji::Unicode(text) => {
+            let glyph = gtk::Label::new(Some(text));
+            glyph.set_valign(gtk::Align::Center);
+            glyph.upcast()
+        }
+        kc_state::StatusEmoji::Custom { id, name, animated } => {
+            let image = gtk::Image::new();
+            image.set_pixel_size(size);
+            image.set_valign(gtk::Align::Center);
+            image.set_tooltip_text(Some(&format!(":{name}:")));
+            images.set_image(
+                &image,
+                &kc_http::cdn::emoji(*id, *animated, (size * 2) as u32),
+            );
+            image.upcast()
+        }
+    }
+}

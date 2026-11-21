@@ -57,6 +57,8 @@
 //! - `dm-hover` (both DM rows drawn as hovered, showing their ×),
 //!   `dm-leave` (the group's × clicked: the confirmation), `dm-deleted`
 //!   (the open DM is closed elsewhere: CHANNEL_DELETE arrives).
+//! - `status`: custom statuses -- yours with a Unicode emoji, Ada's with a
+//!   server emoji (drawn as an image) -- then Edit Profile, where it is set.
 //! - `accounts` (the account menu with two accounts, each with a Log Out
 //!   button, saved to `<screenshot>.popover.png`), `accounts-logout`
 //!   (the Log Out confirmation dialog) and `accounts-done` (the active
@@ -810,6 +812,33 @@ impl AppState {
             // The account menu with its per-account Log Out buttons
             // (saved to `<screenshot>.popover.png`), or the Log Out
             // confirmation dialog (an in-window dialog, in the main shot).
+            "status" => {
+                // Custom statuses: yours with a Unicode emoji, Ada's with a
+                // server emoji (an image, which must show), then Edit Profile.
+                store.write(|state| {
+                    state.custom_status = Some(kc_state::CustomStatus {
+                        text: Some("Shipping kubecord".to_owned()),
+                        emoji_name: Some("🚀".to_owned()),
+                        emoji_id: None,
+                    });
+                });
+                store.apply(
+                    "PRESENCE_UPDATE",
+                    &json!({
+                        "user": {"id": ADA.to_string()}, "guild_id": GUILD.to_string(),
+                        "status": "online",
+                        "activities": [{"type": 4, "name": "Custom Status", "state": "in the lab",
+                            "emoji": {"id": "236622542490566658", "name": "tanooki", "animated": false}}],
+                    }),
+                );
+                self.open_channel(general);
+                self.render_user_bar();
+                self.render_members();
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                    app.edit_profile_dialog();
+                });
+            }
             "accounts" | "accounts-logout" | "accounts-done" => {
                 self.open_channel(general);
                 let app = self.clone();

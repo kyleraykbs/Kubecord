@@ -59,7 +59,7 @@ fn hash_channel_row(row: &ChannelRow, hasher: &mut impl std::hash::Hasher) {
 struct DmRow {
     channel: Channel,
     title: String,
-    subtitle: String,
+    subtitle: kc_state::StatusLine,
     icon: Option<String>,
     status: Option<String>,
     unread: bool,
@@ -169,11 +169,14 @@ impl AppState {
                             let presence = recipient.and_then(|user| state.presence(user.id));
                             let subtitle = match recipient {
                                 Some(_) => presence
-                                    .and_then(|presence| presence.summary())
+                                    .and_then(|presence| presence.status_line())
                                     .unwrap_or_default(),
                                 None => {
                                     let count = channel.recipients.as_ref().map_or(0, Vec::len) + 1;
-                                    format!("{count} members")
+                                    kc_state::StatusLine {
+                                        emoji: None,
+                                        text: format!("{count} members"),
+                                    }
                                 }
                             };
                             DmRow {
@@ -309,11 +312,14 @@ impl AppState {
             text.set_valign(gtk::Align::Center);
             text.set_hexpand(true);
             text.append(&label(&row.title, &["kc-channel-name"]));
-            if !row.subtitle.is_empty() {
-                let subtitle = label(&row.subtitle, &["caption", "dim-label"]);
-                // The line is ellipsised, so hovering shows the full status.
-                subtitle.set_tooltip_text(Some(&row.subtitle));
-                text.append(&subtitle);
+            if row.subtitle.emoji.is_some() || !row.subtitle.text.is_empty() {
+                // Ellipsised; hovering shows the full status (the widget's
+                // tooltip), its emoji drawn even when it is a server's.
+                text.append(&crate::widgets::status_line_widget(
+                    &self.images,
+                    &row.subtitle,
+                    &["caption", "dim-label"],
+                ));
             }
             content.append(&text);
             content.append(&badge(row.mentions));

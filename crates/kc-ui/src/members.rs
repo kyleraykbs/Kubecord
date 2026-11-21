@@ -8,7 +8,7 @@ use libadwaita::prelude::*;
 
 use kc_core::Snowflake;
 use kc_http::cdn;
-use kc_state::{ChannelType, MemberListItem};
+use kc_state::{ChannelType, MemberListItem, StatusEmoji};
 
 use crate::session;
 use crate::shell::AppState;
@@ -26,7 +26,7 @@ enum MemberRow {
         avatar: String,
         color: Option<u32>,
         status: String,
-        summary: Option<String>,
+        summary: Option<kc_state::StatusLine>,
         bot: bool,
     },
 }
@@ -130,18 +130,16 @@ impl AppState {
             session.store.read(|state| {
                 let user = state.me.clone().or_else(|| session.user.clone());
                 let status = state.status.clone().unwrap_or_else(|| "online".to_owned());
-                let custom = state.custom_status.as_ref().and_then(|custom| {
-                    let text = format!(
-                        "{} {}",
-                        custom.emoji_name.as_deref().unwrap_or(""),
-                        custom.text.as_deref().unwrap_or("")
-                    );
-                    let text = text.trim().to_owned();
-                    (!text.is_empty()).then_some(text)
-                });
+                let custom = state
+                    .custom_status
+                    .as_ref()
+                    .map(kc_state::CustomStatus::line)
+                    .filter(|line| line.emoji.is_some() || !line.text.is_empty());
                 (user, status, custom, connection, ready, fallback)
             })
         });
+        clear_box(&self.user_status_emoji);
+        self.user_status_emoji.set_visible(false);
         let Some((user, status, custom, connection, ready, fallback)) = info else {
             self.user_name_label.set_label("Not signed in");
             self.user_status_label.set_label("");
@@ -177,8 +175,27 @@ impl AppState {
                 &status
             };
             self.user_avatar_slot.add_overlay(&status_dot(shown));
-            self.user_status_label
-                .set_label(&custom.unwrap_or_else(|| status_label(&status).to_owned()));
+            // The custom status (its emoji drawn ahead of the text, so a
+            // server emoji shows too), else the status itself.
+            let text = match &custom {
+                Some(line) => {
+                    if let Some(emoji) = &line.emoji {
+                        self.user_status_emoji.append(&crate::widgets::status_emoji_widget(
+                            &self.images,
+                            emoji,
+                            14,
+                        ));
+                        self.user_status_emoji.set_visible(true);
+                    }
+                    if line.text.is_empty() {
+                        status_label(&status).to_owned()
+                    } else {
+                        line.text.clone()
+                    }
+                }
+                None => status_label(&status).to_owned(),
+            };
+            self.user_status_label.set_label(&text);
         } else {
             self.user_status_label.set_label(&connection);
         }
@@ -189,22 +206,9 @@ impl AppState {
         let Some((account, http, store)) = self.active() else {
             return;
         };
-        let custom = store.read(|state| {
-            state.custom_status.as_ref().map(|custom| {
-                (
-                    custom.text.clone().unwrap_or_default(),
-                    custom.emoji_name.clone(),
-                )
-            })
-        });
+        let custom = store.read(|state| state.custom_status.clone());
         if let Some(gateway) = session::gateway(account) {
-            gateway.update_presence(
-                status,
-                custom
-                    .as_ref()
-                    .map(|(text, emoji)| (text.as_str(), emoji.as_deref())),
-                false,
-            );
+            gateway.update_presence(status, custom.as_ref().map(presence_custom), false);
         }
         store.write(|state| state.status = Some(status.to_owned()));
         self.render_user_bar();
@@ -218,33 +222,43 @@ impl AppState {
         );
     }
 
-    /// Sets (or clears, with empty text) the custom status.
-    pub(crate) fn set_custom_status(self: &Rc<Self>, text: String) {
+    /// Sets the custom status -- its text and emoji -- or clears it when both
+    /// are empty.
+    pub(crate) fn set_custom_status(self: &Rc<Self>, text: String, emoji: Option<StatusEmoji>) {
         let Some((account, http, store)) = self.active() else {
             return;
         };
         let text = text.trim().to_owned();
+        let (emoji_name, emoji_id) = match &emoji {
+            Some(StatusEmoji::Unicode(name)) => (Some(name.clone()), None),
+            Some(StatusEmoji::Custom { id, name, .. }) => (Some(name.clone()), Some(*id)),
+            None => (None, None),
+        };
+        let custom = (!text.is_empty() || emoji.is_some()).then(|| kc_state::CustomStatus {
+            text: (!text.is_empty()).then(|| text.clone()),
+            emoji_name: emoji_name.clone(),
+            emoji_id,
+        });
         let status =
             store.read(|state| state.status.clone().unwrap_or_else(|| "online".to_owned()));
         if let Some(gateway) = session::gateway(account) {
-            gateway.update_presence(
-                &status,
-                (!text.is_empty()).then_some((text.as_str(), None)),
-                false,
-            );
+            gateway.update_presence(&status, custom.as_ref().map(presence_custom), false);
         }
-        store.write(|state| {
-            state.custom_status = (!text.is_empty()).then(|| kc_state::CustomStatus {
-                text: Some(text.clone()),
-                emoji_name: None,
-                emoji_id: None,
-            });
-        });
+        store.write(|state| state.custom_status = custom.clone());
         self.render_user_bar();
         self.spawn(
             async move {
-                http.set_custom_status((!text.is_empty()).then_some(text.as_str()), None)
-                    .await
+                match &custom {
+                    Some(custom) => {
+                        http.set_custom_status(
+                            custom.text.as_deref(),
+                            custom.emoji_name.as_deref(),
+                            custom.emoji_id,
+                        )
+                        .await
+                    }
+                    None => http.set_custom_status(None, None, None).await,
+                }
             },
             |app, result| {
                 if let Err(error) = result {
@@ -283,7 +297,7 @@ impl AppState {
                         avatar: cdn::user_avatar(id, user.avatar.as_deref(), 64),
                         color: guild.and_then(|guild| state.member_color(guild, id)),
                         status: state.status_of(id).to_owned(),
-                        summary: state.presence(id).and_then(|presence| presence.summary()),
+                        summary: state.presence(id).and_then(|presence| presence.status_line()),
                         bot: user.bot == Some(true),
                     })
                 };
@@ -429,7 +443,11 @@ impl AppState {
                     }
                     text.append(&name_label);
                     if let Some(summary) = summary {
-                        text.append(&label(&summary, &["caption", "dim-label"]));
+                        text.append(&crate::widgets::status_line_widget(
+                            &self.images,
+                            &summary,
+                            &["caption", "dim-label"],
+                        ));
                     }
                     content.append(&text);
                     if bot {
@@ -456,7 +474,7 @@ impl AppState {
         let Some((_, http, store)) = self.active() else {
             return;
         };
-        let (my_id, current_name, current_avatar) = store.read(|state| {
+        let (my_id, current_name, current_avatar, current_status) = store.read(|state| {
             let user = state.me.clone();
             (
                 user.as_ref().map(|user| user.id),
@@ -465,6 +483,11 @@ impl AppState {
                     .unwrap_or_default(),
                 user.as_ref()
                     .map(|user| cdn::user_avatar(user.id, user.avatar.as_deref(), 160)),
+                state
+                    .custom_status
+                    .as_ref()
+                    .map(kc_state::CustomStatus::line)
+                    .unwrap_or_default(),
             )
         });
         let Some(my_id) = my_id else {
@@ -527,6 +550,76 @@ impl AppState {
         user_page.append(&label("ABOUT ME", &["kc-category"]));
         let (bio_view, bio_scroll) = bio_editor();
         user_page.append(&bio_scroll);
+
+        // Custom status: an emoji (picked from GTK's emoji chooser) and text.
+        // It is the account's, not a server's, and is saved with either tab.
+        user_page.append(&label("CUSTOM STATUS", &["kc-category"]));
+        let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let status_emoji: Rc<std::cell::RefCell<Option<StatusEmoji>>> =
+            Rc::new(std::cell::RefCell::new(current_status.emoji.clone()));
+        let emoji_button = gtk::MenuButton::new();
+        emoji_button.set_tooltip_text(Some("Choose an Emoji"));
+        let show_emoji = {
+            let button = emoji_button.clone();
+            let images = self.images.clone();
+            move |emoji: Option<&StatusEmoji>| match emoji {
+                Some(emoji) => {
+                    button.set_child(Some(&crate::widgets::status_emoji_widget(&images, emoji, 20)));
+                }
+                None => button.set_icon_name("face-smile-symbolic"),
+            }
+        };
+        show_emoji(current_status.emoji.as_ref());
+        // kubecord's own emoji picker (as in the message box), built when
+        // first opened.
+        let chooser = gtk::Popover::new();
+        let picker_page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        picker_page.set_margin_top(8);
+        picker_page.set_margin_bottom(8);
+        picker_page.set_margin_start(8);
+        picker_page.set_margin_end(8);
+        chooser.set_child(Some(&picker_page));
+        emoji_button.set_popover(Some(&chooser));
+        let built = std::cell::Cell::new(false);
+        let app = self.clone();
+        let picked = status_emoji.clone();
+        let show = show_emoji.clone();
+        chooser.connect_show(move |chooser| {
+            if built.replace(true) {
+                return;
+            }
+            let picked = picked.clone();
+            let show = show.clone();
+            let popover = chooser.downgrade();
+            app.fill_standard_emoji(
+                &picker_page,
+                Rc::new(move |text: &str| {
+                    let emoji = StatusEmoji::Unicode(text.to_owned());
+                    show(Some(&emoji));
+                    *picked.borrow_mut() = Some(emoji);
+                    if let Some(popover) = popover.upgrade() {
+                        popover.popdown();
+                    }
+                }),
+            );
+        });
+        status_row.append(&emoji_button);
+        let status_text = gtk::Entry::new();
+        status_text.set_placeholder_text(Some("What's happening?"));
+        status_text.set_text(&current_status.text);
+        status_text.set_hexpand(true);
+        status_row.append(&status_text);
+        let clear_status = gtk::Button::from_icon_name("edit-clear-symbolic");
+        clear_status.set_tooltip_text(Some("Clear Custom Status"));
+        let cleared = status_emoji.clone();
+        let text_field = status_text.clone();
+        clear_status.connect_clicked(move |_| {
+            *cleared.borrow_mut() = None;
+            show_emoji(None);
+            text_field.set_text("");
+        });
+        status_row.append(&clear_status);
+        user_page.append(&status_row);
         stack.add_titled(&user_page, Some("user"), "User Profile");
 
         // -- Server profile --------------------------------------------
@@ -666,6 +759,15 @@ impl AppState {
         let user_avatar_state = user_avatar.pending.clone();
         let server_avatar_state = server_avatar.pending.clone();
         save.connect_clicked(move |_| {
+            // The custom status is the account's: saved with either tab, and
+            // only when it changed.
+            let wanted = kc_state::StatusLine {
+                emoji: status_emoji.borrow().clone(),
+                text: status_text.text().trim().to_owned(),
+            };
+            if wanted != current_status {
+                app.set_custom_status(wanted.text, wanted.emoji);
+            }
             let on_server = stack.visible_child_name().as_deref() == Some("server");
             if on_server {
                 let index = chosen.get();
@@ -909,4 +1011,13 @@ pub(crate) fn friendly_date_ms(millis: u64) -> String {
         .and_then(|date| date.format("%b %e, %Y"))
         .map(|date| date.trim().replace("  ", " "))
         .unwrap_or_default()
+}
+
+/// A custom status as the gateway's presence update takes it.
+fn presence_custom(custom: &kc_state::CustomStatus) -> (&str, Option<&str>, Option<Snowflake>) {
+    (
+        custom.text.as_deref().unwrap_or(""),
+        custom.emoji_name.as_deref(),
+        custom.emoji_id,
+    )
 }

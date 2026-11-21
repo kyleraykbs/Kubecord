@@ -179,6 +179,31 @@ pub struct CustomStatus {
     pub emoji_id: Option<Snowflake>,
 }
 
+impl CustomStatus {
+    /// Its emoji, Unicode or a server emoji.
+    pub fn emoji(&self) -> Option<crate::guild::StatusEmoji> {
+        match (self.emoji_id, self.emoji_name.as_deref()) {
+            (Some(id), name) => Some(crate::guild::StatusEmoji::Custom {
+                id,
+                name: name.unwrap_or("").to_owned(),
+                animated: false,
+            }),
+            (None, Some(name)) if !name.is_empty() => {
+                Some(crate::guild::StatusEmoji::Unicode(name.to_owned()))
+            }
+            _ => None,
+        }
+    }
+
+    /// As a status line.
+    pub fn line(&self) -> crate::guild::StatusLine {
+        crate::guild::StatusLine {
+            emoji: self.emoji(),
+            text: self.text.clone().unwrap_or_default().trim().to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

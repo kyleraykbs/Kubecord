@@ -825,7 +825,11 @@ impl AppState {
             move || {
                 if stack.visible_child_name().as_deref() == Some("standard") && !built.replace(true)
                 {
-                    app.fill_standard_emoji(&standard);
+                    let target = app.clone();
+                    app.fill_standard_emoji(
+                        &standard,
+                        Rc::new(move |text: &str| target.insert_composer_text(text)),
+                    );
                 }
             }
         };
@@ -862,7 +866,9 @@ impl AppState {
 
     /// The Unicode emoji by category, with a search over names and
     /// shortcodes.
-    fn fill_standard_emoji(self: &Rc<Self>, page: &gtk::Box) {
+    /// Fills `page` with the standard (Unicode) emoji picker -- search,
+    /// category bar and grid; `on_pick` receives the emoji chosen.
+    pub(crate) fn fill_standard_emoji(self: &Rc<Self>, page: &gtk::Box, on_pick: Rc<dyn Fn(&str)>) {
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Search emoji"));
         page.append(&search);
@@ -913,8 +919,8 @@ impl AppState {
                 let code = emoji.shortcode().unwrap_or(emoji.name());
                 button.set_tooltip_text(Some(&format!(":{code}:")));
                 let text = emoji.as_str();
-                let app = self.clone();
-                button.connect_clicked(move |_| app.insert_composer_text(text));
+                let pick = on_pick.clone();
+                button.connect_clicked(move |_| pick(text));
                 flow.insert(&button, -1);
                 let mut key = emoji.name().to_lowercase();
                 for code in emoji.shortcodes() {

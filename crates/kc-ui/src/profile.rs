@@ -62,6 +62,8 @@ struct Model {
     status: String,
     /// The custom status, else the activity, else "Online" and the like.
     status_text: String,
+    /// The custom status's emoji, drawn ahead of `status_text`.
+    status_emoji: Option<kc_state::StatusEmoji>,
     is_me: bool,
     bot: bool,
     relationship: Option<u8>,
@@ -299,6 +301,19 @@ impl AppState {
                 }
                 _ => false,
             };
+            // Your own custom status lives in your settings; anyone else's in
+            // their presence.
+            let status_line = if me == Some(user_id) {
+                state
+                    .custom_status
+                    .as_ref()
+                    .map(kc_state::CustomStatus::line)
+                    .filter(|line| line.emoji.is_some() || !line.text.is_empty())
+            } else {
+                state
+                    .presence(user_id)
+                    .and_then(|presence| presence.status_line())
+            };
             Some(Model {
                 user_id,
                 guild,
@@ -317,10 +332,12 @@ impl AppState {
                 server_nick: member.and_then(|member| member.nick.clone()),
                 friend_nick: relationship.and_then(|relationship| relationship.nickname.clone()),
                 status: state.status_of(user_id).to_owned(),
-                status_text: state
-                    .presence(user_id)
-                    .and_then(|presence| presence.summary())
+                status_text: status_line
+                    .as_ref()
+                    .map(|line| line.text.clone())
+                    .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| status_label(state.status_of(user_id)).to_owned()),
+                status_emoji: status_line.and_then(|line| line.emoji),
                 is_me: me == Some(user_id),
                 bot: user.bot == Some(true),
                 relationship: relationship.map(|relationship| relationship.kind),
@@ -451,9 +468,12 @@ impl Profile {
         status.set_ellipsize(gtk::pango::EllipsizeMode::End);
         status.set_valign(gtk::Align::Center);
         status.add_css_class("caption");
-        let bubble = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let bubble = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bubble.add_css_class("kc-status-bubble");
         bubble.set_size_request(-1, STATUS_HEIGHT);
+        if let Some(emoji) = &model.status_emoji {
+            bubble.append(&crate::widgets::status_emoji_widget(&self.app.images, emoji, 16));
+        }
         bubble.append(&status);
         header.add_overlay(&bubble);
         let target = bubble.downgrade();

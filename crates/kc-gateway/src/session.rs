@@ -207,16 +207,27 @@ impl GatewayHandle {
     /// Announces the account's status for this session. `status` is
     /// `online`, `idle`, `dnd` or `invisible`; `custom` is the custom status
     /// text and optional unicode emoji. Limited to 5 updates per 20 seconds.
-    pub fn update_presence(&self, status: &str, custom: Option<(&str, Option<&str>)>, afk: bool) {
+    /// Sends the account's presence: its status and, if set, its custom
+    /// status -- text plus an emoji, given by name (Unicode, or a server
+    /// emoji's name) and, for a server emoji, its id.
+    pub fn update_presence(
+        &self,
+        status: &str,
+        custom: Option<(&str, Option<&str>, Option<Snowflake>)>,
+        afk: bool,
+    ) {
         let activities = match custom {
-            Some((text, emoji)) => {
+            Some((text, emoji_name, emoji_id)) => {
                 let mut activity = json!({
                     "type": 4,
                     "name": "Custom Status",
                     "state": text,
                 });
-                if let Some(emoji) = emoji {
-                    activity["emoji"] = json!({ "name": emoji });
+                if emoji_name.is_some() || emoji_id.is_some() {
+                    activity["emoji"] = json!({
+                        "name": emoji_name.unwrap_or(""),
+                        "id": emoji_id.map(|id| id.to_string()),
+                    });
                 }
                 vec![activity]
             }

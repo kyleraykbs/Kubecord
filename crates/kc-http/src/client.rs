@@ -991,11 +991,22 @@ impl HttpClient {
         Ok(())
     }
 
-    /// Sets or clears (`None`) the custom status. `emoji` is a unicode emoji.
-    pub async fn set_custom_status(&self, text: Option<&str>, emoji: Option<&str>) -> Result<()> {
-        let custom_status = match (text, emoji) {
-            (None, None) => Value::Null,
-            _ => json!({ "text": text, "emoji_name": emoji, "emoji_id": null, "expires_at": null }),
+    /// Sets or clears (all `None`) the custom status. The emoji is a Unicode
+    /// emoji (`emoji_name` alone) or a server emoji (its id, and its name).
+    pub async fn set_custom_status(
+        &self,
+        text: Option<&str>,
+        emoji_name: Option<&str>,
+        emoji_id: Option<Snowflake>,
+    ) -> Result<()> {
+        let custom_status = match (text, emoji_name, emoji_id) {
+            (None, None, None) => Value::Null,
+            _ => json!({
+                "text": text,
+                "emoji_name": emoji_name,
+                "emoji_id": emoji_id.map(|id| id.to_string()),
+                "expires_at": null,
+            }),
         };
         self.patch(
             "/users/@me/settings",
