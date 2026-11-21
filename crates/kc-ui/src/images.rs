@@ -4,7 +4,7 @@
 //! handed back to the GTK main loop. Images are cached in memory for the
 //! session and on disk under the XDG cache directory.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -22,6 +22,11 @@ const DISK_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// A URL that failed is not requested again for this long. Media posted a
 /// moment ago is sometimes not yet available from the proxy.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How many media file downloads run at once. Requests beyond this queue and
+/// start in request order, so the GIFs currently in view (built first) load
+/// first instead of a whole grid racing and starving each other. Roughly the
+/// number of tiles visible in the picker at a time.
+const MAX_CONCURRENT_FILES: usize = 6;
 
 type Callback = Box<dyn FnOnce(&gdk::Texture)>;
 type FileCallback = Box<dyn FnOnce(Option<PathBuf>)>;
@@ -35,6 +40,11 @@ struct Inner {
     failed: RefCell<HashMap<String, Instant>>,
     /// Downloads to a file (for video playback) in flight, by URL.
     files_waiting: RefCell<HashMap<String, Vec<FileCallback>>>,
+    /// File downloads not yet started, in request order (url, extension), and
+    /// how many are currently running, so no more than [`MAX_CONCURRENT_FILES`]
+    /// run at once and the earliest-requested start first.
+    file_queue: RefCell<VecDeque<(String, String)>>,
+    file_active: Cell<usize>,
     file_results: async_channel::Sender<(String, Option<PathBuf>)>,
     results: async_channel::Sender<(String, Option<gdk::Texture>)>,
 }
@@ -66,6 +76,8 @@ impl ImageCache {
             failed: RefCell::new(HashMap::new()),
             results,
             files_waiting: RefCell::new(HashMap::new()),
+            file_queue: RefCell::new(VecDeque::new()),
+            file_active: Cell::new(0),
             file_results,
         });
 
@@ -81,6 +93,11 @@ impl ImageCache {
                 for callback in callbacks {
                     callback(path.clone());
                 }
+                // Free the slot this download held and start the next queued one.
+                inner
+                    .file_active
+                    .set(inner.file_active.get().saturating_sub(1));
+                inner.pump_files();
             }
         });
 
@@ -149,43 +166,26 @@ impl ImageCache {
     /// path, or `None` when the download failed. Used for media that is
     /// played rather than decoded (GIF-style videos).
     pub fn file(&self, url: &str, extension: &str, done: impl FnOnce(Option<PathBuf>) + 'static) {
-        let Some(directory) = self.inner.directory.clone() else {
+        if self.inner.directory.is_none() {
             done(None);
             return;
-        };
+        }
         let first = {
             let mut waiting = self.inner.files_waiting.borrow_mut();
             let entry = waiting.entry(url.to_owned()).or_default();
             entry.push(Box::new(done));
             entry.len() == 1
         };
+        // A second request for the same URL just waits on the first.
         if !first {
             return;
         }
-        let url = url.to_owned();
-        let path = directory.join(format!("{}.{extension}", cache_name(&url)));
-        let results = self.inner.file_results.clone();
-        self.inner.runtime.spawn(async move {
-            let ready = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-                Some(path)
-            } else {
-                match kc_http::cdn::fetch(&url).await {
-                    // Write under a temporary name so a half-written file is
-                    // never mistaken for a complete one.
-                    Ok(bytes) => {
-                        let partial = path.with_extension("part");
-                        let written = tokio::fs::write(&partial, &bytes).await.is_ok()
-                            && tokio::fs::rename(&partial, &path).await.is_ok();
-                        written.then_some(path)
-                    }
-                    Err(error) => {
-                        tracing::debug!(%error, url, "media download failed");
-                        None
-                    }
-                }
-            };
-            let _ = results.send((url, ready)).await;
-        });
+        // Queue in request order and start it if a slot is free.
+        self.inner
+            .file_queue
+            .borrow_mut()
+            .push_back((url.to_owned(), extension.to_owned()));
+        self.inner.pump_files();
     }
 
     /// A round avatar that shows initials until the image arrives.
@@ -261,6 +261,43 @@ impl ImageCache {
 }
 
 impl Inner {
+    /// Starts queued file downloads up to the concurrency limit, in the order
+    /// they were requested.
+    fn pump_files(&self) {
+        let Some(directory) = self.directory.clone() else {
+            return;
+        };
+        while self.file_active.get() < MAX_CONCURRENT_FILES {
+            let Some((url, extension)) = self.file_queue.borrow_mut().pop_front() else {
+                break;
+            };
+            self.file_active.set(self.file_active.get() + 1);
+            let path = directory.join(format!("{}.{extension}", cache_name(&url)));
+            let results = self.file_results.clone();
+            self.runtime.spawn(async move {
+                let ready = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                    Some(path)
+                } else {
+                    match kc_http::cdn::fetch(&url).await {
+                        // Write under a temporary name so a half-written file is
+                        // never mistaken for a complete one.
+                        Ok(bytes) => {
+                            let partial = path.with_extension("part");
+                            let written = tokio::fs::write(&partial, &bytes).await.is_ok()
+                                && tokio::fs::rename(&partial, &path).await.is_ok();
+                            written.then_some(path)
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, url, "media download failed");
+                            None
+                        }
+                    }
+                };
+                let _ = results.send((url, ready)).await;
+            });
+        }
+    }
+
     fn remember(&self, url: &str, texture: &gdk::Texture) {
         let mut memory = self.memory.borrow_mut();
         let mut order = self.order.borrow_mut();
