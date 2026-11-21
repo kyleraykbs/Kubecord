@@ -39,6 +39,26 @@ pub const BITRATES: [u32; 10] = [
 
 pub const STREAM_DELAYS: [u64; 5] = [0, 500, 1000, 2000, 3000];
 
+/// When messages in the open channel stay quiet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenChannelQuiet {
+    /// While Kubecord is the focused window (as Discord does).
+    #[default]
+    WhileFocused,
+    /// Whenever it is the open channel, even with Kubecord in the background.
+    Always,
+    /// Never: the open channel notifies like any other.
+    Never,
+}
+
+/// The choices, in the order the Notifications page lists them.
+pub const OPEN_CHANNEL_QUIET: [(OpenChannelQuiet, &str); 3] = [
+    (OpenChannelQuiet::WhileFocused, "While Kubecord Is Focused"),
+    (OpenChannelQuiet::Always, "Always"),
+    (OpenChannelQuiet::Never, "Never"),
+];
+
 /// Least time between keyframes sent because packets were lost.
 pub const LOSS_KEYFRAME_SPACINGS_MS: [u32; 4] = [500, 1000, 2000, 3000];
 
@@ -190,6 +210,9 @@ pub struct CapturePreferences {
     pub notify_roles: bool,
     /// Incoming DM and group calls notify.
     pub notify_calls: bool,
+    /// When messages in the channel you have open stay quiet (no sound, no
+    /// notification): one of [`OPEN_CHANNEL_QUIET`].
+    pub open_channel_quiet: OpenChannelQuiet,
     /// Show the number of new notifications in the window title until the
     /// window is looked at again.
     pub notify_mark_window: bool,
@@ -280,6 +303,7 @@ impl Default for CapturePreferences {
             notify_everyone: true,
             notify_roles: true,
             notify_calls: true,
+            open_channel_quiet: OpenChannelQuiet::WhileFocused,
             notify_mark_window: true,
             sounds_enabled: true,
             sound_volume: 0.6,

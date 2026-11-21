@@ -68,6 +68,9 @@ pub(crate) struct ChatView {
     newer_loading: bool,
     /// "Jump to Present", shown while the window stops short of the present.
     present: Option<gtk::Button>,
+    /// A message to jump to once this channel's first page of history is in
+    /// (set when a notification opens a channel that is still loading).
+    pending_jump: Option<(Snowflake, Snowflake)>,
 }
 
 /// A small flat text button used for inline actions like Retry / Delete.
@@ -596,6 +599,7 @@ impl AppState {
             // First page for this channel.
             self.chat.borrow_mut().channel = None;
             self.render_messages();
+            self.take_pending_jump(channel_id);
             return;
         };
         let Some((_, _, store)) = self.active() else {
@@ -1732,6 +1736,40 @@ impl AppState {
     }
 
     /// Jumps to a message, loading the history around it when necessary.
+    /// Jumps to `message_id` in the just-opened `channel_id`: now if its row
+    /// is already shown or nothing is loading (fetching around it if needed),
+    /// otherwise as soon as the channel's first page of history arrives, so
+    /// that page's render cannot snap the view back to the bottom afterwards.
+    pub(crate) fn jump_when_ready(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
+        let loading = self
+            .with_session(|session| {
+                session
+                    .history
+                    .get(&channel_id)
+                    .is_some_and(|history| history.loading)
+            })
+            .unwrap_or(false);
+        let shown = self.chat.borrow().rows.iter().any(|row| row.id == message_id);
+        if loading && !shown {
+            self.chat.borrow_mut().pending_jump = Some((channel_id, message_id));
+        } else {
+            self.chat.borrow_mut().pending_jump = None;
+            self.jump_or_fetch(channel_id, message_id);
+        }
+    }
+
+    /// Runs a jump [`jump_when_ready`](Self::jump_when_ready) deferred for
+    /// `channel_id`, now that its history is in.
+    fn take_pending_jump(self: &Rc<Self>, channel_id: Snowflake) {
+        let pending = self.chat.borrow().pending_jump;
+        if let Some((channel, message)) = pending
+            && channel == channel_id
+        {
+            self.chat.borrow_mut().pending_jump = None;
+            self.jump_or_fetch(channel, message);
+        }
+    }
+
     pub(crate) fn jump_or_fetch(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
         if self.jump_to_message(message_id) {
             return;

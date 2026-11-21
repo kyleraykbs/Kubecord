@@ -267,6 +267,34 @@ impl AppState {
         row
     }
 
+    /// When the channel you have open stays quiet (no sound or notification).
+    fn open_channel_quiet_row(self: &Rc<Self>) -> adw::ComboRow {
+        use crate::settings::OPEN_CHANNEL_QUIET;
+        let row = adw::ComboRow::new();
+        row.set_title("Quiet the Open Channel");
+        row.set_subtitle(
+            "No sound or notification for messages in the channel you have open. \"While Kubecord Is Focused\" is Discord's behaviour; \"Always\" also keeps it quiet with the window in the background.",
+        );
+        row.set_subtitle_lines(0);
+        let names: Vec<&str> = OPEN_CHANNEL_QUIET.iter().map(|(_, name)| *name).collect();
+        row.set_model(Some(&gtk::StringList::new(&names)));
+        let current = self.capture.borrow().open_channel_quiet;
+        row.set_selected(
+            OPEN_CHANNEL_QUIET
+                .iter()
+                .position(|(choice, _)| *choice == current)
+                .unwrap_or(0) as u32,
+        );
+        let app = self.clone();
+        row.connect_selected_notify(move |row| {
+            if let Some((choice, _)) = OPEN_CHANNEL_QUIET.get(row.selected() as usize) {
+                let choice = *choice;
+                app.update_prefs(|prefs| prefs.open_channel_quiet = choice);
+            }
+        });
+        row
+    }
+
     /// Desktop notifications: whether, what, and how they look.
     fn notifications_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
@@ -337,6 +365,7 @@ impl AppState {
             |prefs| prefs.notify_calls,
             |prefs, on| prefs.notify_calls = on,
         ));
+        what.add(&self.open_channel_quiet_row());
         page.append(&what);
 
         let window = adw::PreferencesGroup::new();

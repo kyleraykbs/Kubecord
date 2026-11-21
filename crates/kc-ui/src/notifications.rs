@@ -36,6 +36,9 @@ pub(crate) struct Shown {
     calls: HashSet<Snowflake>,
     /// Notifications since the window was last looked at.
     unseen: u32,
+    /// Messages that recently notified, so one seen by two signed-in accounts
+    /// (both in the same server or group) sounds and shows only once.
+    recent: std::collections::VecDeque<Snowflake>,
     /// The window title without the count.
     title: String,
 }
@@ -215,12 +218,20 @@ impl AppState {
         channel_id: Snowflake,
         message_id: Snowflake,
     ) {
-        let viewing = self.window.is_active()
-            && self.model.borrow().active == Some(account)
-            && self
-                .with_session(|session| session.selected_channel == Some(channel_id))
-                .unwrap_or(false);
         let prefs = self.capture.borrow().clone();
+        // Whether this is the channel on screen. Channel ids are global, so
+        // this holds whichever signed-in account the message reached: with two
+        // accounts in one server, the background account must not ping you
+        // about the channel you are reading with the other.
+        let open = self
+            .with_session(|session| session.selected_channel == Some(channel_id))
+            .unwrap_or(false);
+        let viewing = open
+            && match prefs.open_channel_quiet {
+                crate::settings::OpenChannelQuiet::WhileFocused => self.window.is_active(),
+                crate::settings::OpenChannelQuiet::Always => true,
+                crate::settings::OpenChannelQuiet::Never => false,
+            };
         let prepared = {
             let model = self.model.borrow();
             let Some(session) = model.sessions.get(&account) else {
@@ -234,6 +245,16 @@ impl AppState {
         let Some(prepared) = prepared else {
             return;
         };
+        {
+            let mut shown = self.notifications.borrow_mut();
+            if shown.recent.contains(&message_id) {
+                return;
+            }
+            shown.recent.push_back(message_id);
+            if shown.recent.len() > 64 {
+                shown.recent.pop_front();
+            }
+        }
         self.notification_sound(prepared.reason.is_mention());
         if !prefs.notify_desktop {
             return;
@@ -432,11 +453,10 @@ impl AppState {
         };
         self.open_channel(channel);
         if let Some(message_id) = message_id {
-            // The history may still be loading; jump once it is shown.
-            let app = self.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
-                app.jump_or_fetch(channel_id, message_id);
-            });
+            // Centre and flash the message itself, not just the channel. If
+            // the channel's history is still loading this waits for it, so
+            // the first page's render does not snap back to the bottom.
+            self.jump_when_ready(channel_id, message_id);
         }
     }
 
