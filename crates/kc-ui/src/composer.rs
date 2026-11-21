@@ -741,13 +741,32 @@ impl AppState {
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Search emoji"));
         page.append(&search);
+        // A row of category icons that jump to each section (like Discord).
+        let nav = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        nav.add_css_class("linked");
+        nav.add_css_class("kc-emoji-nav");
+        nav.set_halign(gtk::Align::Center);
+        page.append(&nav);
         let groups = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        page.append(&picker_scroll(&groups));
+        let scroll = picker_scroll(&groups);
+        page.append(&scroll);
 
         let query = Rc::new(std::cell::RefCell::new(String::new()));
         let mut parts: Vec<(gtk::Label, gtk::FlowBox, Rc<Vec<String>>)> = Vec::new();
         for group in emojis::Group::iter() {
             let heading = label(&group_title(group).to_uppercase(), &["kc-category"]);
+
+            // The nav button that scrolls this section's heading to the top.
+            let jump = gtk::Button::with_label(group_icon(group));
+            jump.add_css_class("flat");
+            jump.add_css_class("kc-emoji-nav-button");
+            jump.set_tooltip_text(Some(group_title(group)));
+            let scroll = scroll.clone();
+            let heading_target = heading.clone();
+            jump.connect_clicked(move |_| {
+                scroll_to_heading(&scroll, heading_target.upcast_ref());
+            });
+            nav.append(&jump);
             let flow = gtk::FlowBox::new();
             flow.set_selection_mode(gtk::SelectionMode::None);
             flow.set_max_children_per_line(8);
@@ -1639,6 +1658,34 @@ fn picker_scroll(child: &gtk::Box) -> gtk::ScrolledWindow {
     scroll.set_min_content_width(336);
     scroll.set_child(Some(child));
     scroll
+}
+
+/// Scrolls `scroll` so `heading` sits at the top of its viewport.
+fn scroll_to_heading(scroll: &gtk::ScrolledWindow, heading: &gtk::Widget) {
+    let Some(content) = scroll.child() else {
+        return;
+    };
+    let Some(bounds) = heading.compute_bounds(&content) else {
+        return;
+    };
+    let adjustment = scroll.vadjustment();
+    let max = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+    adjustment.set_value(f64::from(bounds.y()).clamp(adjustment.lower(), max));
+}
+
+/// A representative emoji for each category, shown in the jump-to-section bar.
+fn group_icon(group: emojis::Group) -> &'static str {
+    match group {
+        emojis::Group::SmileysAndEmotion => "😀",
+        emojis::Group::PeopleAndBody => "🧑",
+        emojis::Group::AnimalsAndNature => "🐻",
+        emojis::Group::FoodAndDrink => "🍔",
+        emojis::Group::TravelAndPlaces => "✈\u{fe0f}",
+        emojis::Group::Activities => "⚽",
+        emojis::Group::Objects => "💡",
+        emojis::Group::Symbols => "❤\u{fe0f}",
+        emojis::Group::Flags => "🏁",
+    }
 }
 
 /// A Unicode emoji category's name, as Discord shows it.

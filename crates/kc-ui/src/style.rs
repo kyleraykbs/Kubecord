@@ -75,6 +75,20 @@ const CSS: &str = r#"
     opacity: 0.6;
 }
 
+.kc-emoji-nav {
+    margin-bottom: 2px;
+}
+
+.kc-emoji-nav-button {
+    padding: 2px 4px;
+    min-width: 0;
+    min-height: 0;
+}
+
+.kc-emoji-nav-button label {
+    font-size: 1.1em;
+}
+
 .kc-status-dot {
     min-width: 10px;
     min-height: 10px;
