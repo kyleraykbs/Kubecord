@@ -1097,6 +1097,20 @@ impl AppState {
             ));
             column.append(&thinking);
         }
+        // Earlier versions (kept by the message logger), oldest first,
+        // dimmed above the current text.
+        if !message.edits.is_empty() {
+            let history = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            history.add_css_class("kc-edit-history");
+            for edit in &message.edits {
+                if let Some(old) = self.text_widget(&edit.content, guild, state) {
+                    old.add_css_class("kc-old-version");
+                    old.set_tooltip_text(Some(&format!("Before an edit (written {})", format_time(&edit.at))));
+                    history.append(&old);
+                }
+            }
+            column.append(&history);
+        }
         if let Some(text) = self.text_widget(&message.content, guild, state) {
             // A message that is just a link to its own media embed shows only
             // the media, as the official client does.

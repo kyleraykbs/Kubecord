@@ -342,6 +342,21 @@ pub(crate) fn format_text(
             continue;
         }
         let mut text = body(message);
+        // Earlier versions the message logger kept, oldest first.
+        if !message.edits.is_empty() {
+            let earlier: Vec<String> = message
+                .edits
+                .iter()
+                .map(|edit| {
+                    if options.markdown {
+                        format!("~~{}~~ *(edited)*", edit.content)
+                    } else {
+                        format!("[before edit] {}", edit.content)
+                    }
+                })
+                .collect();
+            text = format!("{}\n{text}", earlier.join("\n"));
+        }
         // Kept by the message logger after it was deleted.
         if message.deleted {
             text = if options.markdown {
@@ -966,6 +981,14 @@ impl AppState {
                 found.extend(crate::logger::deleted_between(channel, low, high));
                 found.sort_by_key(|message| message.id);
                 found.dedup_by_key(|message| message.id);
+                let mut edits = crate::logger::edits_between(channel, low, high);
+                for message in &mut found {
+                    if message.edits.is_empty()
+                        && let Some(earlier) = edits.remove(&message.id)
+                    {
+                        message.edits = earlier;
+                    }
+                }
                 Ok::<_, kc_http::Error>(found)
             },
             move |app, result| match result {
@@ -1510,6 +1533,37 @@ mod tests {
             vec![(2, Mark::In), (3, Mark::Skipped(3)), (6, Mark::In), (7, Mark::Skipped(1)), (8, Mark::In)]
         );
         assert_eq!(skipped_text(1), "1 message skipped");
+    }
+
+    #[test]
+    fn edit_history_comes_before_the_text() {
+        let mut message: Message = serde_json::from_value(serde_json::json!({
+            "id": "1", "channel_id": "1", "content": "Meet at 6.",
+            "author": {"id": "7", "username": "linus"}, "timestamp": "2026-11-21T10:00:00+00:00"
+        }))
+        .unwrap();
+        message.edits = vec![kc_state::MessageEdit { content: "Meet at 5.".to_owned(), at: String::new() }];
+        let items = vec![(message, Mark::In)];
+        let name = |m: &Message| m.author.username.clone();
+        let body = |m: &Message| m.content.clone();
+        let time = |_: &Message| "10:00".to_owned();
+        let system = |_: &Message| None;
+        let mut options = ExportOptions {
+            picture: false,
+            times: false,
+            leave_out_redacted: false,
+            markdown: false,
+            high_resolution: false,
+        };
+        assert_eq!(
+            format_text(&items, &name, &body, &time, &system, options),
+            "linus: [before edit] Meet at 5.\n    Meet at 6.\n"
+        );
+        options.markdown = true;
+        assert_eq!(
+            format_text(&items, &name, &body, &time, &system, options),
+            "**linus**\n~~Meet at 5.~~ *(edited)*\nMeet at 6.\n"
+        );
     }
 
     #[test]

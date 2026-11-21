@@ -255,10 +255,22 @@ pub struct Message {
     /// Deleted on Discord, and shown from the message log.
     #[serde(skip)]
     pub deleted: bool,
+    /// Earlier versions of the text, oldest first, from the message log.
+    #[serde(skip)]
+    pub edits: Vec<MessageEdit>,
     /// Local send progress for a message shown before Discord confirms it.
     /// Never sent by Discord; always [`SendState::Sent`] for its messages.
     #[serde(skip)]
     pub send_state: SendState,
+}
+
+/// An earlier version of a message's text, kept by the message log.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageEdit {
+    pub content: String,
+    /// When this version was written (the message's time, or an earlier
+    /// edit's).
+    pub at: String,
 }
 
 /// A DM call a message records.
@@ -366,6 +378,7 @@ impl Message {
             interaction: None,
             call: None,
             deleted: false,
+            edits: Vec::new(),
             send_state: SendState::Sending,
         }
     }

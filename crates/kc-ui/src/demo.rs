@@ -798,6 +798,22 @@ impl AppState {
                         &message(gone, ADA, "This message gets deleted, but the logger keeps it."),
                     );
                     send("MESSAGE_CREATE", &message(id_at(0, 42), GRACE, "This one stays."));
+                    // Edited twice: both earlier versions are kept.
+                    let edited = id_at(0, 43);
+                    send("MESSAGE_CREATE", &message(edited, 4, "Meet at 5."));
+                    for (step, text) in ["Meet at 6.", "Meet at 6, at the cafe."].iter().enumerate() {
+                        let mut changed = message(edited, 4, text);
+                        changed["edited_timestamp"] = json!(iso_of(id_at(0, 50 + step as u64)));
+                        send("MESSAGE_UPDATE", &changed);
+                    }
+                    // A message loaded with the history, edited: its first
+                    // version comes from the store.
+                    let loaded = app.chat.borrow().rows.iter().rev().nth(6).map(|entry| entry.id);
+                    if let Some(loaded) = loaded {
+                        let mut changed = message(loaded.get(), ADA, "Message number 34, edited.");
+                        changed["edited_timestamp"] = json!(iso_of(id_at(0, 60)));
+                        send("MESSAGE_UPDATE", &changed);
+                    }
                     let older = app.chat.borrow().rows.iter().rev().nth(4).map(|entry| entry.id);
                     let app = app.clone();
                     let store = store.clone();
@@ -837,6 +853,26 @@ impl AppState {
                         });
                         app.redraw_times();
                         kept("after reloading");
+                        let edits: Vec<(String, Vec<String>)> = store.read(|state| {
+                            state
+                                .messages
+                                .get(&Snowflake::new(GENERAL))
+                                .map(|buffer| {
+                                    buffer
+                                        .messages()
+                                        .iter()
+                                        .filter(|message| !message.edits.is_empty())
+                                        .map(|message| {
+                                            (
+                                                message.content.clone(),
+                                                message.edits.iter().map(|edit| edit.content.clone()).collect(),
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        });
+                        eprintln!("demo: edit history {edits:?}");
                     });
                 });
             }

@@ -1931,6 +1931,17 @@ impl AppState {
                 self.merge_logged(account, channel_id);
                 StoreEvent::HistoryLoaded(channel_id)
             }
+            // An edit replaced the message: its earlier versions go back on.
+            StoreEvent::MessageUpdated {
+                channel_id,
+                message_id,
+            } => {
+                self.attach_edits(account, channel_id, message_id);
+                StoreEvent::MessageUpdated {
+                    channel_id,
+                    message_id,
+                }
+            }
             other => other,
         };
         // Any signed-in account can notify, not only the one shown.

@@ -239,6 +239,12 @@ const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS logged_deleted ON logged (channel_id, deleted_at, id);
     CREATE INDEX IF NOT EXISTS logged_received ON logged (received_at);
+    CREATE TABLE IF NOT EXISTS logged_edits (
+        message_id INTEGER NOT NULL,
+        edited_at TEXT NOT NULL,
+        content TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS logged_edits_message ON logged_edits (message_id);
     CREATE TABLE IF NOT EXISTS logged_media (
         message_id INTEGER NOT NULL,
         attachment_id INTEGER NOT NULL,
@@ -447,16 +453,19 @@ fn held_since(db: &Connection, since: i64) -> rusqlite::Result<i64> {
     db.query_row(
         "SELECT COALESCE((SELECT SUM(length(json)) FROM logged WHERE received_at >= ?1), 0)
               + COALESCE((SELECT SUM(m.size) FROM logged_media m JOIN logged l ON l.id = m.message_id
+                          WHERE l.received_at >= ?1), 0)
+              + COALESCE((SELECT SUM(length(e.content)) FROM logged_edits e JOIN logged l ON l.id = e.message_id
                           WHERE l.received_at >= ?1), 0)",
         params![since],
         |row| row.get(0),
     )
 }
 
-/// Brings the log within its week, month and year limits: the largest
-/// attachments go first, then (when no media is left to remove) text, the
-/// least important kind and oldest first. Only the kinds whose clean-up is
-/// on are touched; past that, the limit is left exceeded.
+/// Brings the log within its week, month and year limits. Media goes
+/// first, the largest first, across every limit; only once no media is left
+/// to drop does text go, the least important kind and oldest first (with its
+/// earlier versions). Only the kinds whose clean-up is on are touched; past
+/// that, a limit is left exceeded.
 pub(crate) fn enforce_limits(prefs: &LoggerPrefs) {
     let paths = with_db(|db| enforce_on(db, prefs, now())).unwrap_or_default();
     remove_media_files(&paths);
@@ -472,58 +481,69 @@ fn enforce_on(db: &Connection, prefs: &LoggerPrefs, now: i64) -> rusqlite::Resul
     }
     let ranks_sql = ranks.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     const DAY: i64 = 24 * 60 * 60;
-    for (days, mb) in [(7, prefs.week_mb), (30, prefs.month_mb), (365, prefs.year_mb)] {
-        if mb == 0 {
+    let windows: Vec<(i64, i64)> = [(7, prefs.week_mb), (30, prefs.month_mb), (365, prefs.year_mb)]
+        .into_iter()
+        .filter(|(_, mb)| *mb > 0)
+        .map(|(days, mb)| (now - days * DAY, i64::from(mb) * 1024 * 1024))
+        .collect();
+
+    // First pass: media, every limit.
+    for &(since, limit) in &windows {
+        let mut over = held_since(db, since)? - limit;
+        if over <= 0 {
             continue;
         }
-        let since = now - days * DAY;
-        let mut over = held_since(db, since)? - i64::from(mb) * 1024 * 1024;
-        // The largest attachments first.
-        if over > 0 {
-            let media: Vec<(i64, i64, String, i64)> = db
-                .prepare(&format!(
-                    "SELECT m.message_id, m.attachment_id, m.path, m.size FROM logged_media m
-                     JOIN logged l ON l.id = m.message_id
-                     WHERE l.received_at >= ?1 AND l.kind IN ({ranks_sql})
-                     ORDER BY m.size DESC"
-                ))?
-                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            for (message_id, attachment_id, path, size) in media {
-                if over <= 0 {
-                    break;
-                }
-                db.execute(
-                    "DELETE FROM logged_media WHERE message_id = ?1 AND attachment_id = ?2",
-                    params![message_id, attachment_id],
-                )?;
-                removed.push(path);
-                over -= size.max(1);
+        let media: Vec<(i64, i64, String, i64)> = db
+            .prepare(&format!(
+                "SELECT m.message_id, m.attachment_id, m.path, m.size FROM logged_media m
+                 JOIN logged l ON l.id = m.message_id
+                 WHERE l.received_at >= ?1 AND l.kind IN ({ranks_sql})
+                 ORDER BY m.size DESC"
+            ))?
+            .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (message_id, attachment_id, path, size) in media {
+            if over <= 0 {
+                break;
             }
+            db.execute(
+                "DELETE FROM logged_media WHERE message_id = ?1 AND attachment_id = ?2",
+                params![message_id, attachment_id],
+            )?;
+            removed.push(path);
+            over -= size.max(1);
         }
-        // Then text: the least important kind, oldest first.
-        if over > 0 {
-            let texts: Vec<(i64, i64)> = db
-                .prepare(&format!(
-                    "SELECT id, length(json) FROM logged
-                     WHERE received_at >= ?1 AND kind IN ({ranks_sql})
-                     ORDER BY kind DESC, received_at ASC"
-                ))?
-                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            for (id, size) in texts {
-                if over <= 0 {
-                    break;
-                }
-                let paths: Vec<String> = db
-                    .prepare_cached("SELECT path FROM logged_media WHERE message_id = ?1")?
-                    .query_map(params![id], |row| row.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
-                db.execute("DELETE FROM logged_media WHERE message_id = ?1", params![id])?;
-                db.execute("DELETE FROM logged WHERE id = ?1", params![id])?;
-                removed.extend(paths);
-                over -= size.max(1);
+    }
+
+    // Second pass, only where dropping media was not enough: text.
+    for &(since, limit) in &windows {
+        let mut over = held_since(db, since)? - limit;
+        if over <= 0 {
+            continue;
+        }
+        let texts: Vec<(i64, i64)> = db
+            .prepare(&format!(
+                "SELECT l.id, length(l.json)
+                   + COALESCE((SELECT SUM(length(e.content)) FROM logged_edits e WHERE e.message_id = l.id), 0)
+                 FROM logged l
+                 WHERE l.received_at >= ?1 AND l.kind IN ({ranks_sql})
+                 ORDER BY l.kind DESC, l.received_at ASC"
+            ))?
+            .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, size) in texts {
+            if over <= 0 {
+                break;
             }
+            let paths: Vec<String> = db
+                .prepare_cached("SELECT path FROM logged_media WHERE message_id = ?1")?
+                .query_map(params![id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            db.execute("DELETE FROM logged_media WHERE message_id = ?1", params![id])?;
+            db.execute("DELETE FROM logged_edits WHERE message_id = ?1", params![id])?;
+            db.execute("DELETE FROM logged WHERE id = ?1", params![id])?;
+            removed.extend(paths);
+            over -= size.max(1);
         }
     }
     Ok(removed)
@@ -539,18 +559,55 @@ pub(crate) fn observe(account: AccountId, name: &str, data: &Value, store: &kc_s
             let Some(id) = id_of(&data["id"]) else {
                 return;
             };
+            let snowflake = id;
             let id = id.get() as i64;
-            // A full message replaces the copy; a partial one (an embed
-            // filling in) patches it.
-            let stored: Option<String> = with_db(|db| {
-                db.query_row("SELECT json FROM logged WHERE id = ?1", params![id], |row| row.get(0))
-                    .optional()
-            })
-            .flatten();
+            let read = || -> Option<String> {
+                with_db(|db| {
+                    db.query_row("SELECT json FROM logged WHERE id = ?1", params![id], |row| row.get(0))
+                        .optional()
+                })
+                .flatten()
+            };
+            // Not logged when it came (loaded with the history): logged now,
+            // from the copy the store still has, so its old text is kept.
+            let stored = read().or_else(|| {
+                let channel = id_of(&data["channel_id"])?;
+                let copy = store.read(|state| {
+                    state
+                        .messages
+                        .get(&channel)
+                        .and_then(|buffer| buffer.get(snowflake))
+                        .and_then(|message| serde_json::to_value(message).ok())
+                })?;
+                log_message(account, &copy, store, false);
+                read()
+            });
             let Some(stored) = stored else {
                 return;
             };
             let mut json: Value = serde_json::from_str(&stored).unwrap_or(Value::Null);
+            // The text changed: the old version goes in the history, dated
+            // when it was written.
+            if let Some(new) = data.get("content").and_then(Value::as_str)
+                && let Some(old) = json["content"].as_str()
+                && old != new
+                && !old.is_empty()
+            {
+                let written = json["edited_timestamp"]
+                    .as_str()
+                    .or_else(|| json["timestamp"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let old = old.to_owned();
+                with_db(|db| {
+                    db.execute(
+                        "INSERT INTO logged_edits (message_id, edited_at, content) VALUES (?1, ?2, ?3)",
+                        params![id, written, old],
+                    )
+                });
+            }
+            // A full message replaces the copy; a partial one (an embed
+            // filling in) patches it.
             if data.get("author").is_some() {
                 json = data.clone();
             } else if let Some(object) = data.as_object() {
@@ -607,9 +664,10 @@ pub(crate) fn observe(account: AccountId, name: &str, data: &Value, store: &kc_s
 
 /// Reads a logged row as a deleted message, its attachments pointing at the
 /// kept copies.
-fn deleted_message(json: &str, media: &HashMap<i64, String>) -> Option<Message> {
+fn deleted_message(json: &str, media: &HashMap<i64, String>, edits: Vec<kc_state::MessageEdit>) -> Option<Message> {
     let mut message: Message = serde_json::from_str(json).ok()?;
     message.deleted = true;
+    message.edits = edits;
     for attachment in &mut message.attachments {
         if let Some(path) = media.get(&(attachment.id.get() as i64)) {
             let uri = format!("file://{path}");
@@ -618,6 +676,61 @@ fn deleted_message(json: &str, media: &HashMap<i64, String>) -> Option<Message> 
         }
     }
     Some(message)
+}
+
+/// The earlier versions of a message, oldest first.
+fn edits_of(db: &Connection, message_id: i64) -> rusqlite::Result<Vec<kc_state::MessageEdit>> {
+    let mut query = db.prepare_cached(
+        "SELECT content, edited_at FROM logged_edits WHERE message_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = query.query_map(params![message_id], |row| {
+        Ok(kc_state::MessageEdit {
+            content: row.get(0)?,
+            at: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The earlier versions of messages in `channel` from `low` to `high`, by
+/// message.
+pub(crate) fn edits_between(
+    channel: Snowflake,
+    low: Snowflake,
+    high: Snowflake,
+) -> HashMap<Snowflake, Vec<kc_state::MessageEdit>> {
+    with_db(|db| {
+        let mut query = db.prepare_cached(
+            "SELECT e.message_id, e.content, e.edited_at FROM logged_edits e
+             JOIN logged l ON l.id = e.message_id
+             WHERE l.channel_id = ?1 AND e.message_id BETWEEN ?2 AND ?3
+             ORDER BY e.rowid",
+        )?;
+        let mut found: HashMap<Snowflake, Vec<kc_state::MessageEdit>> = HashMap::new();
+        let rows = query.query_map(
+            params![channel.get() as i64, low.get() as i64, high.get().min(i64::MAX as u64) as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    kc_state::MessageEdit {
+                        content: row.get(1)?,
+                        at: row.get(2)?,
+                    },
+                ))
+            },
+        )?;
+        for row in rows {
+            let (id, edit) = row?;
+            found.entry(Snowflake::new(id as u64)).or_default().push(edit);
+        }
+        Ok(found)
+    })
+    .unwrap_or_default()
+}
+
+/// The earlier versions of one message.
+pub(crate) fn edits(message_id: Snowflake) -> Vec<kc_state::MessageEdit> {
+    with_db(|db| edits_of(db, message_id.get() as i64)).unwrap_or_default()
 }
 
 fn media_of(db: &Connection, message_id: i64) -> rusqlite::Result<HashMap<i64, String>> {
@@ -637,7 +750,9 @@ pub(crate) fn deleted(message_id: Snowflake) -> Option<Message> {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(json.and_then(|json| deleted_message(&json, &media_of(db, id).unwrap_or_default())))
+        Ok(json.and_then(|json| {
+            deleted_message(&json, &media_of(db, id).unwrap_or_default(), edits_of(db, id).unwrap_or_default())
+        }))
     })
     .flatten()
 }
@@ -657,7 +772,9 @@ pub(crate) fn deleted_between(channel: Snowflake, low: Snowflake, high: Snowflak
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, json)| deleted_message(&json, &media_of(db, id).unwrap_or_default()))
+            .filter_map(|(id, json)| {
+                deleted_message(&json, &media_of(db, id).unwrap_or_default(), edits_of(db, id).unwrap_or_default())
+            })
             .collect())
     })
     .unwrap_or_default()
@@ -679,6 +796,7 @@ pub(crate) fn forget(message_id: Snowflake) {
     let paths: Vec<String> = with_db(|db| {
         let paths = media_of(db, id)?.into_values().collect();
         db.execute("DELETE FROM logged_media WHERE message_id = ?1", params![id])?;
+        db.execute("DELETE FROM logged_edits WHERE message_id = ?1", params![id])?;
         db.execute("DELETE FROM logged WHERE id = ?1", params![id])?;
         Ok(paths)
     })
@@ -712,6 +830,15 @@ pub(crate) fn prune() {
         // Text expired with no media left: gone.
         db.execute(
             "DELETE FROM logged WHERE text_until IS NOT NULL AND text_until < ?1 AND media_until = 0",
+            params![now],
+        )?;
+        db.execute(
+            "DELETE FROM logged_edits WHERE message_id NOT IN (SELECT id FROM logged)",
+            [],
+        )?;
+        db.execute(
+            "DELETE FROM logged_edits WHERE message_id IN
+             (SELECT id FROM logged WHERE text_until IS NOT NULL AND text_until < ?1)",
             params![now],
         )?;
         // Text expired with media still kept: the text goes.
@@ -765,7 +892,7 @@ fn folder_size(dir: &Path) -> u64 {
 
 /// Empties the log.
 pub(crate) fn clear() {
-    with_db(|db| db.execute_batch("DELETE FROM logged_media; DELETE FROM logged;"));
+    with_db(|db| db.execute_batch("DELETE FROM logged_media; DELETE FROM logged_edits; DELETE FROM logged;"));
     if let Some(dir) = media_folder() {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -804,8 +931,31 @@ impl crate::shell::AppState {
         })
     }
 
+    /// Gives a message in `account`'s store the earlier versions of its text
+    /// the log kept (after an edit replaced it).
+    pub(crate) fn attach_edits(&self, account: AccountId, channel: Snowflake, message_id: Snowflake) {
+        let found = edits(message_id);
+        if found.is_empty() {
+            return;
+        }
+        let store = self
+            .model
+            .borrow()
+            .sessions
+            .get(&account)
+            .map(|session| session.store.clone());
+        if let Some(store) = store {
+            store.write(|state| {
+                if let Some(buffer) = state.messages.get_mut(&channel) {
+                    buffer.update_with(message_id, |message| message.edits = found);
+                }
+            });
+        }
+    }
+
     /// Adds the logged deleted messages of `channel` that fall in its loaded
-    /// stretch (after history replaced or grew it).
+    /// stretch (after history replaced or grew it), and the earlier versions
+    /// of the edited ones.
     pub(crate) fn merge_logged(&self, account: AccountId, channel: Snowflake) {
         let store = self
             .model
@@ -831,6 +981,13 @@ impl crate::shell::AppState {
                 .collect();
             if !missing.is_empty() {
                 buffer.extend(missing);
+            }
+            for (id, found) in edits_between(channel, first, high) {
+                buffer.update_with(id, |message| {
+                    if message.edits.is_empty() {
+                        message.edits = found;
+                    }
+                });
             }
         });
     }
@@ -921,6 +1078,44 @@ mod tests {
     }
 
     #[test]
+    fn all_media_goes_before_any_text() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute("ALTER TABLE logged ADD COLUMN kind INTEGER NOT NULL DEFAULT 2", []).unwrap();
+        db.execute("ALTER TABLE logged_media ADD COLUMN size INTEGER NOT NULL DEFAULT 0", []).unwrap();
+        let mb = 1024 * 1024;
+        let day = 24 * 60 * 60;
+        let now = 400 * day;
+        // This week: 600 KB of text; three weeks ago: 2 MB of media.
+        db.execute(
+            "INSERT INTO logged (id, channel_id, received_at, json, kind) VALUES (1, 1, ?1, ?2, 2), (2, 1, ?3, 'x', 2)",
+            params![now - day, "x".repeat(600 * 1024), now - 21 * day],
+        )
+        .unwrap();
+        db.execute("INSERT INTO logged_media (message_id, attachment_id, path, size) VALUES (2, 1, 'old', ?1)", params![2 * mb])
+            .unwrap();
+        db.execute("INSERT INTO logged_edits (message_id, edited_at, content) VALUES (1, 't', 'before')", [])
+            .unwrap();
+        // Over the month's 1 MB (2.6 MB) and the week's 0.5 MB (0.6 MB).
+        let prefs = LoggerPrefs { week_mb: 0, month_mb: 1, ..LoggerPrefs::default() };
+        let removed = enforce_on(&db, &prefs, now).unwrap();
+        // Dropping the old media was enough for the month: no text went.
+        assert_eq!(removed, vec!["old".to_owned()]);
+        let rows: i64 = db.query_row("SELECT COUNT(*) FROM logged", [], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 2);
+        // A week limit below the text: no media is left, so text goes,
+        // with its earlier versions.
+        let prefs = LoggerPrefs { week_mb: 0, month_mb: 0, year_mb: 0, ..LoggerPrefs::default() };
+        assert!(enforce_on(&db, &prefs, now).unwrap().is_empty());
+        db.execute("UPDATE logged SET json = ?1 WHERE id = 1", params!["x".repeat(2 * 1024 * 1024)]).unwrap();
+        let prefs = LoggerPrefs { week_mb: 1, ..LoggerPrefs::default() };
+        enforce_on(&db, &prefs, now).unwrap();
+        let edits: i64 = db.query_row("SELECT COUNT(*) FROM logged_edits", [], |row| row.get(0)).unwrap();
+        let left: i64 = db.query_row("SELECT COUNT(*) FROM logged", [], |row| row.get(0)).unwrap();
+        assert_eq!((left, edits), (1, 0));
+    }
+
+    #[test]
     fn times_to_keep() {
         assert_eq!(Keep::Forever.until(100), None);
         assert_eq!(Keep::Day.until(100), Some(100 + 86_400));
@@ -937,7 +1132,7 @@ mod tests {
         })
         .to_string();
         let media = HashMap::from([(9, "/logs/5/9-cat.png".to_owned())]);
-        let message = deleted_message(&json, &media).unwrap();
+        let message = deleted_message(&json, &media, Vec::new()).unwrap();
         assert!(message.deleted);
         assert_eq!(message.attachments[0].url, "file:///logs/5/9-cat.png");
     }

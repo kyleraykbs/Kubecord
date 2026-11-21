@@ -205,6 +205,16 @@ const CSS: &str = r#"
     background-color: alpha(@error_bg_color, 0.14);
     box-shadow: inset 2px 0 0 @error_bg_color;
 }
+/* Earlier versions of an edited message, kept by the message logger. */
+.kc-old-version {
+    opacity: 0.5;
+}
+.kc-edit-history {
+    border-left: 2px solid alpha(currentColor, 0.2);
+    padding-left: 6px;
+    margin-bottom: 2px;
+}
+
 .kc-deleted-note {
     color: @error_color;
 }

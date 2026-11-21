@@ -23,7 +23,7 @@ pub use guild::{
 };
 pub use member_list::{MemberList, MemberListItem};
 pub use message::{
-    Attachment, Embed, EmbedField, EmbedMedia, Message, MessageReference, Reaction, ReactionEmoji,
+    Attachment, Embed, EmbedField, EmbedMedia, Message, MessageEdit, MessageReference, Reaction, ReactionEmoji,
     SendState, StickerItem,
 };
 pub use queries::ChannelSection;
