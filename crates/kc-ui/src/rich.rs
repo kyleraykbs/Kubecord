@@ -39,7 +39,7 @@ const QUOTE_PREFIX: &str = "<span alpha=\"50%\">\u{258E} </span>";
 
 /// Wrapper that makes spoiler text unreadable until clicked.
 const SPOILER_HIDDEN_OPEN: &str =
-    "<a href=\"kylecord://spoiler\"><span foreground=\"#202225\" background=\"#202225\">";
+    "<a href=\"kubecord://spoiler\"><span foreground=\"#202225\" background=\"#202225\">";
 const SPOILER_HIDDEN_CLOSE: &str = "</span></a>";
 
 /// Background for revealed spoilers.
@@ -139,8 +139,8 @@ pub fn parse(content: &str) -> Vec<Piece> {
 /// Renders pieces as Pango markup for a `GtkLabel`.
 ///
 /// Each piece is wrapped in its own balanced set of tags, so the result is
-/// valid markup for any input. Mentions link to `kylecord://user/ID` and
-/// `kylecord://channel/ID`; hidden spoilers link to `kylecord://spoiler`.
+/// valid markup for any input. Mentions link to `kubecord://user/ID` and
+/// `kubecord://channel/ID`; hidden spoilers link to `kubecord://spoiler`.
 /// A piece is never wrapped in more than one `<a>`: a hidden spoiler or an
 /// enclosing masked link takes precedence over a mention's own link.
 pub fn to_markup(pieces: &[Piece], resolver: &dyn Resolver, reveal_spoilers: bool) -> String {
@@ -1306,11 +1306,11 @@ impl MarkupWriter<'_> {
         match mention {
             Mention::User(id) => {
                 let inner = highlight(MENTION_COLOUR, None, &label);
-                link_if(linkable, &format!("kylecord://user/{id}"), inner)
+                link_if(linkable, &format!("kubecord://user/{id}"), inner)
             }
             Mention::Channel(id) => {
                 let inner = highlight(MENTION_COLOUR, None, &label);
-                link_if(linkable, &format!("kylecord://channel/{id}"), inner)
+                link_if(linkable, &format!("kubecord://channel/{id}"), inner)
             }
             Mention::Role(id) => {
                 let colour = self
@@ -2386,7 +2386,7 @@ mod tests {
         assert_eq!(
             markup(">>> a\n\n<@1> b"),
             format!(
-                "{prefix}a\n{prefix}\n{prefix}<a href=\"kylecord://user/1\">\
+                "{prefix}a\n{prefix}\n{prefix}<a href=\"kubecord://user/1\">\
                  <span background=\"#5865f2\" bgalpha=\"25%\">@Alice</span></a> b"
             )
         );
@@ -2412,12 +2412,12 @@ mod tests {
     fn markup_for_mentions() {
         assert_eq!(
             markup("<@1>"),
-            "<a href=\"kylecord://user/1\">\
+            "<a href=\"kubecord://user/1\">\
              <span background=\"#5865f2\" bgalpha=\"25%\">@Alice</span></a>"
         );
         assert_eq!(
             markup("<#4>"),
-            "<a href=\"kylecord://channel/4\">\
+            "<a href=\"kubecord://channel/4\">\
              <span background=\"#5865f2\" bgalpha=\"25%\">#general</span></a>"
         );
         assert_eq!(
@@ -2438,7 +2438,7 @@ mod tests {
     #[test]
     fn mentions_fall_back_to_placeholder_names() {
         assert!(markup("<@77>").contains(">@unknown-user<"));
-        assert!(markup("<@77>").contains("kylecord://user/77"));
+        assert!(markup("<@77>").contains("kubecord://user/77"));
         assert!(markup("<@&77>").contains(">@unknown-role<"));
         assert!(markup("<#77>").contains(">#unknown-channel<"));
         assert_eq!(
@@ -2468,7 +2468,7 @@ mod tests {
         let pieces = parse("a ||secret <b>|| z");
         assert_eq!(
             to_markup(&pieces, &Names, false),
-            "a <a href=\"kylecord://spoiler\">\
+            "a <a href=\"kubecord://spoiler\">\
              <span foreground=\"#202225\" background=\"#202225\">secret &lt;b&gt;</span></a> z"
         );
         assert_eq!(
@@ -2482,16 +2482,16 @@ mod tests {
         let pieces = parse("||<@1> https://example.com [x](https://example.com) <t:1>||");
         let hidden = to_markup(&pieces, &Names, false);
         assert_eq!(check_markup(&hidden), Ok(()));
-        assert!(!hidden.contains("kylecord://user"));
+        assert!(!hidden.contains("kubecord://user"));
         assert!(!hidden.contains("https://example.com\""));
         assert!(!hidden.contains("bgalpha"));
         let revealed = to_markup(&pieces, &Names, true);
         assert_eq!(check_markup(&revealed), Ok(()));
-        assert!(revealed.contains("kylecord://user/1"));
+        assert!(revealed.contains("kubecord://user/1"));
         // A mention inside a masked link keeps only the outer link.
         let masked = markup("[go <@1>](https://example.com)");
         assert_eq!(check_markup(&masked), Ok(()));
-        assert!(!masked.contains("kylecord://user"));
+        assert!(!masked.contains("kubecord://user"));
     }
 
     #[test]

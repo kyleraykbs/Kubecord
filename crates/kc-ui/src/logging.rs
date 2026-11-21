@@ -1,8 +1,8 @@
 //! Logging: to the terminal, and to a log file that can be switched off or
 //! made more detailed while the app runs (Settings → Debug).
 //!
-//! The file is `kylecord.log` in the cache directory. Each launch starts a
-//! new one and keeps the previous as `kylecord.log.1`. It records what is
+//! The file is `kubecord.log` in the cache directory. Each launch starts a
+//! new one and keeps the previous as `kubecord.log.1`. It records what is
 //! needed to see afterwards how a call went; a busy hour of calls is a few
 //! hundred kilobytes. Detailed logging adds every media event and is far
 //! larger, so the file stops growing at [`MAX_BYTES`].
@@ -43,7 +43,7 @@ pub fn set_diagnostics(on: bool) {
 
 /// Where the log file is.
 pub fn path() -> Option<PathBuf> {
-    Some(kc_core::paths::cache_dir().ok()?.join("kylecord.log"))
+    Some(kc_core::paths::cache_dir().ok()?.join("kubecord.log"))
 }
 
 /// Bytes written to the log file since launch.
@@ -67,7 +67,7 @@ fn file_wants(metadata: &Metadata<'_>) -> bool {
         return false;
     }
     let target = metadata.target();
-    let ours = target.starts_with("kc_") || target.starts_with("kylecord");
+    let ours = target.starts_with("kc_") || target.starts_with("kubecord");
     let level = *metadata.level();
     if !ours {
         return level <= Level::WARN;
@@ -121,7 +121,7 @@ fn open_file() -> Option<File> {
     let path = path()?;
     let dir = path.parent()?;
     kc_core::paths::ensure_dir(dir).ok()?;
-    let _ = std::fs::rename(&path, dir.join("kylecord.log.1"));
+    let _ = std::fs::rename(&path, dir.join("kubecord.log.1"));
     let file = File::create(&path).ok()?;
     let _ = kc_core::paths::restrict(&path);
     Some(file)
@@ -142,7 +142,7 @@ pub fn init() {
     let from_env = || EnvFilter::try_from_default_env().ok();
     let terminal = fmt::layer().with_filter(
         from_env()
-            .unwrap_or_else(|| "kylecord=info,kc_core=info,kc_http=info,kc_gateway=info".into()),
+            .unwrap_or_else(|| "kubecord=info,kc_core=info,kc_http=info,kc_gateway=info".into()),
     );
     let file = fmt::layer().with_ansi(false).with_writer(FileWriter);
     match from_env() {

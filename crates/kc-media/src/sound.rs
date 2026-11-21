@@ -56,7 +56,7 @@ fn output_sink() -> Result<gst::Element> {
         // Marks the stream as an event sound for the sound server, which
         // may treat it differently from a call or music.
         if let Ok(properties) =
-            "props,media.role=event,application.name=kylecord".parse::<gst::Structure>()
+            "props,media.role=event,application.name=kubecord".parse::<gst::Structure>()
         {
             sink.set_property("stream-properties", properties);
         }
@@ -189,7 +189,7 @@ mod tests {
 
     fn temp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path =
-            std::env::temp_dir().join(format!("kylecord-sound-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("kubecord-sound-{}-{name}", std::process::id()));
         std::fs::write(&path, bytes).unwrap();
         path
     }
@@ -249,7 +249,7 @@ mod tests {
     fn mp3_files_play() {
         gst::init().unwrap();
         // Discord's sounds are MP3: make one and play it back.
-        let path = std::env::temp_dir().join(format!("kylecord-sound-{}.mp3", std::process::id()));
+        let path = std::env::temp_dir().join(format!("kubecord-sound-{}.mp3", std::process::id()));
         let encode = gst::parse::launch(&format!(
             "audiotestsrc num-buffers=20 ! audioconvert ! lamemp3enc ! filesink location={}",
             path.display()
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn a_missing_file_ends_quietly() {
         let sound = play_on(
-            Path::new("/nonexistent/kylecord.mp3"),
+            Path::new("/nonexistent/kubecord.mp3"),
             1.0,
             false,
             fakesink(),

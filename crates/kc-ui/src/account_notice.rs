@@ -44,7 +44,7 @@ fn required_action_text(action: &str) -> String {
         "Discord wants you to {how} before this account can do anything more. Until \
          then, sending messages, adding friends and joining calls will fail.\n\n\
          Open Discord in your browser and follow what it asks. This is not a ban, and \
-         kylecord carries on by itself once Discord is satisfied."
+         kubecord carries on by itself once Discord is satisfied."
     )
 }
 

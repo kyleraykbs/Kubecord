@@ -1,4 +1,4 @@
-# kylecord
+# Kubecord
 
 A Discord client for Linux, built from scratch in Rust.
 
@@ -12,7 +12,7 @@ webview and no patched official client.
 
 ```sh
 nix develop
-cargo run -p kylecord
+cargo run -p kubecord
 ```
 
 or, from the flake:
@@ -32,20 +32,20 @@ two-factor code when the account requires one) or a **user token** directly.
 Discord may ask for a captcha or an email confirmation for a login from a
 third-party client. Only the resulting token is kept; the password and any codes
 are never stored or logged. The token is stored in
-`$XDG_CONFIG_HOME/kylecord/accounts.json` with mode 0600. Multiple accounts are
+`$XDG_CONFIG_HOME/kubecord/accounts.json` with mode 0600. Multiple accounts are
 supported; each account owns its gateway connection, REST client and at most one
 voice connection.
 
 `kc-probe` is the protocol probe used during development:
 
 ```sh
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- user
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- guilds
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- channels <guild-id>
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- messages <channel-id>
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- watch
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- voice <guild-id> <channel-id>
-KYLECORD_TOKEN=<token> cargo run -p kc-probe -- voice <guild-id> <channel-id> --stream --screen
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- user
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- guilds
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- channels <guild-id>
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- messages <channel-id>
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- watch
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- voice <guild-id> <channel-id>
+KUBECORD_TOKEN=<token> cargo run -p kc-probe -- voice <guild-id> <channel-id> --stream --screen
 ```
 
 `kc-probe voice` joins a channel, speaks/receives, and with `--stream --screen`
@@ -53,7 +53,7 @@ starts a Go Live screen share through the XDG desktop portal. Add `--no-audio`
 to test the voice handshake without opening the microphone or speaker.
 
 Go Live includes desktop audio. It is captured from the default sink monitor
-(`pulsesrc device=@DEFAULT_MONITOR@`); set `KYLECORD_MONITOR_DEVICE` to a
+(`pulsesrc device=@DEFAULT_MONITOR@`); set `KUBECORD_MONITOR_DEVICE` to a
 specific monitor source if you route application audio through a virtual sink.
 Capturing the default monitor also captures the Discord client's own output, so
 use a virtual sink for a clean stream.
@@ -74,7 +74,7 @@ crates/kc-voice     voice gateway, UDP/SRTP/RTP, DAVE, streams
 crates/kc-media     GStreamer capture, Opus, H.264, rendering
 crates/kc-ui        GTK4/libadwaita application
 crates/kc-probe     protocol probe CLI
-crates/kylecord     application entry point
+crates/kubecord     application entry point
 ```
 
 `reference-projects/` holds cloned reverse-engineering projects used as

@@ -109,7 +109,7 @@ pub(crate) struct AppState {
     pub aux_windows: RefCell<HashMap<String, crate::windows::AuxWindow>>,
     /// With a video enlarged: the row of other tiles under it is hidden.
     pub members_hidden: Cell<bool>,
-    /// A made-up call shown by `KYLECORD_VIDEO_DEMO`.
+    /// A made-up call shown by `KUBECORD_VIDEO_DEMO`.
     pub voice_demo: RefCell<Option<crate::voice::DemoCall>>,
     /// The videos whose information panel is showing, and what it needs.
     pub video_info: RefCell<crate::video_info::VideoInfo>,

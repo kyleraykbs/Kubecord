@@ -1,8 +1,8 @@
 //! Where a Go Live stream's sound comes from. The stream's audio is
-//! recorded from a virtual output of kylecord's own (`kylecord Go Live`)
-//! that nothing plays into by default. Depending on the choice, kylecord
+//! recorded from a virtual output of kubecord's own (`kubecord Go Live`)
+//! that nothing plays into by default. Depending on the choice, kubecord
 //! then connects other programs' playback into it (everything playing to
-//! the default output except kylecord, or one program), or leaves the
+//! the default output except kubecord, or one program), or leaves the
 //! connecting to the user's patchbay.
 //!
 //! The PipeWire graph is read with `pw-dump` and connections are made with
@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 /// Where the stream's sound comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioShare {
-    /// Everything playing to the default output, except kylecord itself.
+    /// Everything playing to the default output, except kubecord itself.
     Desktop,
     /// One program's playback, by [`AudioApp::key`].
     Application { key: String },
@@ -43,9 +43,9 @@ pub struct AudioApp {
 /// The node name under which the capture appears when left for a
 /// patchbay. It stays the same from stream to stream so a patchbay can
 /// remember its connections.
-pub const NODE_NAME: &str = "kylecord-go-live";
+pub const NODE_NAME: &str = "kubecord-go-live";
 /// The name a patchbay shows for the capture.
-pub const NODE_DESCRIPTION: &str = "kylecord Go Live";
+pub const NODE_DESCRIPTION: &str = "kubecord Go Live";
 
 /// How often the graph is checked for streams that need connecting.
 const LINK_INTERVAL: Duration = Duration::from_millis(1500);
@@ -225,14 +225,14 @@ fn app_key(props: &serde_json::Map<String, Value>) -> Option<String> {
     text(props, "application.process.binary").or_else(|| text(props, "application.name"))
 }
 
-/// Whether a stream is kylecord's: this process (`pid`), or another copy
-/// of kylecord. Its sound is the call, which viewers must not hear back.
+/// Whether a stream is kubecord's: this process (`pid`), or another copy
+/// of kubecord. Its sound is the call, which viewers must not hear back.
 fn is_own(props: &serde_json::Map<String, Value>, pid: u32) -> bool {
     text(props, "application.process.id").is_some_and(|id| id == pid.to_string())
-        || text(props, "application.name").as_deref() == Some("kylecord")
+        || text(props, "application.name").as_deref() == Some("kubecord")
 }
 
-/// Programs with a playback stream, kylecord aside. Only streams that
+/// Programs with a playback stream, kubecord aside. Only streams that
 /// name a process count, which leaves out helpers such as a patchbay's
 /// keep-alive players.
 fn applications_in(graph: &Graph, own_pid: u32) -> Vec<AudioApp> {
@@ -346,9 +346,9 @@ fn links_to_make(
 
 /// An output other programs can play into, like a speaker, that exists
 /// while this lives. PipeWire keeps a node only as long as the program
-/// that made it, so a `pw-cli` started by kylecord holds it. That `pw-cli`
+/// that made it, so a `pw-cli` started by kubecord holds it. That `pw-cli`
 /// is stopped through its own handle when this is dropped, and by the
-/// kernel if kylecord itself ends, so the output never outlives kylecord.
+/// kernel if kubecord itself ends, so the output never outlives kubecord.
 pub struct VirtualOutput {
     name: String,
     stop: Option<std::sync::mpsc::Sender<()>>,
@@ -596,7 +596,7 @@ mod tests {
     }
 
     /// A desk: speakers (the default output), a patchbay's own sink, a
-    /// browser and two copies of kylecord playing to the speakers, a keep-alive player
+    /// browser and two copies of kubecord playing to the speakers, a keep-alive player
     /// feeding the patchbay, a mono game not yet connected, and our
     /// capture node.
     fn desk() -> Graph {
@@ -614,13 +614,13 @@ mod tests {
                             "application.process.id": 100})),
             port(31, 30, "output", "FL"), port(32, 30, "output", "FR"),
             link(33, 30, 31, 10, 11), link(34, 30, 32, 10, 12),
-            node(40, json!({"media.class": "Stream/Output/Audio", "node.name": "kylecord",
-                            "application.name": "kylecord", "application.process.id": OWN_PID})),
+            node(40, json!({"media.class": "Stream/Output/Audio", "node.name": "kubecord",
+                            "application.name": "kubecord", "application.process.id": OWN_PID})),
             port(41, 40, "output", "FL"), port(42, 40, "output", "FR"),
             link(43, 40, 41, 10, 11), link(44, 40, 42, 10, 12),
-            // Another copy of kylecord, also playing to the speakers.
-            node(45, json!({"media.class": "Stream/Output/Audio", "node.name": "kylecord",
-                            "application.name": "kylecord", "application.process.id": 999})),
+            // Another copy of kubecord, also playing to the speakers.
+            node(45, json!({"media.class": "Stream/Output/Audio", "node.name": "kubecord",
+                            "application.name": "kubecord", "application.process.id": 999})),
             port(46, 45, "output", "FL"), port(47, 45, "output", "FR"),
             link(48, 45, 46, 10, 11), link(49, 45, 47, 10, 12),
             node(50, json!({"media.class": "Stream/Output/Audio", "node.name": "x_keepalive",
@@ -630,7 +630,7 @@ mod tests {
             node(60, json!({"media.class": "Stream/Output/Audio", "node.name": "Game",
                             "application.name": "Game", "application.process.id": "200"})),
             port(61, 60, "output", "MONO"),
-            node(70, json!({"media.class": "Audio/Sink", "node.name": "kylecord-go-live-1"})),
+            node(70, json!({"media.class": "Audio/Sink", "node.name": "kubecord-go-live-1"})),
             port(71, 70, "input", "FL"), port(72, 70, "input", "FR"),
             port(73, 70, "output", "FL"),
         ]);
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn everything_connected_to_the_output_is_found_for_disconnecting() {
         // Nothing connected yet.
-        assert!(desk().links_into("kylecord-go-live-1").is_empty());
+        assert!(desk().links_into("kubecord-go-live-1").is_empty());
         // The browser connected to it, as well as to the speakers; the
         // output's own monitor port feeding a recorder is not a connection
         // into it.
@@ -659,7 +659,7 @@ mod tests {
             link(33, 30, 31, 10, 11),
             node(
                 70,
-                json!({"media.class": "Audio/Sink", "node.name": "kylecord-go-live-1"})
+                json!({"media.class": "Audio/Sink", "node.name": "kubecord-go-live-1"})
             ),
             port(71, 70, "input", "FL"),
             port(72, 70, "input", "FR"),
@@ -675,18 +675,18 @@ mod tests {
         ]);
         let graph = Graph::parse(&objects.to_string()).unwrap();
         assert_eq!(
-            graph.links_into("kylecord-go-live-1"),
+            graph.links_into("kubecord-go-live-1"),
             vec![(31, 71), (32, 72)]
         );
         assert!(graph.links_into("some-other-output").is_empty());
     }
 
     #[test]
-    fn desktop_audio_is_what_plays_to_the_default_output_except_kylecord() {
+    fn desktop_audio_is_what_plays_to_the_default_output_except_kubecord() {
         let graph = desk();
         assert_eq!(graph.default_sink.as_deref(), Some("speakers"));
-        let links = links_to_make(&graph, "kylecord-go-live-1", &AudioShare::Desktop, OWN_PID);
-        // The browser, left to left and right to right; not kylecord, not
+        let links = links_to_make(&graph, "kubecord-go-live-1", &AudioShare::Desktop, OWN_PID);
+        // The browser, left to left and right to right; not kubecord, not
         // the keep-alive feeding the patchbay, not the unconnected game.
         assert_eq!(links, vec![(31, 71), (32, 72)]);
     }
@@ -699,14 +699,14 @@ mod tests {
         };
         // A mono stream feeds both sides.
         assert_eq!(
-            links_to_make(&graph, "kylecord-go-live-1", &game, OWN_PID),
+            links_to_make(&graph, "kubecord-go-live-1", &game, OWN_PID),
             vec![(61, 71), (61, 72)]
         );
         let browser = AudioShare::Application {
             key: "browser".to_owned(),
         };
         assert_eq!(
-            links_to_make(&graph, "kylecord-go-live-1", &browser, OWN_PID),
+            links_to_make(&graph, "kubecord-go-live-1", &browser, OWN_PID),
             vec![(31, 71), (32, 72)]
         );
     }
@@ -715,15 +715,15 @@ mod tests {
     fn links_already_made_are_not_made_again() {
         let mut graph = desk();
         graph.links.insert((31, 71));
-        let links = links_to_make(&graph, "kylecord-go-live-1", &AudioShare::Desktop, OWN_PID);
+        let links = links_to_make(&graph, "kubecord-go-live-1", &AudioShare::Desktop, OWN_PID);
         assert_eq!(links, vec![(32, 72)]);
         // A patchbay node is left alone, and so is a node that is not there.
-        assert!(links_to_make(&graph, "kylecord-go-live-1", &AudioShare::Node, OWN_PID).is_empty());
+        assert!(links_to_make(&graph, "kubecord-go-live-1", &AudioShare::Node, OWN_PID).is_empty());
         assert!(links_to_make(&graph, "missing", &AudioShare::Desktop, OWN_PID).is_empty());
     }
 
     #[test]
-    fn the_program_list_leaves_out_kylecord_and_helpers() {
+    fn the_program_list_leaves_out_kubecord_and_helpers() {
         let apps = applications_in(&desk(), OWN_PID);
         let names: Vec<&str> = apps.iter().map(|app| app.name.as_str()).collect();
         assert_eq!(names, ["Browser", "Game"]);

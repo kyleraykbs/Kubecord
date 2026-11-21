@@ -1,6 +1,6 @@
 [package]
 name = "kc-gateway"
-description = "Discord user gateway for kylecord"
+description = "Discord user gateway for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

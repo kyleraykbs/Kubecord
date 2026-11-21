@@ -28,13 +28,13 @@ pub(crate) const TYPING_THROTTLE: Duration = Duration::from_secs(8);
 pub fn build_app() -> adw::Application {
     // A screenshot run must not hand over to (and quit in favour of) an
     // instance that is already open.
-    let flags = if std::env::var_os("KYLECORD_SCREENSHOT").is_some() {
+    let flags = if std::env::var_os("KUBECORD_SCREENSHOT").is_some() {
         gtk::gio::ApplicationFlags::NON_UNIQUE
     } else {
         gtk::gio::ApplicationFlags::empty()
     };
     adw::Application::builder()
-        .application_id("dev.kyle.kylecord")
+        .application_id("dev.kyle.kubecord")
         .flags(flags)
         .build()
 }
@@ -100,12 +100,12 @@ pub fn run() -> glib::ExitCode {
         };
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("kylecord")
+            .title("Kubecord")
             .default_width(1100)
-            // Development aid: `KYLECORD_WINDOW_HEIGHT` makes the window
+            // Development aid: `KUBECORD_WINDOW_HEIGHT` makes the window
             // taller, so a screenshot shows more of a long page.
             .default_height(
-                std::env::var("KYLECORD_WINDOW_HEIGHT")
+                std::env::var("KUBECORD_WINDOW_HEIGHT")
                     .ok()
                     .and_then(|height| height.parse().ok())
                     .unwrap_or(720),
@@ -159,12 +159,12 @@ pub fn run() -> glib::ExitCode {
             glib::ControlFlow::Continue
         });
 
-        // An offline demo (`KYLECORD_DEMO`/`KYLECORD_VIDEO_DEMO`) brings its
+        // An offline demo (`KUBECORD_DEMO`/`KUBECORD_VIDEO_DEMO`) brings its
         // own fake session; don't also start real accounts from disk, or a
         // leftover sandbox token would reach Discord and raise a real
         // "signed you out" dialog over the demo.
-        let demo = std::env::var_os("KYLECORD_DEMO").is_some()
-            || std::env::var_os("KYLECORD_VIDEO_DEMO").is_some();
+        let demo = std::env::var_os("KUBECORD_DEMO").is_some()
+            || std::env::var_os("KUBECORD_VIDEO_DEMO").is_some();
         if !demo {
             state.start_existing();
         }
@@ -180,10 +180,10 @@ pub fn run() -> glib::ExitCode {
             *identifier_state.window_identifier.borrow_mut() = identifier.map(Arc::new);
         });
 
-        // Development aids: `KYLECORD_OPEN=<channel id>` opens a channel
-        // once the account is ready, and `KYLECORD_SCREENSHOT=<path>` saves
+        // Development aids: `KUBECORD_OPEN=<channel id>` opens a channel
+        // once the account is ready, and `KUBECORD_SCREENSHOT=<path>` saves
         // the window as a PNG a few seconds later and quits.
-        if let Some(channel_id) = std::env::var("KYLECORD_OPEN")
+        if let Some(channel_id) = std::env::var("KUBECORD_OPEN")
             .ok()
             .and_then(|id| id.parse::<Snowflake>().ok())
         {
@@ -207,19 +207,19 @@ pub fn run() -> glib::ExitCode {
             info_state.refresh_video_info();
             glib::ControlFlow::Continue
         });
-        if let Ok(mode) = std::env::var("KYLECORD_VIDEO_DEMO") {
+        if let Ok(mode) = std::env::var("KUBECORD_VIDEO_DEMO") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
                 app_state.show_video_demo(&mode);
             });
         }
-        if let Ok(mode) = std::env::var("KYLECORD_DEMO") {
+        if let Ok(mode) = std::env::var("KUBECORD_DEMO") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
                 app_state.show_demo(&mode);
             });
         }
-        if let Ok(popup) = std::env::var("KYLECORD_POPUP") {
+        if let Ok(popup) = std::env::var("KUBECORD_POPUP") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
                 // The share popup needs no account until Go Live is pressed,
@@ -229,7 +229,7 @@ pub fn run() -> glib::ExitCode {
                     // The share popup is an in-window dialog, so a screenshot
                     // of the main window catches it. Give it a moment to lay
                     // out, then save if asked.
-                    if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                    if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                         let app_state = app_state.clone();
                         glib::timeout_add_local_once(Duration::from_millis(800), move || {
                             if let Err(error) =
@@ -331,7 +331,7 @@ pub fn run() -> glib::ExitCode {
                             if let Some(popover) = panel.ping.button.popover() {
                                 popover.set_autohide(false);
                                 panel.ping.button.popup();
-                                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                                if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                                     glib::timeout_add_local_once(
                                         Duration::from_millis(1200),
                                         move || {
@@ -384,7 +384,7 @@ pub fn run() -> glib::ExitCode {
                                 popover.set_autohide(false);
                             }
                             picker.emoji_button.popup();
-                            if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                            if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                                 let popover = picker.emoji_button.popover();
                                 glib::timeout_add_local_once(
                                     Duration::from_millis(1500),
@@ -483,18 +483,18 @@ pub fn run() -> glib::ExitCode {
                 }
             });
         }
-        if let Ok(page) = std::env::var("KYLECORD_SETTINGS") {
+        if let Ok(page) = std::env::var("KUBECORD_SETTINGS") {
             let app_state = state.clone();
             glib::timeout_add_local_once(Duration::from_millis(4000), move || {
                 app_state.show_settings_page(&page);
             });
         }
-        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+        if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
             let window = state.window.clone();
             let app = app.clone();
-            // `KYLECORD_SCREENSHOT_DELAY` (seconds) waits longer, for pages
+            // `KUBECORD_SCREENSHOT_DELAY` (seconds) waits longer, for pages
             // that load from the network.
-            let delay = std::env::var("KYLECORD_SCREENSHOT_DELAY")
+            let delay = std::env::var("KUBECORD_SCREENSHOT_DELAY")
                 .ok()
                 .and_then(|secs| secs.parse::<u64>().ok())
                 .unwrap_or(7);
@@ -517,7 +517,7 @@ pub fn run() -> glib::ExitCode {
 }
 
 /// Renders a widget to a PNG without relying on a compositor. Used by
-/// `KYLECORD_SCREENSHOT` for visual checks of the GTK layout.
+/// `KUBECORD_SCREENSHOT` for visual checks of the GTK layout.
 pub(crate) fn save_window_png(
     window: &(impl IsA<gtk::Native> + IsA<gtk::Widget>),
     path: &std::path::Path,
@@ -1339,7 +1339,7 @@ impl AppState {
             Some(ConnState::Disconnected) => ("Disconnected. Reconnecting…", None),
             Some(ConnState::SignedOut) => ("Discord signed this account out.", Some("What Now?")),
             Some(ConnState::Stopped) => (
-                "Discord closed the connection. Restart kylecord to reconnect.",
+                "Discord closed the connection. Restart kubecord to reconnect.",
                 None,
             ),
             _ => ("", None),

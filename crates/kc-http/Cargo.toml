@@ -1,6 +1,6 @@
 [package]
 name = "kc-http"
-description = "Discord REST client for kylecord"
+description = "Discord REST client for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

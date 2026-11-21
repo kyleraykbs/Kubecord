@@ -1,6 +1,6 @@
 [package]
 name = "kc-core"
-description = "Shared types, configuration and credentials for kylecord"
+description = "Shared types, configuration and credentials for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

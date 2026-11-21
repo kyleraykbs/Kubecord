@@ -80,7 +80,7 @@ fn general(text: impl Into<String>) -> Feedback {
 }
 
 pub(crate) const CAPTCHA_UNSOLVED: &str = "Discord wants a captcha solved before it signs you in. \
-     Turn on “Solve Captchas in kylecord” (Settings → Advanced) and try again, or log in with a \
+     Turn on “Solve Captchas in kubecord” (Settings → Advanced) and try again, or log in with a \
      token instead.";
 
 /// The next step after `step` got `result`.
@@ -100,7 +100,7 @@ pub(crate) fn advance(step: &Step, result: Result<AuthResponse, Failure>) -> Nex
                 return Next::Show(
                     Step::Credentials,
                     general(
-                        "This account signs in with a security key, which kylecord cannot use. \
+                        "This account signs in with a security key, which kubecord cannot use. \
                          Log in with a token instead.",
                     ),
                 );
@@ -311,7 +311,7 @@ impl LoginPage {
         form.set_margin_top(24);
         form.set_margin_bottom(24);
 
-        let title = gtk::Label::new(Some("kylecord"));
+        let title = gtk::Label::new(Some("kubecord"));
         title.add_css_class("title-1");
         let subtitle = gtk::Label::new(Some("Sign in to Discord"));
         subtitle.add_css_class("dim-label");
@@ -506,7 +506,7 @@ impl LoginPage {
         } else {
             "Discord may ask for a captcha, or email you to confirm a login from a new place, \
              when you sign in from a third-party client like this one. Your password is sent \
-             only to Discord and is never saved: kylecord keeps the resulting token, as when \
+             only to Discord and is never saved: kubecord keeps the resulting token, as when \
              you paste one."
         });
     }
@@ -843,10 +843,10 @@ impl AppState {
     }
 }
 
-/// The client for a new sign-in. Demo runs (`KYLECORD_DEMO`) get one that
+/// The client for a new sign-in. Demo runs (`KUBECORD_DEMO`) get one that
 /// points at an address nothing listens on, so nothing reaches Discord.
 fn auth_client() -> AuthClient {
-    if std::env::var_os("KYLECORD_DEMO").is_some() {
+    if std::env::var_os("KUBECORD_DEMO").is_some() {
         AuthClient::with_base("https://127.0.0.1:9/api/v9")
     } else {
         AuthClient::new()
@@ -854,7 +854,7 @@ fn auth_client() -> AuthClient {
 }
 
 impl AppState {
-    /// `KYLECORD_DEMO=login-<what>`: the login page in one of its states,
+    /// `KUBECORD_DEMO=login-<what>`: the login page in one of its states,
     /// offline. `password` / `token` / `add` (with Cancel, as when adding
     /// an account) / `busy` / `errors` (invalid login) / `location` (new
     /// login location) / `code` / `code-sms` / `code-wrong` / `expired`
@@ -986,7 +986,7 @@ mod tests {
                 Feedback::default()
             )
         );
-        // Only a security key: nothing kylecord can do.
+        // Only a security key: nothing kubecord can do.
         let mut key_only = challenge(false, false, false);
         key_only.webauthn = true;
         let Next::Show(Step::Credentials, feedback) =

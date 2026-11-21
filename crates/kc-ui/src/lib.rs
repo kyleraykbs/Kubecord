@@ -1,4 +1,4 @@
-//! GTK4/libadwaita interface for kylecord.
+//! GTK4/libadwaita interface for kubecord.
 
 mod account_notice;
 mod animation;

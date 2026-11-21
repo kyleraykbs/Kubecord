@@ -1,6 +1,6 @@
 [package]
 name = "kc-probe"
-description = "Protocol probe for kylecord"
+description = "Protocol probe for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

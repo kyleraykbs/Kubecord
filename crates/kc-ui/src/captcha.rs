@@ -25,7 +25,7 @@ pub(crate) type Solved = Box<dyn FnOnce(&Rc<AppState>, Option<String>)>;
 
 impl AppState {
     /// Runs a request Discord may answer with a captcha. With solving in
-    /// kylecord on, the captcha is shown (`prompt` says what it is for) and
+    /// kubecord on, the captcha is shown (`prompt` says what it is for) and
     /// the request sent again with the answer. `done` gets the final result:
     /// the challenge itself when the captcha is off or was closed.
     pub(crate) fn with_captcha<T, F, Fut>(
@@ -133,7 +133,7 @@ impl AppState {
 
         // A fresh session that keeps nothing once the dialog is gone.
         let manager = webkit6::UserContentManager::new();
-        manager.register_script_message_handler("kylecord", None);
+        manager.register_script_message_handler("kubecord", None);
         let session = webkit6::NetworkSession::new_ephemeral();
         let view = webkit6::WebView::builder()
             .user_content_manager(&manager)
@@ -142,7 +142,7 @@ impl AppState {
         view.set_vexpand(true);
         view.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
         if let Some(settings) = WebViewExt::settings(&view) {
-            // The same browser kylecord tells Discord it is.
+            // The same browser kubecord tells Discord it is.
             settings.set_user_agent(Some(kc_core::super_properties::USER_AGENT));
             settings.set_enable_developer_extras(false);
         }
@@ -170,7 +170,7 @@ impl AppState {
         let weak_dialog = dialog.downgrade();
         let weak_problem = problem.downgrade();
         let answered = finish.clone();
-        manager.connect_script_message_received(Some("kylecord"), move |_, value| {
+        manager.connect_script_message_received(Some("kubecord"), move |_, value| {
             let message = value.to_str().to_string();
             if let Some(token) = message.strip_prefix("token:") {
                 answered(Some(token.to_owned()));
@@ -198,7 +198,7 @@ impl AppState {
 }
 
 /// The page holding the widget. Its answer goes back through the
-/// `kylecord` script message handler.
+/// `kubecord` script message handler.
 #[cfg_attr(not(feature = "captcha"), allow(dead_code))]
 fn captcha_page(sitekey: &str, rqdata: Option<&str>, dark: bool) -> String {
     // JSON for the script, with `<` escaped so nothing can close the tag.
@@ -217,7 +217,7 @@ fn captcha_page(sitekey: &str, rqdata: Option<&str>, dark: bool) -> String {
 <script>
   const SITEKEY = __SITEKEY__;
   const RQDATA = __RQDATA__;
-  function send(message) { window.webkit.messageHandlers.kylecord.postMessage(message); }
+  function send(message) { window.webkit.messageHandlers.kubecord.postMessage(message); }
   function ready() {
     const id = hcaptcha.render('captcha', {
       sitekey: SITEKEY,

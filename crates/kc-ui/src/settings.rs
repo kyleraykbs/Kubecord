@@ -59,7 +59,7 @@ pub struct CapturePreferences {
     /// `None` means automatic: the bitrate follows the network.
     pub bitrate_kbps: Option<u32>,
     /// The range an automatic bitrate moves in, in kbit/s. `None` leaves
-    /// that end to kylecord: the top from resolution and framerate, the
+    /// that end to kubecord: the top from resolution and framerate, the
     /// bottom at three tenths of the top.
     pub auto_bitrate_min: Option<u32>,
     pub auto_bitrate_max: Option<u32>,
@@ -106,7 +106,7 @@ pub struct CapturePreferences {
     /// screens, 2 windows.
     pub share_source: u32,
     /// Where a stream's sound comes from: 0 none, 1 everything playing
-    /// (except kylecord), 2 one program, 3 a node for a patchbay.
+    /// (except kubecord), 2 one program, 3 a node for a patchbay.
     pub share_audio: u32,
     /// The program shared when `share_audio` is 2, by its
     /// [`kc_media::share_audio::AudioApp::key`], and the name it showed.
@@ -122,7 +122,7 @@ pub struct CapturePreferences {
     pub sidebar_width: i32,
     /// Start the camera preview as soon as the camera popup opens.
     pub always_preview: bool,
-    /// Show Discord's captchas in kylecord instead of sending the user to
+    /// Show Discord's captchas in kubecord instead of sending the user to
     /// the browser.
     pub captcha_in_app: bool,
     /// Tell Discord when you are typing, so others see it.
@@ -168,7 +168,7 @@ pub struct CapturePreferences {
     pub noise_suppression: u32,
     pub echo_cancellation: bool,
     pub auto_gain_control: bool,
-    /// Let kylecord decide which microphone frames are speech; when off,
+    /// Let kubecord decide which microphone frames are speech; when off,
     /// `input_threshold_db` does.
     pub auto_input_sensitivity: bool,
     /// Microphone frames quieter than this (dBFS) are not sent.

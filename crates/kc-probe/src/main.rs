@@ -19,13 +19,13 @@ async fn main() -> Result<()> {
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
-    let token = match std::env::var("KYLECORD_TOKEN") {
+    let token = match std::env::var("KUBECORD_TOKEN") {
         Ok(token) if !token.trim().is_empty() => Token::new(token),
         _ => {
             let index = args
                 .iter()
                 .position(|arg| arg == "--token")
-                .context("set KYLECORD_TOKEN or pass --token <token>")?;
+                .context("set KUBECORD_TOKEN or pass --token <token>")?;
             if index + 1 >= args.len() {
                 bail!("--token needs a value");
             }
@@ -299,12 +299,12 @@ async fn main() -> Result<()> {
                 settings.encoder
             );
             let (tx, rx) = std::sync::mpsc::channel();
-            let mut dump = std::env::var("KYLECORD_DUMP_FRAMES")
+            let mut dump = std::env::var("KUBECORD_DUMP_FRAMES")
                 .ok()
                 .and_then(|path| std::fs::File::create(path).ok());
             let source =
                 kc_media::video::VideoSource::camera_portal(camera, settings, move |frame| {
-                    // `KYLECORD_DUMP_FRAMES=<file>` also writes every encoded
+                    // `KUBECORD_DUMP_FRAMES=<file>` also writes every encoded
                     // frame, each after its length as four little-endian bytes.
                     if let Some(file) = dump.as_mut() {
                         use std::io::Write;
@@ -515,7 +515,7 @@ async fn video_test(lose_every: u32) -> Result<()> {
 /// jittered and some packets are dropped, as on a real network.
 ///
 /// Point it at a null sink to run silently:
-/// `KYLECORD_PLAYBACK_DEVICE=<sink> KYLECORD_MONITOR_DEVICE=<sink>.monitor`.
+/// `KUBECORD_PLAYBACK_DEVICE=<sink> KUBECORD_MONITOR_DEVICE=<sink>.monitor`.
 async fn playback_test() -> Result<()> {
     use std::sync::{Arc, Mutex};
     const FRAME: usize = 1920;

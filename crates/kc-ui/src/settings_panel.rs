@@ -114,7 +114,7 @@ impl AppState {
         dialog.set_title("Settings");
         dialog.set_content_width(960);
         dialog.set_content_height(
-            std::env::var("KYLECORD_WINDOW_HEIGHT")
+            std::env::var("KUBECORD_WINDOW_HEIGHT")
                 .ok()
                 .and_then(|height| height.parse::<i32>().ok())
                 .map_or(700, |height| height - 20),
@@ -333,7 +333,7 @@ impl AppState {
         ));
         what.add(&self.pref_switch(
             "Incoming Calls",
-            "When someone calls you in a DM or group, while kylecord's window is not in front.",
+            "When someone calls you in a DM or group, while kubecord's window is not in front.",
             |prefs| prefs.notify_calls,
             |prefs, on| prefs.notify_calls = on,
         ));
@@ -343,7 +343,7 @@ impl AppState {
         window.set_title("Window");
         window.add(&self.pref_switch(
             "Count New Notifications in the Window Title",
-            "Shows \"(2) kylecord\" until you come back to the window; most taskbars show the title. GTK 4 cannot flash a window or set an urgency hint, so this stands in for it.",
+            "Shows \"(2) kubecord\" until you come back to the window; most taskbars show the title. GTK 4 cannot flash a window or set an urgency hint, so this stands in for it.",
             |prefs| prefs.notify_mark_window,
             |prefs, on| prefs.notify_mark_window = on,
         ));
@@ -389,7 +389,7 @@ impl AppState {
         let source = adw::PreferencesGroup::new();
         source.set_title("Discord's Sounds");
         source.set_description(Some(
-            "kylecord does not ship Discord's sounds: it downloads them from discord.com's public web app into its cache (no account details are sent). Until then, or if they cannot be found, short built-in tones play.",
+            "kubecord does not ship Discord's sounds: it downloads them from discord.com's public web app into its cache (no account details are sent). Until then, or if they cannot be found, short built-in tones play.",
         ));
         let status = adw::ActionRow::builder()
             .title("Downloaded Sounds")
@@ -565,7 +565,7 @@ impl AppState {
         let unfocused = adw::SwitchRow::new();
         unfocused.set_title("Animate GIFs While Unfocused");
         unfocused.set_subtitle(
-            "Keep GIFs moving when kylecord is not the focused window. Off by default; GIFs pause when unfocused to save work.",
+            "Keep GIFs moving when kubecord is not the focused window. Off by default; GIFs pause when unfocused to save work.",
         );
         unfocused.set_subtitle_lines(0);
         unfocused.set_active(self.capture.borrow().animate_gifs_unfocused);
@@ -616,12 +616,12 @@ impl AppState {
 
     // -- advanced ------------------------------------------------------------
 
-    /// Discord's checks for the official app, and what kylecord logs.
+    /// Discord's checks for the official app, and what kubecord logs.
     fn advanced_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
         page.append(&section_title("Advanced"));
 
-        // Compatibility: how kylecord handles the checks Discord makes for
+        // Compatibility: how kubecord handles the checks Discord makes for
         // the official app.
         let group = adw::PreferencesGroup::new();
         group.set_title("Captchas");
@@ -629,11 +629,11 @@ impl AppState {
             "Discord sometimes asks for a captcha, for example before it sends a friend request.",
         ));
         let in_app = adw::SwitchRow::new();
-        in_app.set_title("Solve Captchas in kylecord");
+        in_app.set_title("Solve Captchas in kubecord");
         in_app.set_subtitle(if crate::captcha::AVAILABLE {
             "Show the captcha here and send the request again once it is solved. When this is off, or the captcha fails, you can finish in your browser instead."
         } else {
-            "This build of kylecord was made without the captcha view, so captchas are finished in your browser."
+            "This build of kubecord was made without the captcha view, so captchas are finished in your browser."
         });
         in_app.set_active(crate::captcha::AVAILABLE && self.capture.borrow().captcha_in_app);
         in_app.set_sensitive(crate::captcha::AVAILABLE);
@@ -992,7 +992,7 @@ impl AppState {
 
         let auto = adw::SwitchRow::new();
         auto.set_title("Automatically Determine Input Sensitivity");
-        auto.set_subtitle("kylecord learns how loud your room is and sends what rises above it.");
+        auto.set_subtitle("kubecord learns how loud your room is and sends what rises above it.");
         auto.set_subtitle_lines(0);
         auto.set_active(current.auto_input_sensitivity);
         group.add(&auto);
@@ -1535,10 +1535,10 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64) {
     cr.close_path();
 }
 
-/// Development aid: `KYLECORD_DEMO_LEVEL=<dB>` shows a made-up microphone
+/// Development aid: `KUBECORD_DEMO_LEVEL=<dB>` shows a made-up microphone
 /// level on the sensitivity meter, for screenshots without a microphone.
 fn demo_level() -> Option<kc_media::processing::InputLevel> {
-    let level: f32 = std::env::var("KYLECORD_DEMO_LEVEL").ok()?.parse().ok()?;
+    let level: f32 = std::env::var("KUBECORD_DEMO_LEVEL").ok()?.parse().ok()?;
     Some(kc_media::processing::InputLevel {
         level_db: level,
         open: level >= -50.0,
@@ -1568,11 +1568,11 @@ fn page_scroll(page: &gtk::Box) -> gtk::ScrolledWindow {
     scroll
 }
 
-/// Development aid: `KYLECORD_SETTINGS_SCROLL=<pixels>` scrolls settings
+/// Development aid: `KUBECORD_SETTINGS_SCROLL=<pixels>` scrolls settings
 /// pages and popups down once they are laid out, for screenshots of long
 /// ones.
 pub(crate) fn dev_scroll(scroll: &gtk::ScrolledWindow) {
-    if let Some(offset) = std::env::var("KYLECORD_SETTINGS_SCROLL")
+    if let Some(offset) = std::env::var("KUBECORD_SETTINGS_SCROLL")
         .ok()
         .and_then(|offset| offset.parse::<f64>().ok())
     {

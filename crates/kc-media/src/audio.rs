@@ -109,7 +109,7 @@ impl Capture {
     /// monitor device rather than the default input.
     pub fn start_monitor(on_frame: impl FnMut(Vec<i16>) + Send + 'static) -> Result<Self> {
         let device =
-            std::env::var("KYLECORD_MONITOR_DEVICE").unwrap_or_else(|_| "@DEFAULT_MONITOR@".into());
+            std::env::var("KUBECORD_MONITOR_DEVICE").unwrap_or_else(|_| "@DEFAULT_MONITOR@".into());
         let pipeline = format!(
             "pulsesrc device=\"{device}\" ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
@@ -119,13 +119,13 @@ impl Capture {
     }
 
     /// Captures what is played into the output named `node_name` (its
-    /// monitor), such as kylecord's own [`VirtualOutput`].
+    /// monitor), such as kubecord's own [`VirtualOutput`].
     pub fn start_monitor_of(
         node_name: &str,
         on_frame: impl FnMut(Vec<i16>) + Send + 'static,
     ) -> Result<Self> {
         let pipeline = format!(
-            "pulsesrc device=\"{node_name}.monitor\" client-name=kylecord \
+            "pulsesrc device=\"{node_name}.monitor\" client-name=kubecord \
              ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
              ! appsink name=sink sync=false max-buffers=8 drop=true"
@@ -298,8 +298,8 @@ impl Drop for Capture {
 }
 
 /// Sound captured for a stream. Everything goes through a virtual output
-/// of kylecord's own (`kylecord Go Live`), recorded from its monitor:
-/// kylecord connects other programs into it, or a patchbay does.
+/// of kubecord's own (`kubecord Go Live`), recorded from its monitor:
+/// kubecord connects other programs into it, or a patchbay does.
 pub struct SharedSound {
     // Dropped in this order: stop connecting, stop recording, then remove
     // the output.
@@ -317,7 +317,7 @@ impl SharedSound {
         if !crate::share_audio::tools_available() {
             return match share {
                 // Desktop sound can still come from the default output's
-                // monitor, kylecord's own sound included.
+                // monitor, kubecord's own sound included.
                 AudioShare::Desktop => {
                     tracing::warn!(
                         "pw-cli, pw-dump or pw-link missing; sharing everything the default output plays"
@@ -337,7 +337,7 @@ impl SharedSound {
             // The same name every time, so a patchbay remembers it.
             AudioShare::Node => crate::share_audio::NODE_NAME.to_owned(),
             // A name of its own, so the linker finds this output and not
-            // another kylecord's.
+            // another kubecord's.
             _ => format!(
                 "{}-{}-{}",
                 crate::share_audio::NODE_NAME,

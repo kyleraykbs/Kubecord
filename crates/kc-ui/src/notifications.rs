@@ -177,7 +177,7 @@ pub(crate) fn prepare(
 /// Whether notifications are only printed (demo runs): nothing reaches the
 /// desktop.
 fn dry_run() -> bool {
-    std::env::var_os("KYLECORD_DEMO").is_some() || std::env::var_os("KYLECORD_NOTIFY_DRY").is_some()
+    std::env::var_os("KUBECORD_DEMO").is_some() || std::env::var_os("KUBECORD_NOTIFY_DRY").is_some()
 }
 
 impl AppState {
@@ -389,7 +389,7 @@ impl AppState {
         let (unseen, title) = {
             let shown = self.notifications.borrow();
             let title = if shown.title.is_empty() {
-                "kylecord".to_owned()
+                "kubecord".to_owned()
             } else {
                 shown.title.clone()
             };
@@ -474,8 +474,8 @@ impl AppState {
     pub(crate) fn test_notification(self: &Rc<Self>) {
         self.send_desktop(
             "test",
-            "kylecord",
-            "Notifications work. Click this to come back to kylecord.",
+            "kubecord",
+            "Notifications work. Click this to come back to kubecord.",
             "0:0",
             None,
             false,

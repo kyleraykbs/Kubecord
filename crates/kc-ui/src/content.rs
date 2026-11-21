@@ -293,7 +293,7 @@ impl AppState {
         text.set_markup(&rich::to_markup(&pieces, &resolver, false));
         let app = self.clone();
         text.connect_activate_link(move |text, uri| {
-            if uri == "kylecord://spoiler" {
+            if uri == "kubecord://spoiler" {
                 // Reveal: render again with spoilers shown.
                 if let Some(markup) = app.with_session(|session| {
                     session.store.read(|state| {
@@ -313,12 +313,12 @@ impl AppState {
     /// Handles a link clicked in message text.
     pub(crate) fn activate_link(self: &Rc<Self>, uri: &str, anchor: &gtk::Widget) {
         if let Some(id) = uri
-            .strip_prefix("kylecord://user/")
+            .strip_prefix("kubecord://user/")
             .and_then(|id| id.parse::<Snowflake>().ok())
         {
             self.show_profile(id, anchor);
         } else if let Some(id) = uri
-            .strip_prefix("kylecord://channel/")
+            .strip_prefix("kubecord://channel/")
             .and_then(|id| id.parse::<Snowflake>().ok())
         {
             let channel = self.with_session(|session| {

@@ -368,7 +368,7 @@ impl AppState {
         dialog.set_title(&format!("{name} — Server Settings"));
         dialog.set_content_width(960);
         dialog.set_content_height(
-            std::env::var("KYLECORD_WINDOW_HEIGHT")
+            std::env::var("KUBECORD_WINDOW_HEIGHT")
                 .ok()
                 .and_then(|height| height.parse::<i32>().ok())
                 .map_or(700, |height| height - 20),
@@ -1335,7 +1335,7 @@ impl AppState {
         let page = page_box();
         page.append(&section_title("Server Members"));
         page.append(&wrapped(
-            "Members kylecord knows about. Search to ask Discord for more; \
+            "Members kubecord knows about. Search to ask Discord for more; \
              use the menu on a member to moderate them.",
             &["dim-label"],
         ));

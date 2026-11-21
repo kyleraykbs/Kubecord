@@ -570,7 +570,7 @@ impl AppState {
         self.update_prefs(|prefs| prefs.self_preview = show);
     }
 
-    /// Says Discord wants a captcha, which kylecord cannot show, and offers
+    /// Says Discord wants a captcha, which kubecord cannot show, and offers
     /// to finish in the browser where the user is signed in.
     pub(crate) fn captcha_needed(&self, text: &str, url: &str) {
         let window = self.window.clone();

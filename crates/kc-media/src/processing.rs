@@ -32,7 +32,7 @@ pub struct VoiceProcessing {
     pub noise_suppression: NoiseSuppression,
     pub echo_cancellation: bool,
     pub auto_gain: bool,
-    /// Let kylecord find the level of the room and send only what rises
+    /// Let kubecord find the level of the room and send only what rises
     /// above it; when off, `threshold_db` decides.
     pub auto_sensitivity: bool,
     /// Frames quieter than this (dBFS, RMS) are not sent.
@@ -214,7 +214,7 @@ pub fn level_db(samples: &[i16]) -> f32 {
 /// What decides whether the microphone is sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sensitivity {
-    /// Above the room's own noise, as kylecord measures it.
+    /// Above the room's own noise, as kubecord measures it.
     Automatic,
     /// At or above this level (dBFS).
     Manual(f32),

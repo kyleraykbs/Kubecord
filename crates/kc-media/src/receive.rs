@@ -319,7 +319,7 @@ impl Output {
         // the sink, is what absorbs network timing.
         // The chosen output: an explicit env override, then the configured
         // device, then the default sink.
-        let configured = std::env::var("KYLECORD_PLAYBACK_DEVICE")
+        let configured = std::env::var("KUBECORD_PLAYBACK_DEVICE")
             .ok()
             .filter(|device| !device.is_empty())
             .or_else(crate::devices::output_device);

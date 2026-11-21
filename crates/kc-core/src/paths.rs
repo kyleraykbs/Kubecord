@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-const APP: &str = "kylecord";
+const APP: &str = "kubecord";
 
-/// `$XDG_CONFIG_HOME/kylecord`, falling back to `~/.config/kylecord`.
+/// `$XDG_CONFIG_HOME/kubecord`, falling back to `~/.config/kubecord`.
 pub fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME")
         && !dir.is_empty()
@@ -16,7 +16,7 @@ pub fn config_dir() -> Result<PathBuf> {
         .ok_or(Error::NoConfigDir)
 }
 
-/// `$XDG_DATA_HOME/kylecord`, falling back to `~/.local/share/kylecord`.
+/// `$XDG_DATA_HOME/kubecord`, falling back to `~/.local/share/kubecord`.
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME")
         && !dir.is_empty()
@@ -28,7 +28,7 @@ pub fn data_dir() -> Result<PathBuf> {
         .ok_or(Error::NoConfigDir)
 }
 
-/// `$XDG_CACHE_HOME/kylecord`, falling back to `~/.cache/kylecord`.
+/// `$XDG_CACHE_HOME/kubecord`, falling back to `~/.cache/kubecord`.
 pub fn cache_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME")
         && !dir.is_empty()

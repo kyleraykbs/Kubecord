@@ -2128,7 +2128,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kylecord"
+name = "kubecord"
 version = "0.1.0"
 dependencies = [
  "glib",

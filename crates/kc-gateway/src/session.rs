@@ -469,12 +469,12 @@ impl Gateway {
     }
 }
 
-/// Development aid: with `KYLECORD_DUMP_DISPATCH=<dir>` every dispatch is
+/// Development aid: with `KUBECORD_DUMP_DISPATCH=<dir>` every dispatch is
 /// written to `<dir>/<EVENT>.json` (the latest payload per event name), so
 /// reducers can be written against real payload shapes. The files contain
 /// account data; the directory is the caller's responsibility.
 fn dump_dispatch(name: &str, data: &Value) {
-    let Some(directory) = std::env::var_os("KYLECORD_DUMP_DISPATCH") else {
+    let Some(directory) = std::env::var_os("KUBECORD_DUMP_DISPATCH") else {
         return;
     };
     let path = std::path::Path::new(&directory).join(format!("{name}.json"));

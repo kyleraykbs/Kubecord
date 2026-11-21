@@ -1372,7 +1372,7 @@ impl VideoSource {
         );
         if gst::ElementFactory::find("pipewiresrc").is_none() {
             return Err(Error::Message(
-                "pipewiresrc plugin unavailable; start kylecord from `nix develop` or the packaged Nix build"
+                "pipewiresrc plugin unavailable; start kubecord from `nix develop` or the packaged Nix build"
                     .into(),
             ));
         }
@@ -2088,7 +2088,7 @@ mod tests {
                 "!",
                 "pipewiresink",
                 "mode=provide",
-                "stream-properties=props,node.name=kylecord-test-video,media.class=Video/Source",
+                "stream-properties=props,node.name=kubecord-test-video,media.class=Video/Source",
             ])
             .spawn()
             .unwrap();
@@ -2099,7 +2099,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|object| object["info"]["props"]["node.name"] == "kylecord-test-video")
+            .find(|object| object["info"]["props"]["node.name"] == "kubecord-test-video")
             .and_then(|object| object["id"].as_u64());
         let outcome = node.map(|node| {
             let settings = VideoSettings {

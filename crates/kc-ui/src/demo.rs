@@ -1,4 +1,4 @@
-//! Development aid (`KYLECORD_DEMO=<mode>`): a made-up account with one
+//! Development aid (`KUBECORD_DEMO=<mode>`): a made-up account with one
 //! server, filled through the real store reducers and shown without
 //! signing in or touching the network (apart from default avatars). It is
 //! for checking the chat list, the channel sidebar and the voice channel
@@ -199,10 +199,10 @@ fn ready() -> Value {
         "user_guild_settings": {"entries": []},
         "user_settings": {"status": "online", "guild_folders": []}
     });
-    // Dev aid: `KYLECORD_DEMO_GUILDS=N` adds N extra servers (each with an
+    // Dev aid: `KUBECORD_DEMO_GUILDS=N` adds N extra servers (each with an
     // icon, so the rail loads an avatar per server) to measure the rail
     // rebuild at a busy account's scale.
-    if let Some(extra) = std::env::var("KYLECORD_DEMO_GUILDS")
+    if let Some(extra) = std::env::var("KUBECORD_DEMO_GUILDS")
         .ok()
         .and_then(|n| n.parse::<u64>().ok())
     {
@@ -340,7 +340,7 @@ impl AppState {
             self.show_login_demo(what.trim_start_matches('-'));
             return;
         }
-        let token = Token::new("kylecord-demo-account");
+        let token = Token::new("kubecord-demo-account");
         let account = session::account_id(&token);
         let mut session = Session::new(Account {
             user_id: Some(Snowflake::new(ME)),
@@ -351,7 +351,7 @@ impl AppState {
         // Nothing in the demo may reach Discord: requests go nowhere and
         // fail, which also shows how failures look.
         session.http = kc_http::HttpClient::with_base(
-            Token::new("kylecord-demo-account"),
+            Token::new("kubecord-demo-account"),
             "https://127.0.0.1:9/api/v9",
         );
         let store = session.store.clone();
@@ -404,7 +404,7 @@ impl AppState {
             if mode.starts_with("accounts") {
                 model.accounts.upsert(Account {
                     user_id: Some(Snowflake::new(ADA)),
-                    token: Token::new("kylecord-demo-second"),
+                    token: Token::new("kubecord-demo-second"),
                     label: Some("Ada".to_owned()),
                 });
             }
@@ -486,7 +486,7 @@ impl AppState {
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     let anchor = app.window.clone().upcast::<gtk::Widget>();
                     let menu = app.show_user_menu(Snowflake::new(ADA), &anchor, 420.0, 120.0);
-                    if let (Some(popover), Ok(path)) = (menu, std::env::var("KYLECORD_SCREENSHOT"))
+                    if let (Some(popover), Ok(path)) = (menu, std::env::var("KUBECORD_SCREENSHOT"))
                     {
                         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                             let path = format!("{path}.menu.png");
@@ -561,7 +561,7 @@ impl AppState {
                     let url = url.to_owned();
                     glib::timeout_add_local_once(Duration::from_millis(1200), move || {
                         app.show_image(&url, &url);
-                        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                        if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                             let app = app.clone();
                             let url = url.clone();
                             glib::timeout_add_local_once(Duration::from_millis(2500), move || {
@@ -587,7 +587,7 @@ impl AppState {
                 glib::timeout_add_local_once(Duration::from_millis(1200), move || {
                     let popover = app.demo_gif_picker();
                     if let (Ok(path), Some(popover)) =
-                        (std::env::var("KYLECORD_SCREENSHOT"), popover)
+                        (std::env::var("KUBECORD_SCREENSHOT"), popover)
                     {
                         glib::timeout_add_local_once(Duration::from_millis(2500), move || {
                             let path = format!("{path}.menu.png");
@@ -604,7 +604,7 @@ impl AppState {
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(2500), move || {
                     app.demo_zoom_viewer(url, 4.0);
-                    let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") else {
+                    let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") else {
                         return;
                     };
                     let app = app.clone();
@@ -743,7 +743,7 @@ impl AppState {
                     if let Some(popover) = app.account_button.popover() {
                         popover.set_autohide(false);
                         popover.popup();
-                        if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                        if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                             glib::timeout_add_local_once(Duration::from_millis(1200), move || {
                                 let _ = crate::app::save_window_png(
                                     &popover,
@@ -1023,7 +1023,7 @@ impl AppState {
                 self.add_channel_items(&items, &popover, &channel);
                 popover.set_child(Some(&items));
                 popover.popup();
-                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                         let path = format!("{path}.menu.png");
                         if let Err(error) =
@@ -1079,7 +1079,7 @@ impl AppState {
             }
             "group-menu" => {
                 let popover = self.show_group_menu(group, &self.window, 120.0, 200.0);
-                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                         let path = format!("{path}.menu.png");
                         if let Err(error) =
@@ -1132,7 +1132,7 @@ impl AppState {
         {
             self.show_move_targets(popover, guild, ada);
         }
-        if let (Some(popover), Ok(path)) = (menu, std::env::var("KYLECORD_SCREENSHOT")) {
+        if let (Some(popover), Ok(path)) = (menu, std::env::var("KUBECORD_SCREENSHOT")) {
             glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                 let path = format!("{path}.menu.png");
                 if let Err(error) =

@@ -295,7 +295,7 @@ pub(crate) fn quality_controls(
     bitrate_names.extend(BITRATES.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate = string_dropdown(&bitrate_names);
     // The range an automatic bitrate moves in; either end can be left to
-    // kylecord.
+    // kubecord.
     let mut floor_names = vec!["Automatic".to_owned()];
     floor_names.extend(BITRATE_FLOORS.iter().map(|kbps| format!("{kbps} kbps")));
     let bitrate_min = string_dropdown(&floor_names);
@@ -728,9 +728,9 @@ const AUDIO_MODES: [&str; 4] = [
 /// What each of [`AUDIO_MODES`] does.
 const AUDIO_MODE_HELP: [&str; 4] = [
     "The stream is silent.",
-    "Everything playing to your default output, except kylecord itself, so viewers don't hear the call back.",
+    "Everything playing to your default output, except kubecord itself, so viewers don't hear the call back.",
     "Only the program chosen below, wherever it plays. Programs are listed while they have sound open; Refresh looks again.",
-    "Adds an output named kylecord Go Live while you stream. Connect anything to it in your patchbay, or choose it as a program's output; viewers hear what reaches it.",
+    "Adds an output named kubecord Go Live while you stream. Connect anything to it in your patchbay, or choose it as a program's output; viewers hear what reaches it.",
 ];
 
 /// The Shared Audio Boost slider's range, as a percentage of the captured

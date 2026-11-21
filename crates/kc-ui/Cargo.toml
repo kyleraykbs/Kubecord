@@ -1,6 +1,6 @@
 [package]
 name = "kc-ui"
-description = "GTK4/libadwaita interface for kylecord"
+description = "GTK4/libadwaita interface for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

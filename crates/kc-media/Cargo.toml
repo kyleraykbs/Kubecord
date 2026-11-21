@@ -1,6 +1,6 @@
 [package]
 name = "kc-media"
-description = "GStreamer capture, codecs and rendering for kylecord"
+description = "GStreamer capture, codecs and rendering for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

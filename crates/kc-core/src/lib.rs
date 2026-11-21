@@ -1,4 +1,4 @@
-//! Shared types, configuration and credentials for kylecord.
+//! Shared types, configuration and credentials for kubecord.
 
 pub mod account;
 pub mod error;

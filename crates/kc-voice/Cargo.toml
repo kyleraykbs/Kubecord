@@ -1,6 +1,6 @@
 [package]
 name = "kc-voice"
-description = "Discord voice, camera and Go Live transport for kylecord"
+description = "Discord voice, camera and Go Live transport for kubecord"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

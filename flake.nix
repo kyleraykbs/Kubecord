@@ -1,5 +1,5 @@
 {
-  description = "kylecord — a Discord client";
+  description = "kubecord — a Discord client";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -70,7 +70,7 @@
 
           commonArgs = {
             inherit src nativeBuildInputs buildInputs;
-            pname = "kylecord";
+            pname = "kubecord";
             strictDeps = true;
             GIT_HASH = inputs.self.shortRev or "dirty";
             GST_PLUGIN_SYSTEM_PATH_1_0 = lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins;
@@ -79,11 +79,11 @@
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-          kylecord = craneLib.buildPackage (
+          kubecord = craneLib.buildPackage (
             commonArgs
             // {
               inherit cargoArtifacts;
-              pname = "kylecord";
+              pname = "kubecord";
               version = "0.1.0";
               # Arguments for the launcher wrapGAppsHook writes. (Set as an
               # attribute they are ignored; the hook's own list is added to.)
@@ -99,16 +99,16 @@
                 description = "A Discord client";
                 license = lib.licenses.gpl3Only;
                 platforms = lib.platforms.linux;
-                mainProgram = "kylecord";
+                mainProgram = "kubecord";
               };
             }
           );
         in
         {
-          packages.default = kylecord;
+          packages.default = kubecord;
 
           devShells.default = pkgs.mkShell {
-            inputsFrom = [ kylecord ];
+            inputsFrom = [ kubecord ];
             packages = [
               rustToolchain
               pkgs.cargo-nextest
@@ -128,7 +128,7 @@
           formatter = pkgs.nixfmt;
 
           checks = {
-            inherit kylecord;
+            inherit kubecord;
             clippy = craneLib.cargoClippy (
               commonArgs
               // {

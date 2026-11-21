@@ -32,7 +32,7 @@ impl NotifyReason {
     }
 }
 
-/// The user's own notification choices (kylecord's settings).
+/// The user's own notification choices (kubecord's settings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotifyPrefs {
     /// Every message in a DM notifies; when off, only mentions there do.
@@ -340,7 +340,7 @@ mod tests {
             ..all
         };
         assert_eq!(decide(&nothing, &prefs), None);
-        // Mentions only, kylecord-wide, overrides "all messages".
+        // Mentions only, kubecord-wide, overrides "all messages".
         let mentions_only = NotifyPrefs {
             mentions_only: true,
             ..prefs

@@ -1,16 +1,16 @@
 //! Interface sounds: notifications, joining and leaving, mute and deafen,
 //! ringing, streams.
 //!
-//! The sounds are Discord's own, but they are not part of kylecord: on
+//! The sounds are Discord's own, but they are not part of kubecord: on
 //! first need they are downloaded from Discord's public web assets into
-//! `~/.cache/kylecord/sounds/` (no token, no account data, just the files
+//! `~/.cache/kubecord/sounds/` (no token, no account data, just the files
 //! every browser loads). Which file is which is not published, so
 //! [`discover`] reads the web app's script bundles, where the build maps
 //! each sound's name (`./message1.mp3`) to a webpack module that exports
 //! its hashed file name (`n.p+"3ed22d14f3c30bc4.mp3"`). The result is kept
 //! in `manifest.json`. Until the files are there, or if Discord changes
 //! its bundles so the names cannot be found, a short tone made here plays
-//! instead. A file dropped in `~/.config/kylecord/sounds/<event>.mp3`
+//! instead. A file dropped in `~/.config/kubecord/sounds/<event>.mp3`
 //! (or `.ogg`, `.wav`, `.flac`, `.opus`) replaces any sound.
 
 use std::cell::{Cell, RefCell};
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::shell::AppState;
 
-/// Every sound kylecord plays.
+/// Every sound kubecord plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SoundEvent {
     Message,
@@ -192,14 +192,14 @@ impl Source {
 
 const OVERRIDE_EXTENSIONS: [&str; 5] = ["mp3", "ogg", "wav", "flac", "opus"];
 
-/// `~/.config/kylecord/sounds`: files here replace the sounds.
+/// `~/.config/kubecord/sounds`: files here replace the sounds.
 pub(crate) fn override_dir() -> Option<PathBuf> {
     kc_core::paths::config_dir()
         .ok()
         .map(|dir| dir.join("sounds"))
 }
 
-/// `~/.cache/kylecord/sounds`: the downloaded sounds and the tones.
+/// `~/.cache/kubecord/sounds`: the downloaded sounds and the tones.
 fn cache_dir() -> Option<PathBuf> {
     kc_core::paths::cache_dir()
         .ok()
@@ -325,7 +325,7 @@ impl Clues {
     }
 }
 
-/// The sound names kylecord uses.
+/// The sound names kubecord uses.
 fn wanted() -> Vec<&'static str> {
     let mut names: Vec<&str> = SoundEvent::ALL
         .iter()
@@ -573,7 +573,7 @@ impl AppState {
         let Some(dir) = cache_dir() else {
             return;
         };
-        if dry_run() || std::env::var_os("KYLECORD_NO_SOUND_DOWNLOAD").is_some() {
+        if dry_run() || std::env::var_os("KUBECORD_NO_SOUND_DOWNLOAD").is_some() {
             self.set_download(Download::Failed("downloads are switched off".to_owned()));
             return;
         }
@@ -687,7 +687,7 @@ impl AppState {
 /// Demo runs print the sounds instead of playing them, and download
 /// nothing.
 fn dry_run() -> bool {
-    std::env::var_os("KYLECORD_DEMO").is_some()
+    std::env::var_os("KUBECORD_DEMO").is_some()
 }
 
 /// Who arrived and who went, between two looks at a group of people.
@@ -832,7 +832,7 @@ mod tests {
     #[ignore = "downloads from discord.com"]
     fn discord_sounds_are_found_and_downloaded() {
         let dir =
-            std::env::temp_dir().join(format!("kylecord-discord-sounds-{}", std::process::id()));
+            std::env::temp_dir().join(format!("kubecord-discord-sounds-{}", std::process::id()));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (manifest, present, problems) = runtime.block_on(ensure(dir.clone(), true)).unwrap();
         eprintln!(
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn overrides_then_discord_then_the_tone() {
-        let root = std::env::temp_dir().join(format!("kylecord-sounds-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("kubecord-sounds-{}", std::process::id()));
         let overrides = root.join("config");
         let cache = root.join("cache");
         std::fs::create_dir_all(cache.join("discord")).unwrap();

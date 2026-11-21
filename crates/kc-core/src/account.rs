@@ -44,7 +44,7 @@ impl Default for AccountsFile {
 
 /// The on-disk account list.
 ///
-/// Lives at `$XDG_CONFIG_HOME/kylecord/accounts.json`, mode 0600. Tokens are
+/// Lives at `$XDG_CONFIG_HOME/kubecord/accounts.json`, mode 0600. Tokens are
 /// plaintext on disk on purpose: this is a local, single-user client and the
 /// alternative (a keyring dependency) adds a daemon requirement to a GTK app.
 #[derive(Clone, Debug, Default)]
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kylecord-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kubecord-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("accounts.json")
     }

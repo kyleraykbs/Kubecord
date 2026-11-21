@@ -646,7 +646,7 @@ struct SessionState {
     sent_video: SentVideo,
     /// Sequence number of the next packet on the retransmission stream.
     seq_rtx: u16,
-    /// Testing aid (`KYLECORD_TEST_DROP_VIDEO=n`): every nth video packet is
+    /// Testing aid (`KUBECORD_TEST_DROP_VIDEO=n`): every nth video packet is
     /// not sent, as if lost on the way, to exercise retransmission.
     test_drop: Option<u32>,
     sent_audio: SentPackets,
@@ -884,7 +884,7 @@ async fn run(
         net_remb_kbps: 0,
         sent_video: SentVideo::default(),
         seq_rtx: 0,
-        test_drop: std::env::var("KYLECORD_TEST_DROP_VIDEO")
+        test_drop: std::env::var("KUBECORD_TEST_DROP_VIDEO")
             .ok()
             .and_then(|every| every.parse().ok())
             .filter(|every| *every > 1)

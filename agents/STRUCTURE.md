@@ -3,7 +3,7 @@
 High-level module map. Update when a crate is added or its connections change.
 
 ```
-kylecord (bin) ── kc-ui (GTK4/libadwaita)
+kubecord (bin) ── kc-ui (GTK4/libadwaita)
                     │
                     ├── kc-state (guilds, channels, messages)
                     │        ▲
@@ -22,7 +22,7 @@ kylecord (bin) ── kc-ui (GTK4/libadwaita)
 | `kc-voice` | voice gateway, UDP, SRTP, RTP, DAVE, stream connections |
 | `kc-media` | GStreamer pipelines: mic, playback, camera, screen, codecs |
 | `kc-ui` | GTK widgets and the app shell |
-| `kylecord` | process entry: GTK main loop + tokio runtime |
+| `kubecord` | process entry: GTK main loop + tokio runtime |
 
 Threading: GTK lives on the main thread. Tokio runs on a background runtime; UI
 commands go to tokio over channels, tokio events come back through the GLib main
@@ -45,7 +45,7 @@ each module below adds an `impl AppState` block for one part of the window.
 | `composer.rs` | sending, replies, edits, uploads, emoji and GIF pickers, autocomplete |
 | `friends.rs` | friends page, relationship actions, opening DMs |
 | `members.rs` | member list, channel header, user bar, status, profile popover |
-| `images.rs` | async image cache (memory + `$XDG_CACHE_HOME/kylecord/images`), WebP decoding, file downloads for playback |
+| `images.rs` | async image cache (memory + `$XDG_CACHE_HOME/kubecord/images`), WebP decoding, file downloads for playback |
 | `player.rs` | inline GIF-style video (`gifv`) playback: muted looping playbin → `gtk4paintablesink`, run only while visible and focused |
 | `voice.rs` | voice channel view (participant tiles, speaking ring), double-click-to-join |
 | `style.rs` / `widgets.rs` | application CSS and shared widget builders |

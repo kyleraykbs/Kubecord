@@ -37,7 +37,7 @@ pub(crate) struct Participant {
     is_self: bool,
 }
 
-/// A made-up call for `KYLECORD_VIDEO_DEMO`.
+/// A made-up call for `KUBECORD_VIDEO_DEMO`.
 pub(crate) struct DemoCall {
     people: Vec<Participant>,
     watching: Option<Snowflake>,
@@ -1043,7 +1043,7 @@ impl AppState {
         }
     }
 
-    /// Closes every video window (the call ended, or kylecord is closing).
+    /// Closes every video window (the call ended, or kubecord is closing).
     pub(crate) fn close_popouts(&self) {
         let popouts: Vec<Popout> = self.popouts.borrow_mut().drain().map(|(_, p)| p).collect();
         for popout in popouts {
@@ -1051,7 +1051,7 @@ impl AppState {
         }
     }
 
-    /// Development aid (`KYLECORD_VIDEO_DEMO`): a made-up call with
+    /// Development aid (`KUBECORD_VIDEO_DEMO`): a made-up call with
     /// locally generated video, to check the layout without a real one.
     /// The value picks the state: `grid`, `focus`, `hidden` (focused, with
     /// the others hidden), `popout`, `info` and `info-grid` (information
@@ -1107,10 +1107,10 @@ impl AppState {
         });
         self.stack.set_visible_child_name("chat");
         self.set_call_layout(CallLayout::Only);
-        // The voice panel too, with a made-up ping (`KYLECORD_DEMO_PING`,
+        // The voice panel too, with a made-up ping (`KUBECORD_DEMO_PING`,
         // milliseconds) to show the signal bars.
         self.voice_panel.set_visible(true);
-        let ping = std::env::var("KYLECORD_DEMO_PING")
+        let ping = std::env::var("KUBECORD_DEMO_PING")
             .ok()
             .and_then(|millis| millis.parse().ok())
             .unwrap_or(40);
@@ -1141,7 +1141,7 @@ impl AppState {
                 // Save the pop-out window of its own (it is a separate
                 // surface, so the main screenshot does not hold it) to
                 // `<screenshot>.popout.png`, to check its controls.
-                if let Ok(path) = std::env::var("KYLECORD_SCREENSHOT") {
+                if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
                     let app = self.clone();
                     let key = (account, stream.0, true);
                     if let Some(window) = app.popouts.borrow().get(&key).map(|p| p.window.clone()) {

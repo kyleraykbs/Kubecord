@@ -1,4 +1,4 @@
-//! GStreamer capture, codecs and rendering for kylecord.
+//! GStreamer capture, codecs and rendering for kubecord.
 
 pub mod audio;
 pub mod decode;
