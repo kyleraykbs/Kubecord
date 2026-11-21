@@ -729,8 +729,8 @@ impl AppState {
         );
     }
 
-    /// Scrolls to a message that is already shown and flashes it. Returns
-    /// false when the message is not loaded.
+    /// Scrolls to a message that is already shown, centring it, and flashes
+    /// it. Returns false when the message is not loaded.
     pub(crate) fn jump_to_message(self: &Rc<Self>, message_id: Snowflake) -> bool {
         let found = self
             .chat
@@ -743,12 +743,50 @@ impl AppState {
             return false;
         };
         self.chat.borrow_mut().at_bottom = false;
-        row.grab_focus();
+        self.centre_row(&row);
+        self.update_present();
         body.add_css_class("kc-flash");
         glib::timeout_add_seconds_local_once(2, move || {
             body.remove_css_class("kc-flash");
         });
         true
+    }
+
+    /// Scrolls so `row` sits in the middle of the viewport. The row may have
+    /// just been built and not laid out yet (its height is still 0), so retry
+    /// on idle until it has an allocation, giving up after a bounded number of
+    /// frames so a never-mapped row cannot spin.
+    fn centre_row(self: &Rc<Self>, row: &gtk::ListBoxRow) {
+        let app = self.clone();
+        let row = row.clone();
+        let mut tries = 0u8;
+        glib::idle_add_local(move || {
+            tries += 1;
+            if row.height() > 1 || tries >= 30 {
+                app.scroll_row_to_centre(&row);
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Positions the message scroll so `row`'s centre aligns with the
+    /// viewport's centre, clamped to the scrollable range.
+    fn scroll_row_to_centre(&self, row: &gtk::ListBoxRow) {
+        let adjustment = self.messages_scroll.vadjustment();
+        // The vertical adjustment tracks the scroll's child (the message
+        // column), so measure the row's bounds within that content.
+        let Some(bounds) = self
+            .messages_scroll
+            .child()
+            .and_then(|content| row.compute_bounds(&content))
+        else {
+            return;
+        };
+        let page = adjustment.page_size();
+        let target = f64::from(bounds.y()) + f64::from(bounds.height()) / 2.0 - page / 2.0;
+        let max = (adjustment.upper() - page).max(adjustment.lower());
+        adjustment.set_value(target.clamp(adjustment.lower(), max));
     }
 
     // -- rows ------------------------------------------------------------
@@ -1707,11 +1745,13 @@ impl AppState {
                     });
                     app.chat.borrow_mut().channel = None;
                     app.render_messages();
-                    // Rows are built but not laid out yet.
-                    let app = app.clone();
-                    glib::idle_add_local_once(move || {
-                        app.jump_to_message(message_id);
-                    });
+                    // The rows exist now (built synchronously); jump_to_message
+                    // waits for their layout before centring. If the target is
+                    // gone (e.g. deleted), say so rather than silently nothing.
+                    if !app.jump_to_message(message_id) {
+                        app.set_status("Couldn't find that message.");
+                    }
+                    app.update_present();
                 }
                 Err(error) => app.set_status(&format!("Could not load that message: {error}")),
             },
