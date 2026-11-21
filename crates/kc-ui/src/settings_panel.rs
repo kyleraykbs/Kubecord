@@ -822,7 +822,7 @@ impl AppState {
     /// The message logger: how long to keep the text and media of each kind
     /// of message, what the log holds, and clearing it.
     fn logger_page(self: &Rc<Self>) -> gtk::Box {
-        use crate::logger::{Keep, KeepPair, LoggerPrefs};
+        use crate::logger::{Collect, Keep, KeepPair, LoggerPrefs};
         let page = page_box();
         page.append(&section_title("Message Logger"));
 
@@ -833,24 +833,28 @@ impl AppState {
         ));
         let labels: Vec<&str> = Keep::ALL.iter().map(|keep| keep.label()).collect();
         type Field = fn(&mut LoggerPrefs) -> &mut KeepPair;
-        let rows: [(&str, &str, Field); 3] = [
+        type CleanUp = fn(&mut Collect) -> &mut bool;
+        let rows: [(&str, &str, Field, CleanUp); 3] = [
             (
                 "Channels You're Viewing",
                 "Messages in the channel open in Kubecord.",
                 |prefs| &mut prefs.viewed,
+                |collect| &mut collect.viewed,
             ),
             (
                 "Messages That Would Notify",
                 "Messages that would send you a notification, even while on Do Not Disturb.",
                 |prefs| &mut prefs.notifying,
+                |collect| &mut collect.notifying,
             ),
             (
                 "Everything Else",
                 "Every other message Discord sends to Kubecord.",
                 |prefs| &mut prefs.other,
+                |collect| &mut collect.other,
             ),
         ];
-        for (title, subtitle, field) in rows {
+        for (title, subtitle, field, clean_up) in rows {
             let row = adw::ActionRow::new();
             row.set_title(title);
             row.set_subtitle(subtitle);
@@ -884,9 +888,58 @@ impl AppState {
                 column.append(&choice);
                 row.add_suffix(&column);
             }
+            // Whether the size limits may remove this kind.
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            column.set_valign(gtk::Align::Center);
+            let caption = gtk::Label::new(Some("Clean Up"));
+            caption.add_css_class("caption");
+            caption.add_css_class("dim-label");
+            column.append(&caption);
+            let check = gtk::CheckButton::new();
+            check.set_halign(gtk::Align::Center);
+            check.set_tooltip_text(Some("Let the size limits remove these when the log is too big"));
+            check.set_active(*clean_up(&mut self.capture.borrow_mut().logger.collect));
+            let app = self.clone();
+            check.connect_toggled(move |check| {
+                let on = check.is_active();
+                app.update_prefs(|prefs| *clean_up(&mut prefs.logger.collect) = on);
+            });
+            column.append(&check);
+            row.add_suffix(&column);
             keep.add(&row);
         }
         page.append(&keep);
+
+        let limits = adw::PreferencesGroup::new();
+        limits.set_title("Size Limits");
+        limits.set_description(Some(
+            "Past a limit, the largest attachments go first; then text, oldest first: everything else before messages that would notify, and those before channels you were viewing. Only kinds with Clean Up on are removed. 0 means no limit.",
+        ));
+        type Limit = fn(&mut LoggerPrefs) -> &mut u32;
+        let sizes: [(&str, &str, Limit); 4] = [
+            (
+                "Media per Message",
+                "MB kept from one message; the largest attachments are left out first.",
+                |prefs| &mut prefs.per_message_mb,
+            ),
+            ("Per Week", "MB the log may hold of the last week.", |prefs| &mut prefs.week_mb),
+            ("Per Month", "MB the log may hold of the last month.", |prefs| &mut prefs.month_mb),
+            ("Per Year", "MB the log may hold of the last year.", |prefs| &mut prefs.year_mb),
+        ];
+        for (title, subtitle, limit) in sizes {
+            let row = adw::SpinRow::with_range(0.0, 1_000_000.0, 1.0);
+            row.set_title(title);
+            row.set_subtitle(subtitle);
+            row.set_digits(0);
+            row.set_value(f64::from(*limit(&mut self.capture.borrow_mut().logger)));
+            let app = self.clone();
+            row.connect_value_notify(move |row| {
+                let value = row.value().round().max(0.0) as u32;
+                app.update_prefs(|prefs| *limit(&mut prefs.logger) = value);
+            });
+            limits.add(&row);
+        }
+        page.append(&limits);
 
         let log = adw::PreferencesGroup::new();
         log.set_title("Log");

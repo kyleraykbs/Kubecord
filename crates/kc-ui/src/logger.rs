@@ -100,6 +100,35 @@ pub struct LoggerPrefs {
     pub notifying: KeepPair,
     /// Every other message Discord sends.
     pub other: KeepPair,
+    /// Media kept per message, in MB (0: no limit); the largest
+    /// attachments are left out first.
+    pub per_message_mb: u32,
+    /// The most the log may hold of what arrived in the last week, month
+    /// and year, in MB (0: no limit).
+    pub week_mb: u32,
+    pub month_mb: u32,
+    pub year_mb: u32,
+    /// Which kinds the size limits may remove.
+    pub collect: Collect,
+}
+
+/// Which kinds of message the size limits may remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Collect {
+    pub viewed: bool,
+    pub notifying: bool,
+    pub other: bool,
+}
+
+impl Default for Collect {
+    fn default() -> Self {
+        Self {
+            viewed: false,
+            notifying: false,
+            other: true,
+        }
+    }
 }
 
 impl Default for LoggerPrefs {
@@ -117,6 +146,11 @@ impl Default for LoggerPrefs {
                 text: Keep::Week,
                 media: Keep::Off,
             },
+            per_message_mb: 20,
+            week_mb: 0,
+            month_mb: 0,
+            year_mb: 0,
+            collect: Collect::default(),
         }
     }
 }
@@ -129,7 +163,32 @@ enum Kind {
     Other,
 }
 
+impl Kind {
+    /// Stored with each message; the higher, the sooner it goes when the
+    /// log is too big.
+    fn rank(self) -> i64 {
+        match self {
+            Kind::Viewed => 0,
+            Kind::Notifying => 1,
+            Kind::Other => 2,
+        }
+    }
+}
+
 impl LoggerPrefs {
+    /// The ranks the size limits may remove.
+    fn collectable(&self) -> Vec<i64> {
+        [
+            (self.collect.viewed, Kind::Viewed),
+            (self.collect.notifying, Kind::Notifying),
+            (self.collect.other, Kind::Other),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, kind)| kind.rank())
+        .collect()
+    }
+
     fn pair(&self, kind: Kind) -> KeepPair {
         match kind {
             Kind::Viewed => self.viewed,
@@ -179,6 +238,7 @@ const SCHEMA: &str = "
         deleted_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS logged_deleted ON logged (channel_id, deleted_at, id);
+    CREATE INDEX IF NOT EXISTS logged_received ON logged (received_at);
     CREATE TABLE IF NOT EXISTS logged_media (
         message_id INTEGER NOT NULL,
         attachment_id INTEGER NOT NULL,
@@ -200,6 +260,14 @@ fn with_db<T>(work: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Option<T
             .execute_batch(SCHEMA)
             .inspect_err(|error| tracing::warn!(%error, "could not set up the message log"))
             .ok()?;
+        // Columns added later: absent from a log made before them (the
+        // error for one already there is expected).
+        for column in [
+            "ALTER TABLE logged ADD COLUMN kind INTEGER NOT NULL DEFAULT 2",
+            "ALTER TABLE logged_media ADD COLUMN size INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = connection.execute(column, []);
+        }
         *db = Some(connection);
     }
     work(db.as_ref()?)
@@ -214,8 +282,17 @@ fn id_of(value: &Value) -> Option<Snowflake> {
 /// Sets what to keep (and the notification choices that decide what would
 /// notify).
 pub(crate) fn set_prefs(prefs: LoggerPrefs, notify: NotifyPrefs) {
-    if let Ok(mut settings) = LOGGER.settings.lock() {
-        *settings = (prefs, notify);
+    let changed = match LOGGER.settings.lock() {
+        Ok(mut settings) => {
+            let changed = settings.0 != prefs;
+            *settings = (prefs, notify);
+            changed
+        }
+        Err(_) => false,
+    };
+    // Tighter limits apply at once (off the interface's thread).
+    if changed && prefs.week_mb + prefs.month_mb + prefs.year_mb > 0 {
+        std::thread::spawn(move || enforce_limits(&prefs));
     }
 }
 
@@ -260,7 +337,8 @@ fn log_message(account: AccountId, data: &Value, store: &kc_state::Store, delete
         Ok(settings) => *settings,
         Err(_) => return,
     };
-    let pair = prefs.pair(kind_of(account, &message, store, &notify));
+    let kind = kind_of(account, &message, store, &notify);
+    let pair = prefs.pair(kind);
     if pair.text == Keep::Off && pair.media == Keep::Off {
         return;
     }
@@ -277,8 +355,8 @@ fn log_message(account: AccountId, data: &Value, store: &kc_state::Store, delete
     let id = message.id.get() as i64;
     with_db(|db| {
         db.execute(
-            "INSERT INTO logged (id, channel_id, received_at, json, text_until, media_until, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO logged (id, channel_id, received_at, json, text_until, media_until, deleted_at, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET json = excluded.json",
             params![
                 id,
@@ -288,23 +366,23 @@ fn log_message(account: AccountId, data: &Value, store: &kc_state::Store, delete
                 text_until,
                 media_until,
                 deleted.then_some(now),
+                kind.rank(),
             ],
         )
     });
     if has_media {
-        download_media(&message);
+        download_media(&message, prefs);
     }
 }
 
 /// Keeps copies of a message's attachments, in the background.
-fn download_media(message: &Message) {
+fn download_media(message: &Message, prefs: LoggerPrefs) {
     let Some(dir) = media_folder().map(|dir| dir.join(message.id.to_string())) else {
         return;
     };
     let message_id = message.id.get() as i64;
-    let files: Vec<(i64, String, String)> = message
-        .attachments
-        .iter()
+    let files: Vec<(i64, String, String)> = within_message_limit(&message.attachments, prefs.per_message_mb)
+        .into_iter()
         .map(|attachment| {
             let safe: String = attachment
                 .filename
@@ -326,17 +404,129 @@ fn download_media(message: &Message) {
                 return;
             }
             let path = dir.join(format!("{attachment_id}-{name}"));
+            let size = bytes.len() as i64;
             if tokio::fs::write(&path, bytes).await.is_ok() {
                 let path = path.to_string_lossy().into_owned();
                 with_db(|db| {
                     db.execute(
-                        "INSERT OR REPLACE INTO logged_media (message_id, attachment_id, path) VALUES (?1, ?2, ?3)",
-                        params![message_id, attachment_id, path],
+                        "INSERT OR REPLACE INTO logged_media (message_id, attachment_id, path, size) VALUES (?1, ?2, ?3, ?4)",
+                        params![message_id, attachment_id, path, size],
                     )
                 });
             }
         }
+        // New media may take the log past a limit.
+        if prefs.week_mb + prefs.month_mb + prefs.year_mb > 0 {
+            let _ = tokio::task::spawn_blocking(move || enforce_limits(&prefs)).await;
+        }
     });
+}
+
+/// The attachments kept under a per-message limit of `mb` (0: all): the
+/// smallest first, so the largest are the ones left out.
+fn within_message_limit(attachments: &[kc_state::Attachment], mb: u32) -> Vec<&kc_state::Attachment> {
+    let mut sorted: Vec<&kc_state::Attachment> = attachments.iter().collect();
+    if mb == 0 {
+        return sorted;
+    }
+    let limit = u64::from(mb) * 1024 * 1024;
+    sorted.sort_by_key(|attachment| attachment.size);
+    let mut total = 0;
+    sorted
+        .into_iter()
+        .take_while(|attachment| {
+            total += attachment.size;
+            total <= limit
+        })
+        .collect()
+}
+
+/// What the log holds of what arrived since `since` (unix seconds): the
+/// text and the media, in bytes.
+fn held_since(db: &Connection, since: i64) -> rusqlite::Result<i64> {
+    db.query_row(
+        "SELECT COALESCE((SELECT SUM(length(json)) FROM logged WHERE received_at >= ?1), 0)
+              + COALESCE((SELECT SUM(m.size) FROM logged_media m JOIN logged l ON l.id = m.message_id
+                          WHERE l.received_at >= ?1), 0)",
+        params![since],
+        |row| row.get(0),
+    )
+}
+
+/// Brings the log within its week, month and year limits: the largest
+/// attachments go first, then (when no media is left to remove) text, the
+/// least important kind and oldest first. Only the kinds whose clean-up is
+/// on are touched; past that, the limit is left exceeded.
+pub(crate) fn enforce_limits(prefs: &LoggerPrefs) {
+    let paths = with_db(|db| enforce_on(db, prefs, now())).unwrap_or_default();
+    remove_media_files(&paths);
+}
+
+/// [`enforce_limits`] on `db` at time `now`; returns the media files to
+/// delete.
+fn enforce_on(db: &Connection, prefs: &LoggerPrefs, now: i64) -> rusqlite::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let ranks = prefs.collectable();
+    if ranks.is_empty() {
+        return Ok(removed);
+    }
+    let ranks_sql = ranks.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    const DAY: i64 = 24 * 60 * 60;
+    for (days, mb) in [(7, prefs.week_mb), (30, prefs.month_mb), (365, prefs.year_mb)] {
+        if mb == 0 {
+            continue;
+        }
+        let since = now - days * DAY;
+        let mut over = held_since(db, since)? - i64::from(mb) * 1024 * 1024;
+        // The largest attachments first.
+        if over > 0 {
+            let media: Vec<(i64, i64, String, i64)> = db
+                .prepare(&format!(
+                    "SELECT m.message_id, m.attachment_id, m.path, m.size FROM logged_media m
+                     JOIN logged l ON l.id = m.message_id
+                     WHERE l.received_at >= ?1 AND l.kind IN ({ranks_sql})
+                     ORDER BY m.size DESC"
+                ))?
+                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (message_id, attachment_id, path, size) in media {
+                if over <= 0 {
+                    break;
+                }
+                db.execute(
+                    "DELETE FROM logged_media WHERE message_id = ?1 AND attachment_id = ?2",
+                    params![message_id, attachment_id],
+                )?;
+                removed.push(path);
+                over -= size.max(1);
+            }
+        }
+        // Then text: the least important kind, oldest first.
+        if over > 0 {
+            let texts: Vec<(i64, i64)> = db
+                .prepare(&format!(
+                    "SELECT id, length(json) FROM logged
+                     WHERE received_at >= ?1 AND kind IN ({ranks_sql})
+                     ORDER BY kind DESC, received_at ASC"
+                ))?
+                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (id, size) in texts {
+                if over <= 0 {
+                    break;
+                }
+                let paths: Vec<String> = db
+                    .prepare_cached("SELECT path FROM logged_media WHERE message_id = ?1")?
+                    .query_map(params![id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                db.execute("DELETE FROM logged_media WHERE message_id = ?1", params![id])?;
+                db.execute("DELETE FROM logged WHERE id = ?1", params![id])?;
+                removed.extend(paths);
+                over -= size.max(1);
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Watches a gateway event for `account` before the store applies it:
@@ -499,6 +689,8 @@ pub(crate) fn forget(message_id: Snowflake) {
 /// Drops what has expired: media past its time, then text (a message whose
 /// media is still kept loses only its text).
 pub(crate) fn prune() {
+    let prefs = LOGGER.settings.lock().map(|settings| settings.0).unwrap_or_default();
+    enforce_limits(&prefs);
     let now = now();
     let paths: Vec<String> = with_db(|db| {
         let mut query = db.prepare(
@@ -579,41 +771,6 @@ pub(crate) fn clear() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_follow_the_request() {
-        let prefs = LoggerPrefs::default();
-        assert_eq!(prefs.viewed, KeepPair { text: Keep::Forever, media: Keep::HalfYear });
-        assert_eq!(prefs.notifying, KeepPair { text: Keep::Year, media: Keep::Week });
-        assert_eq!(prefs.other, KeepPair { text: Keep::Week, media: Keep::Off });
-    }
-
-    #[test]
-    fn times_to_keep() {
-        assert_eq!(Keep::Forever.until(100), None);
-        assert_eq!(Keep::Day.until(100), Some(100 + 86_400));
-        assert_eq!(Keep::ALL.len(), 7);
-        assert_eq!(serde_json::to_value(Keep::HalfYear).unwrap(), "half_year");
-    }
-
-    #[test]
-    fn deleted_copies_point_at_kept_media() {
-        let json = serde_json::json!({
-            "id": "5", "channel_id": "1", "content": "hi",
-            "author": {"id": "2", "username": "a"}, "timestamp": "2026-11-21T10:00:00+00:00",
-            "attachments": [{"id": "9", "filename": "cat.png", "url": "https://cdn/cat.png", "proxy_url": "https://media/cat.png"}]
-        })
-        .to_string();
-        let media = HashMap::from([(9, "/logs/5/9-cat.png".to_owned())]);
-        let message = deleted_message(&json, &media).unwrap();
-        assert!(message.deleted);
-        assert_eq!(message.attachments[0].url, "file:///logs/5/9-cat.png");
-    }
-}
-
 impl crate::shell::AppState {
     /// Puts a message that was just deleted back in `account`'s store from
     /// the log (marked deleted), when the log kept it and it belongs in the
@@ -676,5 +833,112 @@ impl crate::shell::AppState {
                 buffer.extend(missing);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_follow_the_request() {
+        let prefs = LoggerPrefs::default();
+        assert_eq!(prefs.viewed, KeepPair { text: Keep::Forever, media: Keep::HalfYear });
+        assert_eq!(prefs.notifying, KeepPair { text: Keep::Year, media: Keep::Week });
+        assert_eq!(prefs.other, KeepPair { text: Keep::Week, media: Keep::Off });
+    }
+
+    #[test]
+    fn the_per_message_limit_leaves_out_the_largest() {
+        let attachment = |id: u64, mb: u64| -> kc_state::Attachment {
+            serde_json::from_value(serde_json::json!({
+                "id": id.to_string(), "filename": "f", "size": mb * 1024 * 1024
+            }))
+            .unwrap()
+        };
+        let files = [attachment(1, 15), attachment(2, 3), attachment(3, 4)];
+        let kept: Vec<u64> = within_message_limit(&files, 20).iter().map(|a| a.id.get()).collect();
+        assert_eq!(kept, vec![2, 3]);
+        assert_eq!(within_message_limit(&files, 0).len(), 3);
+    }
+
+    #[test]
+    fn size_limits_take_least_important_and_oldest_text_first() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute("ALTER TABLE logged ADD COLUMN kind INTEGER NOT NULL DEFAULT 2", []).unwrap();
+        db.execute("ALTER TABLE logged_media ADD COLUMN size INTEGER NOT NULL DEFAULT 0", []).unwrap();
+        for (id, kind, at) in [(1, 0, 10), (2, 2, 20), (3, 1, 5), (4, 2, 30)] {
+            db.execute(
+                "INSERT INTO logged (id, channel_id, received_at, json, kind) VALUES (?1, 1, ?2, 'x', ?3)",
+                params![id, at, kind],
+            )
+            .unwrap();
+        }
+        // The order the text would go in, with everything collectable.
+        let order: Vec<i64> = db
+            .prepare("SELECT id FROM logged WHERE kind IN (0,1,2) ORDER BY kind DESC, received_at ASC")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(order, vec![2, 4, 3, 1]);
+        assert_eq!(held_since(&db, 0).unwrap(), 4);
+        let defaults = LoggerPrefs::default();
+        assert_eq!(defaults.collectable(), vec![2]);
+        assert_eq!(defaults.per_message_mb, 20);
+
+        // Over a 1 MB week: media first, the largest first.
+        let mb = 1024 * 1024;
+        db.execute(
+            "INSERT INTO logged_media (message_id, attachment_id, path, size) VALUES (2, 1, 'big', ?1), (4, 1, 'small', ?2)",
+            params![mb, mb / 2],
+        )
+        .unwrap();
+        let mut prefs = LoggerPrefs { week_mb: 1, ..LoggerPrefs::default() };
+        prefs.collect = Collect { viewed: true, notifying: true, other: true };
+        let removed = enforce_on(&db, &prefs, 40).unwrap();
+        assert_eq!(removed, vec!["big".to_owned()]);
+        let rows: i64 = db.query_row("SELECT COUNT(*) FROM logged", [], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 4, "no text went while media could go");
+
+        // A tiny limit: the rest of the media, then text in order -- but
+        // only kinds whose clean-up is on (here not the viewed one).
+        prefs.collect.viewed = false;
+        db.execute("UPDATE logged SET json = ?1", params!["x".repeat(400 * 1024)]).unwrap();
+        let removed = enforce_on(&db, &prefs, 40).unwrap();
+        assert_eq!(removed, vec!["small".to_owned()]);
+        let left: Vec<i64> = db
+            .prepare("SELECT id FROM logged ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        // 4 x 400 KB is over 1 MB: other (2, then 4) goes until under.
+        assert_eq!(left, vec![1, 3]);
+    }
+
+    #[test]
+    fn times_to_keep() {
+        assert_eq!(Keep::Forever.until(100), None);
+        assert_eq!(Keep::Day.until(100), Some(100 + 86_400));
+        assert_eq!(Keep::ALL.len(), 7);
+        assert_eq!(serde_json::to_value(Keep::HalfYear).unwrap(), "half_year");
+    }
+
+    #[test]
+    fn deleted_copies_point_at_kept_media() {
+        let json = serde_json::json!({
+            "id": "5", "channel_id": "1", "content": "hi",
+            "author": {"id": "2", "username": "a"}, "timestamp": "2026-11-21T10:00:00+00:00",
+            "attachments": [{"id": "9", "filename": "cat.png", "url": "https://cdn/cat.png", "proxy_url": "https://media/cat.png"}]
+        })
+        .to_string();
+        let media = HashMap::from([(9, "/logs/5/9-cat.png".to_owned())]);
+        let message = deleted_message(&json, &media).unwrap();
+        assert!(message.deleted);
+        assert_eq!(message.attachments[0].url, "file:///logs/5/9-cat.png");
     }
 }
