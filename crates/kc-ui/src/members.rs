@@ -301,7 +301,7 @@ impl AppState {
                     return Some((rows, None));
                 }
                 let guild_id = channel.guild_id?;
-                let Some(list) = state.member_lists.get(&guild_id) else {
+                let Some(list) = state.member_list_for(guild_id, channel.id) else {
                     // Nothing synced yet: show the members we happen to know.
                     let mut rows = vec![MemberRow::Header("MEMBERS".to_owned())];
                     rows.extend(

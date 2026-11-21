@@ -4,6 +4,62 @@
 use kc_core::Snowflake;
 use serde_json::Value;
 
+use crate::channel::Overwrite;
+use crate::permissions::VIEW_CHANNEL;
+
+/// Discord identifies a guild's member list by its *audience*: the default
+/// `"everyone"`, or a hash of the channel's view-permission overwrites when the
+/// channel is restricted. A guild therefore has one member list per distinct
+/// audience, keyed by this id -- storing a single list per guild lets an update
+/// for one audience wipe another's rows. This computes the id for a channel the
+/// same way the official client does (MurmurHash3 of the sorted overwrite
+/// strings), so the right list can be selected for display.
+pub fn compute_list_id(overwrites: &[Overwrite], _guild_id: Snowflake) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for overwrite in overwrites {
+        if overwrite.allow & VIEW_CHANNEL != 0 {
+            parts.push(format!("allow:{}", overwrite.id));
+        } else if overwrite.deny & VIEW_CHANNEL != 0 {
+            parts.push(format!("deny:{}", overwrite.id));
+        }
+    }
+    if parts.is_empty() {
+        return "everyone".to_owned();
+    }
+    parts.sort();
+    murmur3_32(parts.join(",").as_bytes(), 0).to_string()
+}
+
+/// MurmurHash3 x86 32-bit, the variant Discord uses to key member lists.
+fn murmur3_32(data: &[u8], seed: u32) -> u32 {
+    const C1: u32 = 0xcc9e_2d51;
+    const C2: u32 = 0x1b87_3593;
+    let mut hash = seed;
+    let mut chunks = data.chunks_exact(4);
+    for chunk in &mut chunks {
+        let mut k = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        hash ^= k;
+        hash = hash.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
+    }
+    let tail = chunks.remainder();
+    if !tail.is_empty() {
+        let mut k: u32 = 0;
+        for (i, &byte) in tail.iter().enumerate() {
+            k ^= u32::from(byte) << (8 * i);
+        }
+        k = k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+        hash ^= k;
+    }
+    hash ^= data.len() as u32;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85eb_ca6b);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xc2b2_ae35);
+    hash ^= hash >> 16;
+    hash
+}
+
 /// One row of the member list, in render order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemberListItem {
@@ -118,5 +174,51 @@ mod tests {
         list.update(50, member(1));
         list.insert(50, member(1));
         assert_eq!(list.items.len(), 3);
+    }
+
+    #[test]
+    fn murmur3_matches_known_vectors() {
+        // The canonical MurmurHash3 x86-32 test vectors (seed 0).
+        assert_eq!(murmur3_32(b"", 0), 0);
+        assert_eq!(murmur3_32(b"hello", 0), 613_153_351);
+        assert_eq!(murmur3_32(b"The quick brown fox jumps over the lazy dog", 0), 776_992_547);
+    }
+
+    #[test]
+    fn list_id_is_everyone_without_view_overwrites() {
+        // No overwrites, or overwrites that do not touch VIEW_CHANNEL, are the
+        // default audience.
+        assert_eq!(compute_list_id(&[], Snowflake(1)), "everyone");
+        let other = Overwrite {
+            id: Snowflake(2),
+            kind: Overwrite::ROLE,
+            allow: 1 << 11,
+            deny: 0,
+        };
+        assert_eq!(compute_list_id(&[other], Snowflake(1)), "everyone");
+    }
+
+    #[test]
+    fn list_id_hashes_view_overwrites() {
+        // A deny of VIEW_CHANNEL for @everyone plus an allow for a role hashes
+        // the sorted "deny:.../allow:..." strings -- a stable, non-"everyone" id.
+        let overwrites = vec![
+            Overwrite {
+                id: Snowflake(1),
+                kind: Overwrite::ROLE,
+                allow: 0,
+                deny: VIEW_CHANNEL,
+            },
+            Overwrite {
+                id: Snowflake(42),
+                kind: Overwrite::ROLE,
+                allow: VIEW_CHANNEL,
+                deny: 0,
+            },
+        ];
+        let id = compute_list_id(&overwrites, Snowflake(1));
+        assert_ne!(id, "everyone");
+        // sorted(["deny:1", "allow:42"]) = ["allow:42", "deny:1"] -> "allow:42,deny:1"
+        assert_eq!(id, murmur3_32(b"allow:42,deny:1", 0).to_string());
     }
 }

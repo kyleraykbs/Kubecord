@@ -280,7 +280,10 @@ pub struct State {
     /// Notification settings per guild; `None` holds the DM settings.
     pub guild_settings: HashMap<Option<Snowflake>, GuildSettings>,
     pub guild_folders: Vec<GuildFolder>,
-    pub member_lists: HashMap<Snowflake, MemberList>,
+    /// Guild id -> its member lists, one per audience (list id). A guild can
+    /// have several when some channels restrict who can view them; keeping them
+    /// separate stops one audience's update from wiping another's rows.
+    pub member_lists: HashMap<Snowflake, HashMap<String, MemberList>>,
     /// The account's own status: `online`, `idle`, `dnd` or `invisible`.
     pub status: Option<String>,
     pub custom_status: Option<CustomStatus>,
@@ -1297,14 +1300,17 @@ impl State {
         };
         let list_id = data["id"].as_str().unwrap_or("everyone").to_owned();
         let mut items_seen: Vec<&Value> = Vec::new();
-        let mut list = self.member_lists.remove(&guild_id).unwrap_or_default();
-        // A different list id means a different channel audience.
-        if list.id != list_id {
-            list = MemberList {
+        // Each audience (list id) keeps its own rows, so an update for one does
+        // not clobber another's.
+        let list = self
+            .member_lists
+            .entry(guild_id)
+            .or_default()
+            .entry(list_id.clone())
+            .or_insert_with(|| MemberList {
                 id: list_id,
                 ..MemberList::default()
-            };
-        }
+            });
         list.member_count = data["member_count"].as_u64().unwrap_or(0) as u32;
         list.online_count = data["online_count"].as_u64().unwrap_or(0) as u32;
         if let Some(groups) = data["groups"].as_array() {
@@ -1347,7 +1353,6 @@ impl State {
                 _ => {}
             }
         }
-        self.member_lists.insert(guild_id, list);
 
         for item in items_seen {
             let Some(member) = item.get("member") else {
@@ -1360,6 +1365,44 @@ impl State {
         }
         events.push(StoreEvent::GuildMembersUpdated(guild_id));
         events.push(StoreEvent::MemberListUpdated(guild_id));
+    }
+
+    /// The member list to show for `channel_id`: the audience whose id matches
+    /// the channel's view-permission overwrites. Falls back to the audience with
+    /// the most synced rows if none matches (e.g. the id hash disagrees), so the
+    /// list still shows rather than coming up empty.
+    pub fn member_list_for(
+        &self,
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+    ) -> Option<&MemberList> {
+        let lists = self.member_lists.get(&guild_id)?;
+        if let Some(wanted) = self.channel_list_id(channel_id)
+            && let Some(list) = lists.get(&wanted)
+        {
+            return Some(list);
+        }
+        lists.values().max_by_key(|list| list.rows().count())
+    }
+
+    /// The member list id Discord uses for a channel: a hash of its
+    /// view-permission overwrites. Threads carry no overwrites of their own, so
+    /// they inherit the parent channel's audience.
+    fn channel_list_id(&self, channel_id: Snowflake) -> Option<String> {
+        let channel = self.channels.get(&channel_id)?;
+        let source = if channel.kind.is_thread() {
+            channel
+                .parent_id
+                .and_then(|parent| self.channels.get(&parent))
+                .unwrap_or(channel)
+        } else {
+            channel
+        };
+        let guild_id = source.guild_id?;
+        Some(crate::member_list::compute_list_id(
+            &source.permission_overwrites,
+            guild_id,
+        ))
     }
 
     /// Guild channel objects from `READY`/`GUILD_CREATE` are scoped by the
@@ -2027,9 +2070,36 @@ mod tests {
                 .map(|user| user.username)
                 .collect();
             assert_eq!(names, vec!["friend", "lambda", "third"]);
-            let list = &state.member_lists[&Snowflake(5)];
+            let list = &state.member_lists[&Snowflake(5)]["everyone"];
             assert_eq!(list.rows().count(), 3);
             assert_eq!(state.status_of(Snowflake(1)), "idle");
+        });
+    }
+
+    #[test]
+    fn different_audiences_do_not_clobber_each_other() {
+        // A guild with a public channel ("everyone") and a restricted one
+        // ("restricted-hash"): an update for one audience must not wipe the
+        // other's rows -- the bug where a server's member list came up empty.
+        let store = Store::new();
+        let sync = |id: &str, user: &str| {
+            json!({
+                "guild_id": "5",
+                "id": id,
+                "member_count": 1,
+                "online_count": 1,
+                "ops": [{"op": "SYNC", "range": [0, 99], "items": [
+                    {"member": {"user": {"id": user, "username": user}}}
+                ]}]
+            })
+        };
+        store.apply("GUILD_MEMBER_LIST_UPDATE", &sync("everyone", "1"));
+        store.apply("GUILD_MEMBER_LIST_UPDATE", &sync("restricted-hash", "2"));
+        store.read(|state| {
+            let lists = &state.member_lists[&Snowflake(5)];
+            assert_eq!(lists.len(), 2, "both audiences are kept");
+            assert_eq!(lists["everyone"].rows().count(), 1);
+            assert_eq!(lists["restricted-hash"].rows().count(), 1);
         });
     }
 
