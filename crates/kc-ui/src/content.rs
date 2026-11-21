@@ -943,16 +943,32 @@ impl AppState {
         if matches!(kind, "image" | "gifv") {
             let (url, width, height) =
                 media_of(&embed.thumbnail).or_else(|| media_of(&embed.image))?;
-            let target = embed.url.clone().unwrap_or_else(|| url.clone());
+            // A posted link to a .gif (e.g. sent from the GIF picker's
+            // favourites) arrives as an `image` embed whose proxy thumbnail is a
+            // still. Animate it from the original GIF, like an attachment.
+            let animated_original = (kind == "image")
+                .then(|| {
+                    [&embed.thumbnail, &embed.image]
+                        .into_iter()
+                        .flatten()
+                        .find(|media| media.is_animated_gif())
+                        .and_then(|media| media.url.clone())
+                })
+                .flatten();
+            let target = animated_original
+                .clone()
+                .or_else(|| embed.url.clone())
+                .unwrap_or_else(|| url.clone());
             // A gifv is a short looping video with a still thumbnail.
             let video = (kind == "gifv")
                 .then(|| media_of(&embed.video))
                 .flatten()
                 .map(|(video_url, _, _)| video_url);
-            // A gifv can be favourited, keyed by its original (non-proxy) media
-            // URL -- the same key Discord's own client and the picker use. Fall
-            // back to the video/image/thumbnail original, else the proxy url.
-            let favorite = (kind == "gifv").then(|| {
+            // A gifv or animated GIF can be favourited, keyed by its original
+            // (non-proxy) media URL -- the same key Discord's own client and the
+            // picker use. Fall back to the video/image/thumbnail original, else
+            // the proxy url.
+            let favorite = (kind == "gifv" || animated_original.is_some()).then(|| {
                 let original = embed
                     .video
                     .as_ref()
@@ -970,6 +986,7 @@ impl AppState {
                     height,
                     kind: match video {
                         Some(video_url) => MediaKind::Gif { video_url },
+                        None if animated_original.is_some() => MediaKind::AnimatedGif,
                         None => MediaKind::Image,
                     },
                     spoiler: false,

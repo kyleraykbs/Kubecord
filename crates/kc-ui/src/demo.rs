@@ -29,6 +29,8 @@
 //!   also opens it in the image viewer, saved to `<screenshot>.viewer.png`.
 //!   `gif-picker` fills the GIF picker with made-up animated results (the
 //!   demo REST cannot reach Tenor), saved to `<screenshot>.menu.png`.
+//!   `gif-link` is a bare link to a GIF, which Discord turns into an
+//!   `image` embed (how a favourite sent from the picker arrives).
 //! - `file`: a message with a non-image file attachment, so the file card
 //!   (left-aligned name and size, Download button on the right) can be seen.
 //! - `notify`: messages arrive in other channels, a DM, a muted channel
@@ -316,6 +318,30 @@ fn gif_message(id: u64, author: u64) -> Value {
     })
 }
 
+/// A message that is only a link to a GIF, as the GIF picker's favourites
+/// send: Discord turns it into an `image` embed whose proxy thumbnail is a
+/// still, with the original GIF as the thumbnail's `url`.
+fn gif_link_message(id: u64, author: u64) -> Value {
+    let url = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+    let names = ["", "demo", "ada", "grace", "linus"];
+    json!({
+        "id": id.to_string(), "channel_id": GENERAL.to_string(), "guild_id": GUILD.to_string(),
+        "author": {"id": author.to_string(), "username": names[author as usize % names.len()]},
+        "content": url, "timestamp": iso_of(id), "type": 0,
+        "attachments": [],
+        "embeds": [{
+            "type": "image", "url": url,
+            "thumbnail": {
+                "url": url,
+                "proxy_url": "https://media.discordapp.net/external/demo/still.png",
+                "width": 400, "height": 400,
+                "content_type": "image/gif", "flags": 32,
+            },
+        }],
+        "mentions": []
+    })
+}
+
 /// A message carrying one non-image file attachment, for the file-card demo
 /// (the Download button, left-aligned name/size). Nothing is downloaded until
 /// the button is clicked.
@@ -528,6 +554,11 @@ impl AppState {
                 // can be seen.
                 let id = id_at(0, 42);
                 store.apply("MESSAGE_CREATE", &file_message(id, ADA));
+                self.open_channel(general);
+            }
+            "gif-link" => {
+                // A bare link to a GIF (an `image` embed), as favourites send.
+                store.apply("MESSAGE_CREATE", &gif_link_message(id_at(0, 41), ADA));
                 self.open_channel(general);
             }
             "gif" | "gif-viewer" => {

@@ -74,6 +74,32 @@ pub struct EmbedMedia {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    /// The media type, e.g. `image/gif` (sent for image embeds).
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Discord's embed media flags; [`EmbedMedia::FLAG_ANIMATED`] marks an
+    /// animated image.
+    #[serde(default)]
+    pub flags: u64,
+}
+
+impl EmbedMedia {
+    /// `IS_ANIMATED`: the image is animated (a GIF, or an animated WebP).
+    pub const FLAG_ANIMATED: u64 = 1 << 5;
+
+    /// Whether this is an animated GIF, judged by its content type, the
+    /// animated flag, or a `.gif` path on its original URL.
+    pub fn is_animated_gif(&self) -> bool {
+        let gif_path = self.url.as_deref().is_some_and(|url| {
+            url.split(['?', '#'])
+                .next()
+                .is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"))
+        });
+        self.content_type.as_deref() == Some("image/gif")
+            || gif_path
+            || (self.flags & Self::FLAG_ANIMATED != 0
+                && self.content_type.as_deref().is_none_or(|kind| kind == "image/gif"))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,5 +336,33 @@ impl Message {
             self.kind,
             Self::DEFAULT | Self::REPLY | Self::CHAT_INPUT_COMMAND | Self::CONTEXT_MENU_COMMAND
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmbedMedia;
+
+    fn media(url: &str, content_type: Option<&str>, flags: u64) -> EmbedMedia {
+        EmbedMedia {
+            url: Some(url.to_owned()),
+            content_type: content_type.map(str::to_owned),
+            flags,
+            ..EmbedMedia::default()
+        }
+    }
+
+    #[test]
+    fn linked_gifs_are_recognised_as_animated() {
+        // By path (signed CDN query ignored), content type, or animated flag.
+        assert!(media("https://cdn.discordapp.com/a/b/x.GIF?ex=1&hm=2", None, 0).is_animated_gif());
+        assert!(media("https://example.com/img", Some("image/gif"), 0).is_animated_gif());
+        assert!(media("https://example.com/img", None, EmbedMedia::FLAG_ANIMATED).is_animated_gif());
+        // A still, or an animated WebP, is not a GIF.
+        assert!(!media("https://example.com/a.png", Some("image/png"), 0).is_animated_gif());
+        assert!(
+            !media("https://example.com/a.webp", Some("image/webp"), EmbedMedia::FLAG_ANIMATED)
+                .is_animated_gif()
+        );
     }
 }
