@@ -29,7 +29,6 @@ Please open issues if you have suggestions for features or find any bugs. I've t
 - [Is it safe to use?](#is-it-safe-to-use)
 - [Features](#features)
 - [Not supported yet](#not-supported-yet)
-- [Tips](#tips)
 - [Building](#building)
 - [Files](#files)
 - [Development](#development)
@@ -165,29 +164,6 @@ ban is unlikely; friending people is the most likely place to get one.
 - Animated profile overlays
 - Lottie stickers (Discord's stock stickers)
 
-## Tips
-
-- **Default account:** in the account menu (your name at the bottom left), the
-  star next to an account makes it the one Kubecord opens on.
-- **Message logger:** on by default (text in the channel you're viewing is kept
-  forever, everything else for less). Change it in *Settings → Message Logger*;
-  set a kind to *Don't Log* to stop logging it.
-- **Transparency on niri:** the compositor's border color can show through the
-  whole window. Turn on *Settings → Theming → KDE Transparency Workaround*, or
-  add a window rule to your niri config:
-
-  ```kdl
-  window-rule {
-      match app-id=r#"^dev\.kyle\.kubecord$"#
-      draw-border-with-background false
-  }
-  ```
-
-  Leave the workaround off on KDE and sway, which would draw a second title bar.
-- **Go Live audio** comes from your default output's monitor, which includes
-  Kubecord's own sound. Route apps through a virtual sink and set
-  `KUBECORD_MONITOR_DEVICE` to its monitor for a clean stream.
-
 ## Building
 
 With Nix (recommended):
@@ -272,8 +248,4 @@ to test the voice handshake without opening the microphone or speaker.
 ## License
 
 Kubecord is free software, licensed under the
-[GNU General Public License v3.0 only](LICENSE). Copyright © 2026 kyleraykbs.
-
-It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
-without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
-PURPOSE. See the license for details.
+[GNU General Public License v3.0 only](LICENSE).
