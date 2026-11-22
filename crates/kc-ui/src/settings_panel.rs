@@ -96,8 +96,12 @@ impl AppState {
     /// Changes the preferences and applies them at once; the file is written
     /// shortly after, so dragging a slider does not write on every step.
     pub(crate) fn update_prefs(self: &Rc<Self>, change: impl FnOnce(&mut CapturePreferences)) {
+        let before = serde_json::to_value(&*self.capture.borrow()).ok();
         change(&mut self.capture.borrow_mut());
         self.capture.borrow().apply_devices();
+        if let (Some(before), Ok(after)) = (before, serde_json::to_value(&*self.capture.borrow())) {
+            note_declared_changes(&before, &after);
+        }
         thread_local! {
             static SAVE_PENDING: Cell<bool> = const { Cell::new(false) };
         }
@@ -164,6 +168,11 @@ impl AppState {
 
         let content_view = adw::ToolbarView::new();
         content_view.add_top_bar(&adw::HeaderBar::new());
+        // Settings declared in Nix: what they are, and that changing them
+        // here lasts only until the next start.
+        if let Some(banner) = declared_banner() {
+            content_view.add_top_bar(&banner);
+        }
         content_view.set_content(Some(&pages));
         let content_page = adw::NavigationPage::new(&content_view, "My Account");
 
@@ -247,7 +256,11 @@ impl AppState {
         ));
         breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
         dialog.add_breakpoint(breakpoint);
-        dialog.set_child(Some(&split));
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&split));
+        SETTINGS_TOASTS.with_borrow_mut(|slot| *slot = Some(toasts.downgrade()));
+        dialog.set_child(Some(&toasts));
+        refresh_declared_marks(&self.capture.borrow());
 
         let running = panel.clone();
         dialog.connect_closed(move |_| running.stop_all());
@@ -265,8 +278,10 @@ impl AppState {
         subtitle: &str,
         get: fn(&CapturePreferences) -> bool,
         set: fn(&mut CapturePreferences, bool),
+        key: &str,
     ) -> adw::SwitchRow {
         let row = adw::SwitchRow::new();
+        mark_declared(&row, key);
         row.set_title(title);
         row.set_subtitle(subtitle);
         row.set_subtitle_lines(0);
@@ -284,6 +299,7 @@ impl AppState {
         use crate::settings::OPEN_CHANNEL_QUIET;
         let row = adw::ComboRow::new();
         row.set_title("Quiet the Open Channel");
+        mark_declared(&row, "open_channel_quiet");
         row.set_subtitle(
             "No sound or notification for messages in the channel you have open. \"While Kubecord Is Focused\" is Discord's behaviour; \"Always\" also keeps it quiet with the window in the background.",
         );
@@ -326,12 +342,14 @@ impl AppState {
             "Show a notification for new messages that concern you. Clicking it opens the message.",
             |prefs| prefs.notify_desktop,
             |prefs, on| prefs.notify_desktop = on,
+            "notify_desktop",
         ));
         desktop.add(&self.pref_switch(
             "Show Message Content",
             "Put the message text in the notification. Off, it only says who wrote and where.",
             |prefs| prefs.notify_preview,
             |prefs, on| prefs.notify_preview = on,
+            "notify_preview",
         ));
         let test_row = adw::ActionRow::builder()
             .title("Test Notifications")
@@ -357,6 +375,7 @@ impl AppState {
             crate::sounds::SoundEvent::Mention,
         ] {
             let row = adw::ActionRow::builder().title(event.title()).build();
+            mark_declared_keys(&row, &[&format!("sound_volumes.{}", event.key()), "sounds_off"]);
             row.add_suffix(&self.sound_level_scale(event));
             row.add_suffix(&self.sound_preview_button(event));
             sounds.add(&row);
@@ -370,30 +389,35 @@ impl AppState {
             "Every message in a DM or group DM. Off, only messages that mention you there.",
             |prefs| prefs.notify_all_dms,
             |prefs, on| prefs.notify_all_dms = on,
+            "notify_all_dms",
         ));
         what.add(&self.pref_switch(
             "Only Mentions in Servers",
             "Ignore servers and channels set to All Messages: only mentions and replies that ping you.",
             |prefs| prefs.notify_mentions_only,
             |prefs, on| prefs.notify_mentions_only = on,
+            "notify_mentions_only",
         ));
         what.add(&self.pref_switch(
             "@everyone and @here",
             "Unless the server's own settings suppress them.",
             |prefs| prefs.notify_everyone,
             |prefs, on| prefs.notify_everyone = on,
+            "notify_everyone",
         ));
         what.add(&self.pref_switch(
             "Role Mentions",
             "Mentions of a role you have, unless the server's own settings suppress them.",
             |prefs| prefs.notify_roles,
             |prefs, on| prefs.notify_roles = on,
+            "notify_roles",
         ));
         what.add(&self.pref_switch(
             "Incoming Calls",
             "When someone calls you in a DM or group, while kubecord's window is not in front.",
             |prefs| prefs.notify_calls,
             |prefs, on| prefs.notify_calls = on,
+            "notify_calls",
         ));
         what.add(&self.open_channel_quiet_row());
         page.append(&what);
@@ -405,6 +429,7 @@ impl AppState {
             "Shows \"(2) kubecord\" until you come back to the window; most taskbars show the title. GTK 4 cannot flash a window or set an urgency hint, so this stands in for it.",
             |prefs| prefs.notify_mark_window,
             |prefs, on| prefs.notify_mark_window = on,
+            "notify_mark_window",
         ));
         page.append(&window);
         page
@@ -488,8 +513,10 @@ impl AppState {
             "Notification, call and voice sounds. They play on the speaker chosen on the Voice page.",
             |prefs| prefs.sounds_enabled,
             |prefs, on| prefs.sounds_enabled = on,
+            "sounds_enabled",
         ));
         let volume_row = adw::ActionRow::builder().title("Volume").build();
+        mark_declared(&volume_row, "sound_volume");
         let volume = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
         volume.set_value(f64::from(self.capture.borrow().sound_volume) * 100.0);
         volume.set_draw_value(true);
@@ -559,6 +586,7 @@ impl AppState {
         let mut rows = Vec::new();
         for event in SoundEvent::ALL {
             let row = adw::ActionRow::builder().title(event.title()).build();
+            mark_declared_keys(&row, &[&format!("sound_volumes.{}", event.key()), "sounds_off"]);
             row.add_suffix(&self.sound_level_scale(event));
             row.add_suffix(&self.sound_preview_button(event));
             let switch = gtk::Switch::new();
@@ -645,6 +673,7 @@ impl AppState {
         time.set_title("Time");
         let clock = adw::SwitchRow::new();
         clock.set_title("Use 24-Hour Time");
+        mark_declared(&clock, "use_24_hour_time");
         clock.set_subtitle("Show times as 17:58 instead of 5:58 PM.");
         clock.set_active(self.capture.borrow().use_24_hour);
         let app = self.clone();
@@ -659,6 +688,7 @@ impl AppState {
         history.set_title("History");
         let unload = adw::SwitchRow::new();
         unload.set_title("Unload Distant Messages");
+        mark_declared(&unload, "unload_distant_messages");
         unload.set_subtitle(
             "Free memory by dropping messages far from where you are reading; they reload when you scroll back. Turn off to keep every message you scroll into view.",
         );
@@ -675,6 +705,7 @@ impl AppState {
         gifs.set_title("GIFs");
         let unfocused = adw::SwitchRow::new();
         unfocused.set_title("Animate GIFs While Unfocused");
+        mark_declared(&unfocused, "animate_gifs_unfocused");
         unfocused.set_subtitle(
             "Keep GIFs moving when kubecord is not the focused window. Off by default; GIFs pause when unfocused to save work.",
         );
@@ -701,6 +732,7 @@ impl AppState {
 
         let check = adw::SwitchRow::new();
         check.set_title("Check Spelling");
+        mark_declared(&check, "spellcheck");
         check.set_subtitle("Underline misspelled words in the message box as you type.");
         check.set_subtitle_lines(0);
         check.set_active(self.capture.borrow().spellcheck);
@@ -792,6 +824,7 @@ impl AppState {
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let boost = adw::ComboRow::new();
         boost.set_title("Maximum User Volume");
+        mark_declared(&boost, "volume_boost_cap");
         boost.set_subtitle(
             "How far the User Volume slider in a person's right-click menu goes: 3× is up to 300%. Above 1× makes quiet people louder; very high settings can distort people who are already loud.",
         );
@@ -856,6 +889,12 @@ impl AppState {
         ];
         for (title, subtitle, field, clean_up) in rows {
             let row = adw::ActionRow::new();
+            let kind = match title {
+                "Channels You're Viewing" => "viewed",
+                "Messages That Would Notify" => "notifying",
+                _ => "other",
+            };
+            mark_declared_keys(&row, &[&format!("logger.{kind}"), &format!("logger.collect.{kind}")]);
             row.set_title(title);
             row.set_subtitle(subtitle);
             row.set_subtitle_lines(0);
@@ -945,6 +984,15 @@ impl AppState {
         ];
         for (title, subtitle, limit, step) in sizes {
             let row = adw::ActionRow::new();
+            mark_declared(
+                &row,
+                match title {
+                    "Media per Message" => "logger.per_message_mb",
+                    "Per Week" => "logger.week_cap_mb",
+                    "Per Month" => "logger.month_cap_mb",
+                    _ => "logger.year_cap_mb",
+                },
+            );
             row.set_title(title);
             row.set_subtitle(subtitle);
             row.set_subtitle_lines(0);
@@ -1021,6 +1069,7 @@ impl AppState {
         colors.set_title("Colors");
         let follow = adw::SwitchRow::new();
         follow.set_title("Follow System Color Scheme");
+        mark_declared(&follow, "follow_system_scheme");
         follow.set_subtitle(
             "Use your system's libadwaita colors and its light or dark preference. Off, kubecord uses Discord's own colors.",
         );
@@ -1028,6 +1077,7 @@ impl AppState {
         follow.set_active(self.capture.borrow().follow_system_scheme);
         let scheme = adw::ComboRow::new();
         scheme.set_title("Discord Theme");
+        mark_declared(&scheme, "dark_scheme");
         scheme.set_subtitle("Used while not following the system's colors.");
         scheme.set_model(Some(&gtk::StringList::new(&["Dark", "Light"])));
         scheme.set_selected(if self.capture.borrow().dark_scheme {
@@ -1057,11 +1107,13 @@ impl AppState {
         window.set_title("Window");
         let see_through = adw::SwitchRow::new();
         see_through.set_title("Transparent Background");
+        mark_declared(&see_through, "transparent_background");
         see_through.set_subtitle("Let the desktop behind the window show through its background.");
         see_through.set_subtitle_lines(0);
         see_through.set_active(self.capture.borrow().transparent_background);
         let opacity = adw::SpinRow::with_range(1.0, 100.0, 1.0);
         opacity.set_title("Background Opacity");
+        mark_declared(&opacity, "background_opacity");
         opacity.set_subtitle("Percent: 100 is solid, lower lets more of the desktop through.");
         opacity.set_subtitle_lines(0);
         opacity.set_digits(0);
@@ -1083,6 +1135,7 @@ impl AppState {
         });
         let workaround = adw::SwitchRow::new();
         workaround.set_title("KDE Transparency Workaround");
+        mark_declared(&workaround, "kde_transparency_workaround");
         workaround.set_subtitle(
             "Tells the compositor it decorates the window, using KDE's decoration protocol. Fixes niri showing its border color through the whole background. Leave it off on KDE and sway, which would add a second title bar.",
         );
@@ -1103,6 +1156,7 @@ impl AppState {
         text.set_title("Text");
         let font = adw::SwitchRow::new();
         font.set_title("Use Discord's Font");
+        mark_declared(&font, "discord_font");
         font.set_subtitle(
             "gg sans, as in the official app. kubecord does not ship it: turning this on downloads it once from discord.com's public web app into the cache (no account details are sent).",
         );
@@ -1117,6 +1171,7 @@ impl AppState {
         text.add(&font);
         let emoji = adw::SwitchRow::new();
         emoji.set_title("Use Discord's Emoji");
+        mark_declared(&emoji, "discord_emoji");
         emoji.set_subtitle(
             "Draw emoji with Discord's own artwork, fetched from Discord as needed, instead of your system's emoji font.",
         );
@@ -1149,6 +1204,7 @@ impl AppState {
         ));
         let in_app = adw::SwitchRow::new();
         in_app.set_title("Solve Captchas in kubecord");
+        mark_declared(&in_app, "captcha_in_app");
         in_app.set_subtitle(if crate::captcha::AVAILABLE {
             "Show the captcha here and send the request again once it is solved. When this is off, or the captcha fails, you can finish in your browser instead."
         } else {
@@ -1189,6 +1245,7 @@ impl AppState {
 
         let to_file = adw::SwitchRow::new();
         to_file.set_title("Write a Log File");
+        mark_declared(&to_file, "log_to_file");
         to_file.set_subtitle(
             "Small: about 200 KB for an hour of calls with video. Off writes nothing.",
         );
@@ -1203,6 +1260,7 @@ impl AppState {
 
         let detailed = adw::SwitchRow::new();
         detailed.set_title("Detailed Media Logging");
+        mark_declared(&detailed, "log_detailed");
         detailed.set_subtitle(&format!(
             "Also records every frame and packet event in calls. Large: tens of megabytes an hour. Only while chasing a problem. The file stops growing at {} MB either way.",
             crate::logging::MAX_BYTES / (1024 * 1024)
@@ -1218,6 +1276,7 @@ impl AppState {
 
         let diagnostics = adw::SwitchRow::new();
         diagnostics.set_title("Performance Diagnostics");
+        mark_declared(&diagnostics, "log_diagnostics");
         diagnostics.set_subtitle(
             "Logs when the interface stalls and how long the sidebar takes to redraw, to track down a hitch. Harmless and off by default.",
         );
@@ -1444,6 +1503,10 @@ impl AppState {
         voice_note.add_css_class("caption");
         page.append(&voice_note);
 
+        mark_declared(&input_dd, "input_device");
+        mark_declared(&output_dd, "output_device");
+        mark_declared(&input_volume, "input_volume");
+        mark_declared(&output_volume, "output_volume");
         let app = self.clone();
         let state = panel.clone();
         let names = input_names.clone();
@@ -1510,6 +1573,7 @@ impl AppState {
         ));
 
         let auto = adw::SwitchRow::new();
+        mark_declared_keys(&auto, &["auto_input_sensitivity", "input_threshold_db"]);
         auto.set_title("Automatically Determine Input Sensitivity");
         auto.set_subtitle("kubecord learns how loud your room is and sends what rises above it.");
         auto.set_subtitle_lines(0);
@@ -1621,6 +1685,7 @@ impl AppState {
 
         let noise = adw::ComboRow::new();
         noise.set_title("Noise Suppression");
+        mark_declared(&noise, "noise_suppression");
         noise.set_subtitle(
             "Removes steady background noise. Standard keeps your voice natural; Strong (RNNoise) also takes out keyboards and fans and costs a little more processor time.",
         );
@@ -1638,6 +1703,7 @@ impl AppState {
 
         let echo = adw::SwitchRow::new();
         echo.set_title("Echo Cancellation");
+        mark_declared(&echo, "echo_cancellation");
         echo.set_subtitle(
             "Keeps others from hearing themselves when you use speakers. Not needed with headphones. Works in calls (it listens to the call's sound).",
         );
@@ -1652,6 +1718,7 @@ impl AppState {
 
         let gain = adw::SwitchRow::new();
         gain.set_title("Automatic Gain Control");
+        mark_declared(&gain, "auto_gain_control");
         gain.set_subtitle(
             "Evens out your volume when you move closer to or away from the microphone.",
         );
@@ -1685,10 +1752,12 @@ impl AppState {
         camera_column.append(camera_frame);
         camera_column.append(&field_label("Camera"));
         camera_column.append(camera_dropdown);
+        mark_declared(camera_dropdown, "camera");
         let screen_column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         screen_column.append(screen_frame);
         screen_column.append(&field_label("Screen Share"));
         screen_column.append(&share_dd);
+        mark_declared(&share_dd, "share_source");
         let previews = gtk::Box::new(gtk::Orientation::Horizontal, 20);
         previews.set_homogeneous(true);
         previews.append(&camera_column);
@@ -1775,6 +1844,12 @@ impl AppState {
         quality.set_description(Some(
             "Used for your camera and Go Live, from the next time you start one. The defaults are a good place to stay: change one thing at a time, and Reset Video Settings below puts them back.",
         ));
+        let rows = controls.rows.iter().cloned();
+        for row in rows.chain(controls.advanced.iter().map(|row| row.clone().upcast())) {
+            if let Some(titled) = row.downcast_ref::<adw::PreferencesRow>() {
+                mark_declared_keys(&row, video_setting_keys(&titled.title()));
+            }
+        }
         for row in &controls.rows {
             quality.add(row);
         }
@@ -2066,6 +2141,161 @@ fn demo_level() -> Option<kc_media::processing::InputLevel> {
 }
 
 // -- widgets -----------------------------------------------------------------
+
+/// The settings each of the shared video quality rows shows, by its title.
+fn video_setting_keys(title: &str) -> &'static [&'static str] {
+    match title {
+        "Resolution" => &["width", "height"],
+        "Framerate" => &["fps", "fps_auto", "fps_auto_target"],
+        "Framerate Range" => &["fps_auto_min", "fps_auto_max"],
+        "Bitrate" => &["bitrate_kbps", "auto_bitrate_target"],
+        "Bitrate Range" => &["auto_bitrate_min", "auto_bitrate_max"],
+        "When the Connection Struggles" => &["adapt_priority"],
+        "Go Live Delay" => &["go_live_delay_ms"],
+        "Use Software Encoder (x264)" => &["cpu_encoder"],
+        "Camera Format" => &["camera_format"],
+        "Drop Late Frames After" => &["drop_frames_after_ms"],
+        "Send Packets Twice" => &["send_twice"],
+        "Drop Old Frames in the Capture Queue" => &["leaky_queue"],
+        "Scheduled Keyframes" => &["stream_keyframe_secs"],
+        "Dropout Recovery Window" => &["retransmit_ms"],
+        "Fastest Loss Recovery" => &["loss_keyframe_ms"],
+        "Full Frame at Least" => &["full_frame_gap_secs"],
+        _ => &[],
+    }
+}
+
+thread_local! {
+    /// The open settings window's toast overlay.
+    static SETTINGS_TOASTS: RefCell<Option<glib::WeakRef<adw::ToastOverlay>>> = const { RefCell::new(None) };
+    /// Rows of declared settings: the setting, and the badge to turn into
+    /// "Temporary" once it is changed here.
+    static DECLARED_MARKS: RefCell<Vec<(Vec<String>, glib::WeakRef<gtk::Label>)>> = const { RefCell::new(Vec::new()) };
+    /// Declared settings already toasted about this run.
+    static TOASTED: RefCell<std::collections::BTreeSet<String>> = const { RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// Marks `row` as showing the setting `key` if Nix declares it: a "Nix"
+/// badge, which reads "Temporary" while the value is changed here.
+pub(crate) fn mark_declared(row: &impl IsA<gtk::Widget>, key: &str) {
+    mark_declared_keys(row, &[key]);
+}
+
+/// [`mark_declared`] for a row showing several settings (resolution is
+/// `width` and `height`). Settings rows get the badge as a suffix, plain
+/// boxes at their end, and anything else right after it in its box.
+pub(crate) fn mark_declared_keys(row: &impl IsA<gtk::Widget>, keys: &[&str]) {
+    let Some(source) = keys.iter().find_map(|key| crate::declared::source_of(key)) else {
+        return;
+    };
+    let badge = gtk::Label::new(Some("Nix"));
+    badge.add_css_class("kc-nix-badge");
+    badge.set_valign(gtk::Align::Center);
+    badge.set_tooltip_text(Some(&format!(
+        "Set by {}. You can change it here, but it goes back when Kubecord restarts.",
+        source.describe()
+    )));
+    let row = row.as_ref();
+    if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
+        action.add_suffix(&badge);
+    } else if let Some(row_box) = row.downcast_ref::<gtk::Box>() {
+        row_box.append(&badge);
+    } else if let Some(parent) = row.parent().and_downcast::<gtk::Box>() {
+        parent.insert_child_after(&badge, Some(row));
+    } else {
+        return;
+    }
+    DECLARED_MARKS.with_borrow_mut(|marks| {
+        marks.retain(|(_, badge)| badge.upgrade().is_some());
+        marks.push((keys.iter().map(|key| (*key).to_owned()).collect(), badge.downgrade()));
+    });
+}
+
+/// Turns each declared row's badge into "Temporary" while its value differs
+/// from the declared one.
+fn refresh_declared_marks(prefs: &CapturePreferences) {
+    let Ok(current) = serde_json::to_value(prefs) else {
+        return;
+    };
+    DECLARED_MARKS.with_borrow(|marks| {
+        for (keys, badge) in marks {
+            let Some(badge) = badge.upgrade() else { continue };
+            let source = keys.iter().find_map(|key| crate::declared::source_of(key));
+            let describe = source.map_or("your Nix configuration", |source| source.describe());
+            if keys.iter().any(|key| crate::declared::changed(&current, key)) {
+                badge.set_label("Temporary");
+                badge.add_css_class("kc-temporary");
+                badge.set_tooltip_text(Some(&format!(
+                    "Changed here for now. It goes back to the value from {describe} when Kubecord restarts."
+                )));
+            } else {
+                badge.set_label("Nix");
+                badge.remove_css_class("kc-temporary");
+                badge.set_tooltip_text(Some(&format!(
+                    "Set by {describe}. You can change it here, but it goes back when Kubecord restarts."
+                )));
+            }
+        }
+    });
+}
+
+/// After a change: updates the declared rows' badges and, the first time a
+/// declared setting is changed this run, says the change is temporary.
+fn note_declared_changes(before: &serde_json::Value, after: &serde_json::Value) {
+    if let Ok(prefs) = serde_json::from_value::<CapturePreferences>(after.clone()) {
+        refresh_declared_marks(&prefs);
+    }
+    let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        return;
+    };
+    for (key, value) in after {
+        if before.get(key) == Some(value) {
+            continue;
+        }
+        let Some(source) = crate::declared::source_of(key) else { continue };
+        if !TOASTED.with_borrow_mut(|toasted| toasted.insert(key.clone())) {
+            continue;
+        }
+        let toast = adw::Toast::new(&format!(
+            "Set by {}: this change lasts until restart",
+            source.describe()
+        ));
+        toast.set_timeout(6);
+        if let Some(toasts) = SETTINGS_TOASTS.with_borrow(|slot| slot.as_ref().and_then(glib::WeakRef::upgrade)) {
+            toasts.add_toast(toast);
+        }
+    }
+}
+
+/// The banner at the top of the settings window when Nix declares any
+/// settings.
+fn declared_banner() -> Option<adw::Banner> {
+    let declared = crate::declared::all();
+    if declared.is_empty() {
+        return None;
+    }
+    let mut keys: Vec<String> = declared
+        .iter()
+        .map(|(path, _)| path.split('.').next().unwrap_or(path).to_owned())
+        .collect();
+    keys.dedup();
+    let from = if declared.iter().all(|(_, source)| *source == crate::declared::Source::User) {
+        "Home Manager"
+    } else if declared.iter().all(|(_, source)| *source == crate::declared::Source::System) {
+        "NixOS"
+    } else {
+        "NixOS and Home Manager"
+    };
+    let banner = adw::Banner::new(&format!(
+        "{} {} set by {from} (marked Nix). Changes to {} last until Kubecord restarts.",
+        keys.len(),
+        if keys.len() == 1 { "setting is" } else { "settings are" },
+        if keys.len() == 1 { "it" } else { "them" },
+    ));
+    banner.set_revealed(true);
+    banner.set_tooltip_text(Some(&keys.join(", ")));
+    Some(banner)
+}
 
 fn page_box() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 14);

@@ -4,6 +4,20 @@
 use gtk::gdk;
 
 const CSS: &str = r#"
+/* A setting declared in Nix, and the same setting changed here for now. */
+.kc-nix-badge {
+    font-size: 0.75em;
+    font-weight: 700;
+    padding: 1px 8px;
+    border-radius: 999px;
+    color: #7ebae4;
+    background-color: alpha(#7ebae4, 0.16);
+}
+.kc-nix-badge.kc-temporary {
+    color: @warning_color;
+    background-color: alpha(@warning_color, 0.16);
+}
+
 /* A file attached to the message being written. */
 .kc-upload-card {
     padding: 8px;

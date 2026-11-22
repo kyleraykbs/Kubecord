@@ -439,14 +439,41 @@ impl CapturePreferences {
         }
     }
 
+    /// The app's own settings (`settings.json`) with anything declared by
+    /// the NixOS or Home Manager module merged over them (see
+    /// [`crate::declared`]).
     pub fn load() -> Self {
-        let Ok(dir) = config_dir() else {
-            return Self::default();
-        };
-        let Ok(bytes) = std::fs::read(dir.join("settings.json")) else {
-            return Self::default();
-        };
-        let mut prefs: Self = serde_json::from_slice(&bytes).unwrap_or_default();
+        use crate::declared;
+        // The app's settings in full (defaults filled in), so a declared
+        // value deep inside one (logger.viewed.media) has the rest around
+        // it, and putting a declared value back on save leaves it complete.
+        let own: Self = config_dir()
+            .ok()
+            .and_then(|dir| std::fs::read(dir.join("settings.json")).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let imperative = serde_json::to_value(&own).unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+        let system = declared::read(&declared::system_path());
+        let user = declared::user_path()
+            .map(|path| declared::read(&path))
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+        let valid = |value: &serde_json::Value| serde_json::from_value::<Self>(value.clone()).is_ok();
+        let mut layers = declared::layer(&imperative, &system, &user, valid);
+        for (key, source) in &layers.rejected {
+            tracing::warn!(key, from = source.describe(), "declared setting has the wrong type; ignored");
+        }
+        let mut prefs: Self = serde_json::from_value(layers.effective.clone()).unwrap_or_default();
+        // Keys the settings do not have (a typo, or one since removed).
+        if let Ok(known) = serde_json::to_value(&prefs) {
+            layers.sources.retain(|path, _| {
+                let exists = declared::get(&known, path).is_some();
+                if !exists {
+                    tracing::warn!(key = %path, "declared setting is not a Kubecord setting; ignored");
+                }
+                exists
+            });
+        }
+        declared::install(&layers, imperative);
         prefs.normalize();
         prefs
     }
@@ -551,7 +578,11 @@ impl CapturePreferences {
         let dir = config_dir().map_err(|error| error.to_string())?;
         ensure_dir(&dir).map_err(|error| error.to_string())?;
         let path = dir.join("settings.json");
-        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        // Declared values keep what the file had: changed in the app, they
+        // last only until the next start.
+        let value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec_pretty(&crate::declared::for_saving(value))
+            .map_err(|error| error.to_string())?;
         std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
         let _ = kc_core::paths::restrict(&path);
         Ok(())

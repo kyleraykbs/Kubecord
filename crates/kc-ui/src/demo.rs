@@ -944,6 +944,11 @@ impl AppState {
                     let on = std::env::var("KUBECORD_FONT_TO").as_deref() != Ok("off");
                     eprintln!("demo: font switch was {}, setting {on}", font.is_active());
                     font.set_active(on);
+                    // Its Nix badge, when the setting is declared.
+                    let badges = descendants::<gtk::Label>(&font.clone().upcast());
+                    if let Some(badge) = badges.iter().find(|label| label.has_css_class("kc-nix-badge")) {
+                        eprintln!("demo: font badge reads {:?}", badge.label());
+                    }
                 });
             }
             "uploads" => {
