@@ -446,6 +446,7 @@ impl AppState {
         dm_call_button.set_visible(false);
 
         let content_header = adw::HeaderBar::new();
+        content_header.add_css_class("kc-chat-header");
         content_header.set_show_title(false);
         // The window's buttons are on the title bar above.
         content_header.set_show_end_title_buttons(false);
@@ -684,6 +685,7 @@ impl AppState {
         call_split.set_vexpand(true);
 
         let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat_column.add_css_class("kc-chat-body");
         chat_column.append(&call_split);
 
         // -- member list -------------------------------------------------
@@ -724,6 +726,7 @@ impl AppState {
         friends_clamp.set_maximum_size(760);
         friends_clamp.set_child(Some(&friends_box));
         let friends_scroll = gtk::ScrolledWindow::new();
+        friends_scroll.add_css_class("kc-pane-friends");
         friends_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         friends_scroll.set_child(Some(&friends_clamp));
 

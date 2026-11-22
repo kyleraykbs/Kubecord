@@ -68,29 +68,48 @@ pub(crate) fn apply_color_scheme(prefs: &CapturePreferences) {
 }
 
 /// The main window's surfaces at `opacity` percent (1-100), the desktop
-/// showing through the rest. Each pane is drawn once, over a clear window,
-/// so the panes keep their own shades rather than stacking up.
+/// showing through the rest. Each part is painted once, side by side over
+/// a clear window, never one over another (the member list inside the chat
+/// pane came out nearly solid when both were painted). The title bar, alone
+/// over the desktop, is kept more solid than the panes.
 pub(crate) fn transparency_css(opacity: u8) -> String {
     let opacity = opacity.clamp(1, 100);
+    let title_opacity = opacity + (100 - opacity) / 2;
     let see = |color: &str| format!("color-mix(in srgb, {color} {opacity}%, transparent)");
     format!(
         "window.kc-main-window {{ background-color: transparent; }}
-window.kc-main-window .kc-title-bar {{ background-color: {header}; box-shadow: none; }}
+window.kc-main-window .kc-title-bar,
+window.kc-main-window .kc-title-bar:backdrop {{
+    background-color: color-mix(in srgb, @headerbar_bg_color {title_opacity}%, transparent);
+    box-shadow: none;
+}}
+/* Unfocused, libadwaita fades header bars' contents to half and repaints
+   their bars; over a see-through window that reads as the text itself
+   going transparent. */
+window.kc-main-window .kc-title-bar:backdrop > windowhandle,
+window.kc-main-window toolbarview > .top-bar:backdrop > windowhandle {{ filter: none; }}
+window.kc-main-window toolbarview > .top-bar,
+window.kc-main-window toolbarview > .top-bar:backdrop {{ background-color: transparent; box-shadow: none; }}
 window.kc-main-window .kc-rail {{ background-color: {rail}; }}
 window.kc-main-window .kc-pane-sidebar {{ background-color: {sidebar}; }}
-window.kc-main-window .kc-pane-chat {{ background-color: {chat}; }}
+window.kc-main-window .kc-chat-header,
+window.kc-main-window .kc-chat-header:backdrop,
+window.kc-main-window .kc-chat-body,
+window.kc-main-window .kc-pane-friends {{ background-color: {chat}; box-shadow: none; }}
 window.kc-main-window .kc-pane-members {{ background-color: {sidebar}; }}
+window.kc-main-window .kc-pane-chat,
 window.kc-main-window .kc-pane-sidebar headerbar,
-window.kc-main-window .kc-pane-chat headerbar,
+window.kc-main-window .kc-pane-sidebar headerbar:backdrop,
 window.kc-main-window .kc-pane-sidebar toolbarview,
 window.kc-main-window .kc-pane-chat toolbarview,
 window.kc-main-window .kc-pane-chat .sidebar-pane,
+window.kc-main-window .kc-pane-chat .sidebar-pane:backdrop,
 window.kc-main-window .kc-pane-chat .content-pane,
+window.kc-main-window .kc-pane-chat .content-pane:backdrop,
 window.kc-main-window .kc-pane-sidebar list,
 window.kc-main-window .kc-pane-chat list,
 window.kc-main-window .kc-pane-members list {{ background-color: transparent; box-shadow: none; }}
 ",
-        header = see("@headerbar_bg_color"),
         rail = see("color-mix(in srgb, @window_bg_color 92%, black)"),
         sidebar = see("@sidebar_bg_color"),
         chat = see("@window_bg_color"),
