@@ -253,62 +253,68 @@ ban is unlikely; friending people is the most likely place to get one.
 ## Features
 
 ### Voice and video
-- Send and receive audio, see who's talking
-- Per-user volume, boosted up to 5×
-- Discord's own join, leave, mute and deafen sounds
+- **Voice calls**: send and receive audio, and see who's talking.
+- **Per-user volume**: turn anyone up or down, boosted up to 5×.
+- **Call sounds**: Discord's own join, leave, mute and deafen sounds.
 
   <img src="https://github.com/user-attachments/assets/e46c6fed-7ef3-4d15-b2d2-158508b4c13e" width="653" alt="A voice call">
 
-- Screen share and webcam, **with audio**: the whole desktop, one window, or a
-  dummy node for any patchbay
+- **Screen share and webcam, with audio**: share the whole desktop, one window,
+  or a dummy node for any patchbay.
 
   <img src="https://github.com/user-attachments/assets/9b550203-9f33-472f-8f1e-3b2de301846b" width="360" alt="Screen-share audio options">
 
-- The screen-share preview shows the *encoded* stream: what you see is what
-  others see (barring connection stutters)
-- Debug details for streams you share *and* streams you watch
-- MANY fine-tunable settings (you're in full control)
-- DM and group DM calls, showing when the other side is being rung
-- Noise suppression, echo cancellation, automatic gain and input sensitivity
+- **Honest preview**: the screen-share preview shows the *encoded* stream, so
+  what you see is what others see (barring connection stutters).
+- **Stream details**: debug info for streams you share *and* streams you watch.
+- **Fine-tuning**: MANY stream settings, so you're in full control.
+- **DM and group calls**: including showing when the other side is being rung.
+- **Voice processing**: noise suppression, echo cancellation, automatic gain and
+  input sensitivity.
 
   <img src="https://github.com/user-attachments/assets/74427ba5-3679-47b1-b78c-f0f7fddfb376" width="420" alt="Voice settings">
 
 ### Chat
-- Send, edit, reply, react and pin
-- Images, videos and GIFs, with a zooming viewer; right-click any of them to
-  copy the link, open it in a browser or save it
-- Embeds and attachments (with download), and previews of files before you send
-- GIFs of every kind (MP4, GIF, …), with favorites and search (including partial
-  favorites search, matched by link)
-- Server and standard emoji with a picker, `:shortcode:` emoji as you type, and
-  optionally Discord's own emoji artwork, even in the message box
-- Stickers (all except Discord's stock ones)
-- Spellcheck, with suggestions on right-click
-- Typing indicators, with an option to hide your own
-- **Apps and bots**: slash commands with autocomplete and file options; buttons,
-  select menus and forms; app commands on users and messages
-- **Message logger** (local only): keeps deleted messages (shown in red) and edit
-  history, with separate keep times for text and media and size limits that drop
-  the largest media first
-- **Share mode**: pick a range of messages, redact or add single ones, and export
-  it as a picture or text, to the clipboard or a file
-- All available admin tools, including channel and server settings
+- **Messages**: send, edit, reply, react and pin.
+- **Long messages**: a counter shows the length limit, and anything longer is
+  sent as several messages automatically.
+- **Media**: images, videos and GIFs with a zooming viewer; right-click any of
+  them to copy the link, open it in a browser or save it.
+- **Attachments**: embeds and files (with download), and previews of files
+  before you send them.
+- **GIFs**: every kind (MP4, GIF, …), with favorites and search (including
+  partial favorites search, matched by link).
+- **Emoji**: server and standard emoji with a picker, `:shortcode:` emoji as
+  you type, and optionally Discord's own emoji artwork, even in the message box.
+- **Stickers**: all except Discord's stock ones.
+- **Spellcheck**: with suggestions on right-click.
+- **Typing indicators**: with an option to hide your own.
+- **Apps and bots**: slash commands with autocomplete and file options;
+  buttons, select menus and forms; app commands on users and messages.
+- **Message logger**: keeps deleted messages (shown in red) and edit history,
+  locally only, with separate keep times for text and media, and size limits
+  that drop the largest media first.
+- **Share mode**: pick a range of messages, redact or add single ones, and
+  export it as a picture or text, to the clipboard or a file.
+- **Admin tools**: everything available, including channel and server settings.
 
 ### Profiles
-- Edit your own profile; view anyone's
-- Status, notes and bio
-- Mutual friends and servers
-- Basic activity support
+- **Your profile**: edit it, including status, notes and bio.
+- **Other people's profiles**: view anyone's, with their status, bio and notes.
+- **Mutuals**: friends and servers you share.
+- **Activities**: basic activity support.
 
 ### The app
-- Not built in Electron! (Biggest feature of them all)
-- Multiple accounts, with a default account to open on
-- Notifications
-- Extensive settings
-- Follows your GTK colors (Stylix compatible), or Discord's own dark and light
-  themes; Discord's font optional
-- Transparent background with adjustable opacity
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/ab7c98be-4eb6-4d38-b36c-92a870cdda3d" />
+- **No Electron**: native GTK4 and libadwaita, the biggest feature of them all!
+- **Multiple accounts**: with a default account to open on.
+- **Notifications**: desktop notifications, with per-server and per-channel
+  settings.
+- **Settings**: extensive, and settable from Nix too (see [docs/nix.md](docs/nix.md)).
+- **Theming**: follows your GTK colors (Stylix compatible), or uses Discord's
+  own dark and light themes, with Discord's font optional.
+- **Transparency**: a see-through background with adjustable opacity.
+
+  <img width="600" alt="Kubecord with a transparent background" src="https://github.com/user-attachments/assets/ab7c98be-4eb6-4d38-b36c-92a870cdda3d" />
 
 ## Not supported yet
 
