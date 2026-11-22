@@ -1,0 +1,73 @@
+# Maintainer: kyleraykbs
+pkgname=kubecord-git
+_pkgname=kubecord
+_appid=io.github.kyleraykbs.Kubecord
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A native Discord client written in Rust with GTK4 and libadwaita'
+arch=('x86_64' 'aarch64')
+url='https://github.com/kyleraykbs/Kubecord'
+license=('GPL-3.0-only')
+depends=(
+  'gtk4'
+  'libadwaita'
+  'webkitgtk-6.0'
+  'glib-networking'
+  'opus'
+  'pipewire'
+  'gstreamer'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'gst-plugins-bad'
+  'gst-plugins-ugly'
+  'gst-libav'
+  'gst-plugin-gtk4'
+  'gst-plugin-pipewire'
+  'gst-plugin-rsaudiofx'
+)
+optdepends=(
+  'gst-plugin-va: hardware video encoding for screen share and camera'
+)
+makedepends=('cargo' 'clang' 'git')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+options=('!lto')
+
+pkgver() {
+  cd "$_pkgname"
+  local version
+  version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p kubecord
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  # The interface tests need a display; the protocol and state tests do not.
+  cargo test --frozen --release --workspace --exclude kc-ui
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/release/kubecord -t "$pkgdir/usr/bin"
+  install -Dm644 "data/$_appid.desktop" -t "$pkgdir/usr/share/applications"
+  install -Dm644 "data/$_appid.metainfo.xml" -t "$pkgdir/usr/share/metainfo"
+  install -d "$pkgdir/usr/share/icons"
+  cp -r data/icons/hicolor "$pkgdir/usr/share/icons/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}
