@@ -562,13 +562,18 @@ button.kc-dm-close image {
     -gtk-icon-size: 12px;
 }
 
-button.kc-channel:hover button.kc-dm-close,
+.kc-dm-row:hover button.kc-dm-close,
 button.kc-dm-close:focus-visible {
     opacity: 0.7;
 }
 
-button.kc-channel:hover button.kc-dm-close:hover {
+.kc-dm-row:hover button.kc-dm-close:hover {
     opacity: 1;
+}
+
+/* The row stays lit while the pointer is on its ×. */
+.kc-dm-row:hover > button.kc-channel:not(.kc-selected) {
+    background-color: alpha(currentColor, 0.07);
 }
 
 .kc-menu-sep {

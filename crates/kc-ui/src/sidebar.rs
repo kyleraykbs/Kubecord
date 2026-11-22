@@ -323,7 +323,10 @@ impl AppState {
             }
             content.append(&text);
             content.append(&badge(row.mentions));
-            content.append(&self.dm_close_button(&row.channel));
+            // Room for the × laid over the row's end.
+            let room = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            room.set_size_request(20, -1);
+            content.append(&room);
             button.set_child(Some(&content));
             let app = self.clone();
             let channel = row.channel.clone();
@@ -334,7 +337,16 @@ impl AppState {
             } else if row.channel.kind == ChannelType::GroupDm {
                 self.attach_group_menu(&button, row.channel.id);
             }
-            self.channel_box.append(&button);
+            // The × sits over the row rather than in it: a button takes the
+            // clicks of what is inside it first, which left the × dead.
+            let close = self.dm_close_button(&row.channel);
+            close.set_halign(gtk::Align::End);
+            close.set_margin_end(8);
+            let item = gtk::Overlay::new();
+            item.add_css_class("kc-dm-row");
+            item.set_child(Some(&button));
+            item.add_overlay(&close);
+            self.channel_box.append(&item);
         }
     }
 

@@ -1233,9 +1233,8 @@ impl AppState {
                     match mode.as_str() {
                         "dm-hover" => {
                             for close in &closes {
-                                if let Some(row) =
-                                    close.parent().and_then(|content| content.parent())
-                                {
+                                // The overlay holding the row and its ×.
+                                if let Some(row) = close.parent() {
                                     row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
                                 }
                             }
