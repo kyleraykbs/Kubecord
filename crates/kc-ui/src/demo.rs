@@ -926,6 +926,24 @@ impl AppState {
                     app.demo_share(folder);
                 });
             }
+            "font-toggle" => {
+                // Theming's "Use Discord's Font" switched on and off by its
+                // own switch, as a click does.
+                self.open_channel(general);
+                self.show_settings_page("theming");
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let rows = descendants::<libadwaita::SwitchRow>(&app.window.clone().upcast());
+                    let font = rows.into_iter().find(|row| libadwaita::prelude::PreferencesRowExt::title(row) == "Use Discord's Font");
+                    let Some(font) = font else {
+                        eprintln!("demo: no font switch");
+                        return;
+                    };
+                    let on = std::env::var("KUBECORD_FONT_TO").as_deref() != Ok("off");
+                    eprintln!("demo: font switch was {}, setting {on}", font.is_active());
+                    font.set_active(on);
+                });
+            }
             "uploads" => {
                 // Files attached to a message not yet sent: a picture, an
                 // animated GIF (KUBECORD_UPLOAD_GIF, a path) and a text file.
