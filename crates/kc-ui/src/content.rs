@@ -1838,6 +1838,10 @@ mod emoji_copy_tests {
     // On GTK's shared test thread, like the other tests that need GTK.
     #[gtk::test]
     fn copied_text_gives_each_emoji_image_its_text() {
+        // Without a display (a sandboxed build) GTK does not start: skip.
+        if !gtk::is_initialized() {
+            return;
+        }
         let buffer = gtk::TextBuffer::new(None);
         let texts: EmojiTexts = RefCell::default();
         buffer.insert(&mut buffer.end_iter(), "nice ");
