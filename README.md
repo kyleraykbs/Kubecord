@@ -6,14 +6,14 @@
 
 **A Discord client for Linux, built from scratch in Rust.**
 
-Native GTK4/libadwaita. No Electron, no webview, no patched official client.
+Native GTK4/libadwaita. No Electron, no webview, no patched official client, FULL screen-share support.
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)
 ![GTK4](https://img.shields.io/badge/GTK-4%20%2B%20libadwaita-4a86cf.svg)
 ![Nix](https://img.shields.io/badge/built%20with-Nix-5277c3.svg)
 
-<img src="https://github.com/user-attachments/assets/1feb8354-b94a-44fa-888f-257a3d137bf9" width="820" alt="Kubecord: a server's channels, a chat and the member list">
+<img width="820" alt="image" src="https://github.com/user-attachments/assets/35548897-e369-4387-ac0c-30f3ad3ef592" alt="Kubecord: a server's channels, a chat and the member list"/>
 
 </div>
 
