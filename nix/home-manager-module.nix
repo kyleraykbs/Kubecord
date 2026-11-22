@@ -7,7 +7,10 @@ let
   json = pkgs.formats.json { };
 in
 {
-  imports = [ (import ./options.nix { inherit defaultPackage; }) ];
+  imports = [
+    (import ./options.nix { inherit defaultPackage; })
+    ./stylix.nix
+  ];
 
   config = lib.mkIf cfg.enable {
     home.packages = lib.optional (cfg.package != null) cfg.package;

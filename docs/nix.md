@@ -8,6 +8,7 @@ you leave out stays yours to change in the app.
 - [NixOS module](#nixos-module)
 - [Home Manager module](#home-manager-module)
 - [Options](#options)
+- [Stylix](#stylix)
 - [How declared and app settings combine](#how-declared-and-app-settings-combine)
 - [Troubleshooting](#troubleshooting)
 - [Settings reference](#settings-reference)
@@ -98,6 +99,27 @@ The same three options exist in both modules.
 | `programs.kubecord.enable` | boolean | `false` | Install Kubecord and apply the settings. |
 | `programs.kubecord.package` | package or `null` | this flake's Kubecord | The package to install. `null` installs nothing and only writes the settings, for a Kubecord installed another way. The Flatpak can't see these files from inside its sandbox, so it ignores them. |
 | `programs.kubecord.settings` | JSON value (attribute set) | `{ }` | Kubecord settings, by the keys in [the reference below](#settings-reference). Any subset; nested values (like `logger.viewed.media`) can be set one at a time. |
+| `programs.kubecord.stylix.enable` | boolean | `true` when Stylix is enabled | Match Kubecord to Stylix (see [Stylix](#stylix)). |
+
+## Stylix
+
+If you use [Stylix](https://github.com/nix-community/stylix), the modules
+match Kubecord to it automatically. Nothing to set up: when Stylix is enabled
+in the same configuration, they set:
+
+| Setting | Value |
+| --- | --- |
+| `follow_system_scheme` | `true`, so Kubecord uses the GTK colors Stylix generates. |
+| `transparent_background` | `true` when `stylix.opacity.applications` is below `1.0`. |
+| `background_opacity` | `stylix.opacity.applications` as a percentage (`0.9` is `90`). |
+
+These are defaults, so anything you put in `programs.kubecord.settings` wins
+over them. To turn the matching off entirely, set
+`programs.kubecord.stylix.enable = false`.
+
+This works in both modules: the NixOS module follows your system's Stylix,
+and the Home Manager module follows the Stylix settings Home Manager sees
+(including Stylix's own NixOS-to-Home-Manager integration).
 
 ## How declared and app settings combine
 
