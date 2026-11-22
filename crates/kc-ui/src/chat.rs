@@ -299,7 +299,7 @@ impl AppState {
             } else {
                 self.content_stack.set_visible_child_name("chat");
                 self.show_placeholder(
-                    "chat-bubbles-empty-symbolic",
+                    crate::widgets::first_icon(&["chat-bubbles-empty-symbolic", "user-available-symbolic"]),
                     "No Channel Selected",
                     "Pick a channel from the sidebar.",
                 );
@@ -392,7 +392,7 @@ impl AppState {
 
         if entries.is_empty() && !loading {
             self.show_placeholder(
-                "chat-bubbles-empty-symbolic",
+                crate::widgets::first_icon(&["chat-bubbles-empty-symbolic", "user-available-symbolic"]),
                 "No Messages Yet",
                 "Say something to start the conversation.",
             );

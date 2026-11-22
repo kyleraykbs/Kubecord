@@ -1,0 +1,67 @@
+{
+  "id": "io.github.kyleraykbs.Kubecord",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "51",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable",
+    "org.freedesktop.Sdk.Extension.llvm22"
+  ],
+  "command": "kubecord",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--socket=pulseaudio",
+    "--device=dri",
+    "--filesystem=xdg-run/pipewire-0",
+    "--talk-name=org.freedesktop.Notifications"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/share/man",
+    "/share/doc",
+    "*.a",
+    "*.la"
+  ],
+  "modules": [
+    {
+      "name": "kubecord",
+      "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin",
+        "env": {
+          "CARGO_HOME": "/run/build/kubecord/cargo",
+          "CARGO_NET_OFFLINE": "true",
+          "LIBCLANG_PATH": "/usr/lib/sdk/llvm22/lib"
+        },
+        "prepend-ld-library-path": "/usr/lib/sdk/llvm22/lib"
+      },
+      "build-commands": [
+        "cargo --offline build --release --locked -p kubecord",
+        "install -Dm755 target/release/kubecord -t /app/bin",
+        "install -Dm644 data/io.github.kyleraykbs.Kubecord.desktop -t /app/share/applications",
+        "install -Dm644 data/io.github.kyleraykbs.Kubecord.metainfo.xml -t /app/share/metainfo",
+        "mkdir -p /app/share/icons",
+        "cp -r data/icons/hicolor /app/share/icons/"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": [
+            "target",
+            "reference-projects",
+            ".git",
+            "result",
+            "flatpak/.flatpak-builder",
+            "flatpak/build-dir"
+          ]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}

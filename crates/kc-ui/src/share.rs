@@ -421,7 +421,11 @@ impl AppState {
         bar.set_margin_top(8);
         bar.set_margin_start(12);
         bar.set_margin_end(12);
-        bar.append(&gtk::Image::from_icon_name("emblem-shared-symbolic"));
+        bar.append(&gtk::Image::from_icon_name(crate::widgets::first_icon(&[
+            "share-symbolic",
+            "emblem-shared-symbolic",
+            "send-to-symbolic",
+        ])));
         let prompt = gtk::Label::new(None);
         prompt.set_wrap(true);
         prompt.set_xalign(0.0);

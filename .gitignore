@@ -3,3 +3,9 @@ target/
 result
 .direnv/
 *.log
+
+# Flatpak builds
+/flatpak/build-dir/
+/flatpak/.flatpak-builder/
+/flatpak/repo/
+*.flatpak

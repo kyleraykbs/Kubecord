@@ -5,10 +5,41 @@ use libadwaita as adw;
 
 /// Whether the active icon theme provides `name`, so controls can fall back to
 /// a text label instead of rendering an empty button.
+/// Whether the icon theme in use has `name`.
 pub fn icon_available(name: &str) -> bool {
     gtk::gdk::Display::default()
         .map(|display| gtk::IconTheme::for_display(&display).has_icon(name))
         .unwrap_or(false)
+}
+
+/// Uses Adwaita's icons when the desktop's icon theme is not installed
+/// here. In the Flatpak the desktop's theme (Papirus, say) is usually not in
+/// the sandbox, and GTK then draws only the few icons in `hicolor`, leaving
+/// most buttons blank. A theme that is installed is left alone. Checked now
+/// and whenever the theme setting changes.
+pub fn keep_icons_drawable() {
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    let check = |settings: &gtk::Settings| {
+        let Some(display) = gtk::gdk::Display::default() else {
+            return;
+        };
+        let name = settings.gtk_icon_theme_name().map(|name| name.to_string()).unwrap_or_default();
+        if name.is_empty() || name == "Adwaita" {
+            return;
+        }
+        let installed = gtk::IconTheme::for_display(&display)
+            .search_path()
+            .iter()
+            .any(|dir| dir.join(&name).join("index.theme").exists());
+        if !installed {
+            tracing::info!(theme = %name, "icon theme not installed here; using Adwaita's icons");
+            settings.set_gtk_icon_theme_name(Some("Adwaita"));
+        }
+    };
+    check(&settings);
+    settings.connect_gtk_icon_theme_name_notify(check);
 }
 
 /// The first icon of `candidates` the theme has, else the first candidate.

@@ -719,7 +719,10 @@ impl Profile {
             let friend = match model.relationship {
                 None => Some(("contact-new-symbolic", "Add Friend")),
                 Some(Relationship::INCOMING_REQUEST) => {
-                    Some(("emblem-ok-symbolic", "Accept Friend Request"))
+                    Some((
+                        crate::widgets::first_icon(&["emblem-ok-symbolic", "object-select-symbolic"]),
+                        "Accept Friend Request",
+                    ))
                 }
                 Some(Relationship::OUTGOING_REQUEST) => {
                     Some(("process-stop-symbolic", "Cancel Friend Request"))
