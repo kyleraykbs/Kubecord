@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Builds Kubecord-x86_64.AppImage on Debian 13 (trixie). Run inside the
-# official Rust image, from the repository root:
+# Builds Kubecord-x86_64.AppImage on Ubuntu 26.04 LTS. Run from the
+# repository root:
 #
-#   podman run --rm -v "$PWD":/src -w /src docker.io/library/rust:1-trixie \
+#   podman run --rm -v "$PWD":/src -w /src docker.io/library/ubuntu:26.04 \
 #     bash packaging/appimage/build.sh
+#
+# Ubuntu 26.04, not Debian 13: Debian 13's GTK 4.18 crashes at start on
+# niri-style compositors, while 26.04's GTK 4.22 does not. The AppImage
+# therefore needs glibc 2.43 (Ubuntu 26.04, Fedora 44, Arch and newer).
 #
 # The AppDir is assembled here (no linuxdeploy): the binary, the libraries it
 # and its plugins link (minus the ones an AppImage must take from the host),
@@ -24,13 +28,13 @@ OUT=${OUT:-target/appimage}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  clang libclang-dev pkg-config file curl squashfs-tools \
+  rustc cargo clang libclang-dev pkg-config file curl ca-certificates squashfs-tools \
   libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   libpipewire-0.3-dev libopus-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gtk4 gstreamer1.0-pipewire \
-  pipewire-bin libgtk-4-media-gstreamer libgdk-pixbuf2.0-bin librsvg2-common \
+  pipewire-bin libgdk-pixbuf2.0-bin librsvg2-common \
   adwaita-icon-theme >/dev/null
 
 cargo build --release --locked -p kubecord --no-default-features
@@ -50,8 +54,11 @@ cp -r "/usr/lib/$TRIPLET/gstreamer-1.0" "$LIB/"
 cp -r "/usr/lib/$TRIPLET/gdk-pixbuf-2.0" "$LIB/"
 cp -r "/usr/lib/$TRIPLET/spa-0.2" "$LIB/"
 cp -r "/usr/lib/$TRIPLET/pipewire-0.3" "$LIB/"
-mkdir -p "$LIB/gtk-4.0/4.0.0"
-cp -r "/usr/lib/$TRIPLET/gtk-4.0/4.0.0/media" "$LIB/gtk-4.0/4.0.0/"
+# GTK's media backend: a module in older GTK, built into the library in newer.
+if [[ -d "/usr/lib/$TRIPLET/gtk-4.0/4.0.0/media" ]]; then
+  mkdir -p "$LIB/gtk-4.0/4.0.0"
+  cp -r "/usr/lib/$TRIPLET/gtk-4.0/4.0.0/media" "$LIB/gtk-4.0/4.0.0/"
+fi
 
 # Data.
 mkdir -p "$APPDIR/usr/share/glib-2.0"
