@@ -13,10 +13,6 @@ Native GTK4/libadwaita. No Electron, no webview, no patched official client.
 ![GTK4](https://img.shields.io/badge/GTK-4%20%2B%20libadwaita-4a86cf.svg)
 ![Nix](https://img.shields.io/badge/built%20with-Nix-5277c3.svg)
 
-<img src="docs/images/screenshot.png" alt="Kubecord showing a server's channel list, a chat and the member list" width="820">
-
-<sub>Screenshot from the built-in demo mode (made-up data), with Discord's font and colors turned on.</sub>
-
 </div>
 
 ---
