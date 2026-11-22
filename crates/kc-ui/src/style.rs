@@ -6,7 +6,11 @@ use gtk::gdk;
 const CSS: &str = r#"
 /* The slim bar across the top of the window, with the app's name. */
 headerbar.kc-title-bar {
-    min-height: 34px;
+    min-height: 40px;
+}
+headerbar.kc-title-bar .kc-app-name {
+    font-size: 1.15em;
+    font-weight: 800;
 }
 headerbar.kc-title-bar windowcontrols button {
     min-height: 22px;

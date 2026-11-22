@@ -765,7 +765,7 @@ impl AppState {
         let notices = gtk::Box::new(gtk::Orientation::Vertical, 6);
         notices.set_halign(gtk::Align::Center);
         notices.set_valign(gtk::Align::Start);
-        notices.set_margin_top(90);
+        notices.set_margin_top(96);
         let page = gtk::Overlay::new();
         page.set_child(Some(&stack));
         page.add_overlay(&notices);
@@ -1034,17 +1034,51 @@ const LOGO: &[u8] = include_bytes!("../../../data/icons/hicolor/64x64/apps/dev.k
 /// middle, the window's buttons at the ends.
 fn title_bar() -> adw::HeaderBar {
     let logo = gtk::Image::new();
-    logo.set_pixel_size(20);
+    logo.set_pixel_size(28);
     if let Ok(texture) = gtk::gdk::Texture::from_bytes(&gtk::glib::Bytes::from_static(LOGO)) {
         logo.set_paintable(Some(&texture));
     }
     let name = gtk::Label::new(Some("Kubecord"));
-    name.add_css_class("heading");
+    name.add_css_class("kc-app-name");
     let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     title.append(&logo);
     title.append(&name);
     let bar = adw::HeaderBar::new();
     bar.add_css_class("kc-title-bar");
     bar.set_title_widget(Some(&title));
+    // The logo is in the middle already: no window icon in the corner too
+    // (shown when the desktop's button layout asks for one).
+    if let Some(settings) = gtk::Settings::default() {
+        let without_icon = |settings: &gtk::Settings, bar: &adw::HeaderBar| {
+            let layout = settings.gtk_decoration_layout().map(|layout| layout.to_string()).unwrap_or_default();
+            bar.set_decoration_layout(Some(&layout_without_icon(&layout)));
+        };
+        without_icon(&settings, &bar);
+        let weak = bar.downgrade();
+        settings.connect_gtk_decoration_layout_notify(move |settings| {
+            if let Some(bar) = weak.upgrade() {
+                without_icon(settings, &bar);
+            }
+        });
+    }
     bar
+}
+
+/// A window button layout (`icon:minimize,close`) without the window icon.
+fn layout_without_icon(layout: &str) -> String {
+    layout
+        .split(':')
+        .map(|side| side.split(',').filter(|button| button.trim() != "icon").collect::<Vec<_>>().join(","))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[cfg(test)]
+mod title_tests {
+    #[test]
+    fn the_window_icon_leaves_the_layout() {
+        assert_eq!(super::layout_without_icon("icon:minimize,maximize,close"), ":minimize,maximize,close");
+        assert_eq!(super::layout_without_icon("close,icon:menu"), "close:menu");
+        assert_eq!(super::layout_without_icon(":close"), ":close");
+    }
 }
