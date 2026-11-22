@@ -1030,7 +1030,7 @@ impl AppState {
             .chain(drafts.iter().map(|draft| draft.content.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
-        let next: Box<dyn FnOnce(&Rc<AppState>) + Send> = Box::new(move |app| app.send_parts(channel, drafts));
+        let next: NextPart = Box::new(move |app| app.send_parts(channel, drafts));
         self.dispatch_send(channel, first, Some(Then { next, unsent }));
     }
 
@@ -2911,10 +2911,13 @@ fn upload_preview(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
     )
 }
 
+/// Sends the next part of a split message.
+type NextPart = Box<dyn FnOnce(&Rc<AppState>) + Send>;
+
 /// What follows a part of a split message: sending the next part once it is
 /// accepted, and, if it fails, the text of every part not sent.
 pub(crate) struct Then {
-    next: Box<dyn FnOnce(&Rc<AppState>) + Send>,
+    next: NextPart,
     unsent: String,
 }
 
