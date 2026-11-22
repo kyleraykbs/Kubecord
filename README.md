@@ -25,7 +25,7 @@ Please open issues if you have suggestions for features or find any bugs. I've t
 
 ## Contents
 
-- [Quick start](#quick-start)
+- [Installation](#installation)
 - [Is it safe to use?](#is-it-safe-to-use)
 - [Features](#features)
 - [Not supported yet](#not-supported-yet)
@@ -35,11 +35,106 @@ Please open issues if you have suggestions for features or find any bugs. I've t
 - [Development](#development)
 - [License](#license)
 
-## Quick start
+## Installation
+
+Pick the one for your system and open it for the steps.
+
+| Package | For |
+| --- | --- |
+| **Flatpak** | Any distribution |
+| **AUR** (`kubecord-git`) | Arch Linux and its derivatives |
+| **Nix** | NixOS, or Nix on any distribution |
+| **From source** | Anything else |
+
+<details>
+<summary><b>Flatpak</b>: any distribution</summary>
+
+<br>
+
+Kubecord isn't on Flathub yet. Until it is, build and install it from this
+repository with `flatpak-builder`:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+git clone https://github.com/kyleraykbs/Kubecord.git
+cd Kubecord/flatpak
+flatpak-builder --user --install-deps-from=flathub --install --force-clean build-dir io.github.kyleraykbs.Kubecord.json
+flatpak run io.github.kyleraykbs.Kubecord
+```
+
+The first build downloads the GNOME runtime and SDK (a few GB) and compiles
+Kubecord, so it takes a while. To update, `git pull` and run the
+`flatpak-builder` line again.
+
+</details>
+
+<details>
+<summary><b>AUR</b>: Arch Linux, Manjaro, EndeavourOS, …</summary>
+
+<br>
+
+Once it's published to the AUR, install it with your AUR helper:
+
+```sh
+paru -S kubecord-git    # or: yay -S kubecord-git
+```
+
+Until then, build the same package from this repository:
+
+```sh
+git clone https://github.com/kyleraykbs/Kubecord.git
+cd Kubecord/packaging/aur/kubecord-git
+makepkg -si
+```
+
+</details>
+
+<details>
+<summary><b>Nix</b>: NixOS, or Nix on any distribution</summary>
+
+<br>
+
+Run it without installing:
 
 ```sh
 nix run github:kyleraykbs/Kubecord
 ```
+
+Install it into your profile:
+
+```sh
+nix profile install github:kyleraykbs/Kubecord
+```
+
+Or add the flake to your NixOS or Home Manager configuration:
+
+```nix
+# In your flake's inputs:
+kubecord.url = "github:kyleraykbs/Kubecord";
+
+# Then in your packages:
+inputs.kubecord.packages.${pkgs.system}.default
+```
+
+</details>
+
+<details>
+<summary><b>From source</b>: anything else</summary>
+
+<br>
+
+You need Rust 1.92 or newer, clang, and the development packages for GTK 4.14
+or newer, libadwaita 1.7 or newer, WebKitGTK 6.0, PipeWire, Opus and GStreamer
+(base, good, bad, ugly and libav, plus the gtk4 and pipewire plugins).
+
+```sh
+git clone https://github.com/kyleraykbs/Kubecord.git
+cd Kubecord
+cargo build --release -p kubecord
+./target/release/kubecord
+```
+
+</details>
 
 Then log in with your **email and password** (2FA, SMS codes and captchas are
 handled) or paste a **user token**. Only the resulting token is kept: your
@@ -202,7 +297,11 @@ cargo run -p kubecord
 The flake provides GTK4, libadwaita, GStreamer with the plugins Kubecord uses,
 libopus and the Rust toolchain (1.92+). The packaged build wraps the GStreamer
 plugin path and GTK schemas. New files need `git add` before `nix build`, as the
-flake only sees tracked files. A Flatpak is planned.
+flake only sees tracked files.
+
+Packaging lives in `flatpak/` (the Flatpak manifest; run
+`python3 flatpak/cargo-sources.py` after changing `Cargo.lock`) and
+`packaging/aur/` (the AUR PKGBUILD).
 
 ## Files
 
