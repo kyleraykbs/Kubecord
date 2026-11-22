@@ -152,11 +152,11 @@ ban is unlikely; friending people is the most likely place to get one.
 - Not built in Electron! (Biggest feature of them all)
 - Multiple accounts, with a default account to open on
 - Notifications
+- Extensive settings
 - Follows your GTK colors (Stylix compatible), or Discord's own dark and light
   themes; Discord's font optional
 - Transparent background with adjustable opacity
-- Desktop entry and icon
-- Extensive settings
+<img width="600" alt="image" src="https://github.com/user-attachments/assets/ab7c98be-4eb6-4d38-b36c-92a870cdda3d" />
 
 ## Not supported yet
 
