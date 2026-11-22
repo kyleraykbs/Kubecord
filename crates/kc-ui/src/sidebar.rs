@@ -265,7 +265,7 @@ impl AppState {
         let name = label("Friends", &["kc-channel-name"]);
         name.set_hexpand(true);
         content.append(&name);
-        content.append(&badge(pending));
+        content.append(&row_badge(pending));
         friends.set_child(Some(&content));
         friends.set_height_request(40);
         let app = self.clone();
@@ -322,7 +322,7 @@ impl AppState {
                 ));
             }
             content.append(&text);
-            content.append(&badge(row.mentions));
+            content.append(&row_badge(row.mentions));
             // Room for the × laid over the row's end.
             let room = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             room.set_size_request(20, -1);
@@ -543,7 +543,7 @@ impl AppState {
         let name = label(&channel.display_name(), &["kc-channel-name"]);
         name.set_hexpand(true);
         content.append(&name);
-        content.append(&badge(row.mentions));
+        content.append(&row_badge(row.mentions));
         button.set_child(Some(&content));
 
         let voice = is_voice_only(channel);
@@ -1000,4 +1000,12 @@ pub(crate) fn channel_glyph(channel: &Channel) -> gtk::Widget {
             glyph.upcast()
         }
     }
+}
+
+/// A mention or request count at the end of a row, centred on it (the
+/// plain badge sits in a corner, as on the server icons).
+fn row_badge(count: u32) -> gtk::Label {
+    let badge = badge(count);
+    badge.set_valign(gtk::Align::Center);
+    badge
 }

@@ -169,7 +169,9 @@ impl Session {
             guilds: Vec::new(),
             selected_guild: None,
             selected_channel: None,
-            dm_mode: false,
+            // Home (the friends page) from the start, not an empty server
+            // view while Discord connects.
+            dm_mode: true,
             last_typing: None,
             slowmode_until: HashMap::new(),
             fetched: HashSet::new(),
