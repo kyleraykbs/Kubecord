@@ -647,7 +647,18 @@ impl AppState {
         view.add_css_class("kc-rich");
         let links: Rc<Links> = Rc::default();
         let pieces = Rc::new(pieces);
-        self.fill_emoji_text(&view, &pieces, resolver, false, &links);
+        let emoji_texts: Rc<EmojiTexts> = Rc::default();
+        self.fill_emoji_text(&view, &pieces, resolver, false, &links, &emoji_texts);
+        // Copying gives each emoji image as text (the emoji, or `:name:`),
+        // not the blank a text view gives an embedded widget.
+        let texts = emoji_texts.clone();
+        view.connect_copy_clipboard(move |view| {
+            view.stop_signal_emission_by_name("copy-clipboard");
+            let buffer = view.buffer();
+            if let Some((start, end)) = buffer.selection_bounds() {
+                view.clipboard().set_text(&text_with_emoji(&start, &end, &texts));
+            }
+        });
 
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_PRIMARY);
@@ -668,7 +679,7 @@ impl AppState {
                 app.with_session(|session| {
                     session.store.read(|state| {
                         let resolver = StateResolver { state, guild };
-                        app.fill_emoji_text(&view, &pieces, &resolver, true, &target);
+                        app.fill_emoji_text(&view, &pieces, &resolver, true, &target, &emoji_texts);
                     })
                 });
             } else {
@@ -724,9 +735,11 @@ impl AppState {
         resolver: &StateResolver,
         revealed: bool,
         links: &Links,
+        emoji_texts: &EmojiTexts,
     ) {
         let buffer = view.buffer();
         buffer.set_text("");
+        emoji_texts.borrow_mut().clear();
         let table = buffer.tag_table();
         for (tag, _) in links.borrow_mut().drain(..) {
             table.remove(&tag);
@@ -739,10 +752,11 @@ impl AppState {
                 run.clear();
             }
         };
-        let place = |run: &mut Vec<Piece>, image: &gtk::Image| {
+        let place = |run: &mut Vec<Piece>, image: &gtk::Image, text: String| {
             flush(run);
             let anchor = buffer.create_child_anchor(&mut buffer.end_iter());
             view.add_child_at_anchor(image, &anchor);
+            emoji_texts.borrow_mut().push((anchor, text));
         };
         for piece in pieces {
             match piece {
@@ -752,7 +766,7 @@ impl AppState {
                     image.set_tooltip_text(Some(&format!(":{name}:")));
                     self.images
                         .set_image(&image, &cdn::emoji(*id, false, INLINE_EMOJI as u32 * 2));
-                    place(&mut run, &image);
+                    place(&mut run, &image, format!(":{name}:"));
                 }
                 // Code keeps its characters; a hidden spoiler keeps its
                 // emoji under the cover too.
@@ -763,7 +777,7 @@ impl AppState {
                         match segment {
                             Segment::Emoji(emoji) => {
                                 match crate::discord_emoji::image(&emoji, INLINE_EMOJI) {
-                                    Some(image) => place(&mut run, &image),
+                                    Some(image) => place(&mut run, &image, emoji.clone()),
                                     None => run.push(Piece::Text {
                                         text: emoji,
                                         style: style.clone(),
@@ -1762,5 +1776,57 @@ mod link_media_tests {
             "https://cdn.discordapp.com/attachments/1/2/w.gif",
             "https://cdn.discordapp.com/attachments/1/9/w.gif"
         ));
+    }
+}
+
+/// The text each emoji image in an emoji text view stands for: the emoji
+/// itself, or `:name:` for a custom one.
+pub(crate) type EmojiTexts = RefCell<Vec<(gtk::TextChildAnchor, String)>>;
+
+/// The text from `start` to `end`, each emoji image given as its text.
+pub(crate) fn text_with_emoji(start: &gtk::TextIter, end: &gtk::TextIter, texts: &EmojiTexts) -> String {
+    let texts = texts.borrow();
+    let mut out = String::new();
+    let mut at = *start;
+    while at < *end {
+        match at.child_anchor() {
+            Some(anchor) => {
+                if let Some((_, text)) = texts.iter().find(|(known, _)| *known == anchor) {
+                    out.push_str(text);
+                }
+            }
+            None => out.push(at.char()),
+        }
+        if !at.forward_char() {
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod emoji_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copied_text_gives_each_emoji_image_its_text() {
+        // Needs a display (skipped in a sandboxed build).
+        if gtk::init().is_err() {
+            return;
+        }
+        let buffer = gtk::TextBuffer::new(None);
+        let texts: EmojiTexts = RefCell::default();
+        buffer.insert(&mut buffer.end_iter(), "nice ");
+        let thumbs = buffer.create_child_anchor(&mut buffer.end_iter());
+        texts.borrow_mut().push((thumbs, "👍🏽".to_owned()));
+        buffer.insert(&mut buffer.end_iter(), " and ");
+        let blob = buffer.create_child_anchor(&mut buffer.end_iter());
+        texts.borrow_mut().push((blob, ":blob:".to_owned()));
+        buffer.insert(&mut buffer.end_iter(), "!");
+        let (start, end) = buffer.bounds();
+        assert_eq!(text_with_emoji(&start, &end, &texts), "nice 👍🏽 and :blob:!");
+        // Part of it: from inside "and" (each image counts as one position).
+        let from = buffer.iter_at_offset(8);
+        assert_eq!(text_with_emoji(&from, &end, &texts), "nd :blob:!");
     }
 }
