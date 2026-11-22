@@ -40,6 +40,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 webkit6 = { workspace = true, optional = true }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
+# Telling niri the window needs no backdrop behind it (see `decorations`):
+# GTK's own Wayland connection, and KDE's server-decoration protocol.
+gdk4-wayland = { version = "0.11", features = ["wayland_crate"] }
+wayland-client = "0.31"
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 
 [features]
 # Solve Discord's captchas in an embedded WebKitGTK view.

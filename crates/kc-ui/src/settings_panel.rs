@@ -1081,8 +1081,22 @@ impl AppState {
                 app.update_prefs(|prefs| prefs.background_opacity = value);
             }
         });
+        let workaround = adw::SwitchRow::new();
+        workaround.set_title("KDE Transparency Workaround");
+        workaround.set_subtitle(
+            "Tells the compositor it decorates the window, using KDE's decoration protocol. Fixes niri showing its border color through the whole background. Leave it off on KDE and sway, which would add a second title bar.",
+        );
+        workaround.set_subtitle_lines(0);
+        workaround.set_active(self.capture.borrow().kde_transparency_workaround);
+        let app = self.clone();
+        workaround.connect_active_notify(move |row| {
+            let on = row.is_active();
+            app.update_prefs(|prefs| prefs.kde_transparency_workaround = on);
+            crate::decorations::set_server_side(&app.window, on);
+        });
         window.add(&see_through);
         window.add(&opacity);
+        window.add(&workaround);
         page.append(&window);
 
         let text = adw::PreferencesGroup::new();

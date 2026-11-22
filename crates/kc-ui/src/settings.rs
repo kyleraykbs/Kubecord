@@ -198,6 +198,10 @@ pub struct CapturePreferences {
     pub transparent_background: bool,
     /// How opaque the background is while transparent, in percent (1-100).
     pub background_opacity: u8,
+    /// Tell the compositor it decorates the window (KDE's server-decoration
+    /// protocol), so niri draws no backdrop behind a see-through window.
+    /// Off by default: KWin and sway would add a second title bar.
+    pub kde_transparency_workaround: bool,
     /// What the message logger keeps, and for how long.
     pub logger: crate::logger::LoggerPrefs,
     /// Underline misspelled words in the message box. On by default.
@@ -328,6 +332,7 @@ impl Default for CapturePreferences {
             discord_emoji: true,
             transparent_background: false,
             background_opacity: 80,
+            kde_transparency_workaround: false,
             logger: crate::logger::LoggerPrefs::default(),
             noise_suppression: 0,
             echo_cancellation: false,

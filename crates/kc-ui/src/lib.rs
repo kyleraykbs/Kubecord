@@ -10,6 +10,7 @@ mod chat;
 mod components;
 mod composer;
 mod content;
+mod decorations;
 mod demo;
 mod discord_emoji;
 mod friends;

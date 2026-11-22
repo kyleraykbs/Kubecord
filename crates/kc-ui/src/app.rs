@@ -583,6 +583,9 @@ impl AppState {
         }
         let emoji = self.capture.borrow().discord_emoji;
         self.apply_discord_emoji(emoji);
+        // The KDE transparency workaround, if chosen.
+        crate::decorations::watch(&self.window);
+        crate::decorations::set_server_side(&self.window, self.capture.borrow().kde_transparency_workaround);
         // The message log drops what has expired, now and every hour.
         std::thread::spawn(crate::logger::prune);
         glib::timeout_add_seconds_local(60 * 60, || {
