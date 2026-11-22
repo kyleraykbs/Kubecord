@@ -926,6 +926,26 @@ impl AppState {
                     app.demo_share(folder);
                 });
             }
+            "uploads" => {
+                // Files attached to a message not yet sent: a picture, an
+                // animated GIF (KUBECORD_UPLOAD_GIF, a path) and a text file.
+                self.open_channel(general);
+                let mut files: Vec<std::path::PathBuf> = vec![
+                    "data/icons/kubecord.png".into(),
+                    "Cargo.toml".into(),
+                    "README.md".into(),
+                ];
+                if let Some(gif) = std::env::var_os("KUBECORD_UPLOAD_GIF") {
+                    files.insert(1, gif.into());
+                }
+                for path in files {
+                    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                    match std::fs::read(&path) {
+                        Ok(bytes) => self.add_upload(name, bytes),
+                        Err(error) => eprintln!("demo: could not read {}: {error}", path.display()),
+                    }
+                }
+            }
             "spelling" => {
                 // Right-click a misspelled word: its corrections, then Add to
                 // Dictionary.

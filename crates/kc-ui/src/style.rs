@@ -4,6 +4,15 @@
 use gtk::gdk;
 
 const CSS: &str = r#"
+/* A file attached to the message being written. */
+.kc-upload-card {
+    padding: 8px;
+}
+.kc-upload-preview {
+    border-radius: 6px;
+    background-color: alpha(currentColor, 0.06);
+}
+
 /* The slim bar across the top of the window, with the app's name. */
 headerbar.kc-title-bar {
     min-height: 40px;

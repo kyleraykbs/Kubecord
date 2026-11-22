@@ -375,7 +375,7 @@ async fn decode(bytes: Vec<u8>) -> Option<gdk::Texture> {
 /// GdkPixbuf, whose WebP loader is a separate package most systems lack.
 /// Discord and its GIF providers serve WebP for previews and video posters,
 /// so WebP is decoded here instead.
-fn decode_blocking(bytes: Vec<u8>) -> Option<gdk::Texture> {
+pub(crate) fn decode_blocking(bytes: Vec<u8>) -> Option<gdk::Texture> {
     if is_webp(&bytes) {
         return decode_webp(&bytes);
     }

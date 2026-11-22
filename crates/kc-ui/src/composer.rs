@@ -1,6 +1,8 @@
 //! The message composer: sending, replies, edits, uploads, typing
 //! notifications, the emoji and GIF pickers, and autocomplete.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +16,7 @@ use kc_state::ChannelType;
 use crate::app::TYPING_THROTTLE;
 use crate::session::{Command, Upload};
 use crate::shell::AppState;
-use crate::widgets::{clear_box, clear_list, icon_button, label, snippet};
+use crate::widgets::{clear_box, clear_list, label};
 
 /// Emoji size in the picker, when drawn in Discord's art.
 const PICKER_EMOJI_SIZE: i32 = 28;
@@ -1180,7 +1182,7 @@ impl AppState {
         }
     }
 
-    fn add_upload(self: &Rc<Self>, name: String, bytes: Vec<u8>) {
+    pub(crate) fn add_upload(self: &Rc<Self>, name: String, bytes: Vec<u8>) {
         let limit = self.upload_limit();
         if bytes.len() > limit {
             self.set_status(&format!(
@@ -1250,30 +1252,126 @@ impl AppState {
             .unwrap_or_default();
         self.upload_tray.set_visible(!uploads.is_empty());
         self.update_composer_corners();
+        // Previews of files no longer attached are dropped.
+        let keys: Vec<usize> = uploads.iter().map(preview_key).collect();
+        PREVIEWS.with_borrow_mut(|previews| previews.retain(|key, _| keys.contains(key)));
+        // Side by side, scrolling sideways when there are more than fit.
+        let cards = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+        // Exactly as tall as a card (left to measure itself, the scroller
+        // asked for twice that).
+        scroll.set_min_content_height(UPLOAD_CARD_HEIGHT);
+        scroll.set_propagate_natural_height(false);
+        scroll.set_hexpand(true);
+        scroll.set_vexpand(false);
+        cards.set_valign(gtk::Align::Start);
+        scroll.set_child(Some(&cards));
+        self.upload_tray.append(&scroll);
         for (index, upload) in uploads.iter().enumerate() {
-            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-            chip.add_css_class("card");
-            let name = label(&snippet(&upload.name, 28), &["caption"]);
-            name.set_margin_start(8);
-            name.set_tooltip_text(Some(&format!(
-                "{} ({})",
-                upload.name,
-                crate::markdown::format_size(upload.bytes.len() as u64)
-            )));
-            chip.append(&name);
-            let remove = icon_button("window-close-symbolic", "Remove");
-            let app = self.clone();
-            remove.connect_clicked(move |_| {
-                app.with_session_mut(|session| {
-                    if index < session.uploads.len() {
-                        session.uploads.remove(index);
-                    }
-                });
-                app.render_upload_tray();
-            });
-            chip.append(&remove);
-            self.upload_tray.append(&chip);
+            cards.append(&self.upload_card(index, upload));
         }
+    }
+
+    /// One attached file, as it will be sent: a picture's preview (a GIF
+    /// playing), or an icon for its kind, with its name and size.
+    fn upload_card(self: &Rc<Self>, index: usize, upload: &Upload) -> gtk::Box {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        card.add_css_class("card");
+        card.add_css_class("kc-upload-card");
+        card.set_size_request(UPLOAD_CARD, -1);
+        card.set_valign(gtk::Align::Start);
+        card.set_tooltip_text(Some(&upload.name));
+
+        let frame = gtk::Overlay::new();
+        let kind = upload_kind(&upload.name, &upload.bytes);
+        if kind == UploadKind::Picture {
+            let picture = gtk::Picture::new();
+            picture.set_content_fit(gtk::ContentFit::Cover);
+            picture.set_can_shrink(true);
+            picture.set_size_request(UPLOAD_CARD - 16, UPLOAD_CARD - 16);
+            picture.set_overflow(gtk::Overflow::Hidden);
+            picture.add_css_class("kc-upload-preview");
+            self.fill_upload_preview(&picture, upload);
+            frame.set_child(Some(&picture));
+        } else {
+            let icon = gtk::Image::from_icon_name(match kind {
+                UploadKind::Video => "video-x-generic",
+                UploadKind::Audio => "audio-x-generic",
+                _ => "text-x-generic",
+            });
+            icon.set_pixel_size(64);
+            icon.set_size_request(UPLOAD_CARD - 16, UPLOAD_CARD - 16);
+            icon.add_css_class("kc-upload-preview");
+            frame.set_child(Some(&icon));
+        }
+        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove.set_tooltip_text(Some("Remove"));
+        remove.add_css_class("osd");
+        remove.add_css_class("circular");
+        remove.set_halign(gtk::Align::End);
+        remove.set_valign(gtk::Align::Start);
+        remove.set_margin_top(4);
+        remove.set_margin_end(4);
+        let app = self.clone();
+        remove.connect_clicked(move |_| {
+            app.with_session_mut(|session| {
+                if index < session.uploads.len() {
+                    session.uploads.remove(index);
+                }
+            });
+            app.render_upload_tray();
+        });
+        frame.add_overlay(&remove);
+        card.append(&frame);
+
+        let name = label(&upload.name, &["caption"]);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        name.set_max_width_chars(1);
+        name.set_hexpand(true);
+        card.append(&name);
+        let size = label(
+            &crate::markdown::format_size(upload.bytes.len() as u64),
+            &["caption", "dim-label"],
+        );
+        card.append(&size);
+        card
+    }
+
+    /// Shows `upload`'s picture in `picture`: a GIF animated, anything else
+    /// scaled down, decoded away from the main thread (once per file).
+    fn fill_upload_preview(self: &Rc<Self>, picture: &gtk::Picture, upload: &Upload) {
+        if crate::animation::is_gif(&upload.bytes)
+            && let Some(animation) = crate::animation::decode(&upload.bytes)
+        {
+            crate::animation::GifPlayer::attach(picture, &animation);
+            return;
+        }
+        let key = preview_key(upload);
+        if let Some(texture) = PREVIEWS.with_borrow(|previews| previews.get(&key).cloned()) {
+            picture.set_paintable(Some(&texture));
+            return;
+        }
+        let bytes = upload.bytes.clone();
+        let target = picture.downgrade();
+        let shown = glib::SendWeakRef::from(target);
+        self.spawn(
+            async move {
+                tokio::task::spawn_blocking(move || upload_preview(&bytes))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+            move |_, texture| {
+                let Some(texture) = texture else {
+                    return;
+                };
+                PREVIEWS.with_borrow_mut(|previews| previews.insert(key, texture.clone()));
+                if let Some(picture) = shown.upgrade() {
+                    picture.set_paintable(Some(&texture));
+                }
+            },
+        );
     }
 
     // -- emoji picker ----------------------------------------------------
@@ -2544,6 +2642,78 @@ mod slowmode_tests {
         assert_eq!(slowmode_text(Duration::from_secs(3600)), "1h");
         assert_eq!(slowmode_text(Duration::from_secs(5400)), "1h 30m");
     }
+}
+
+/// The width of an attached file's card.
+const UPLOAD_CARD: i32 = 176;
+/// Its height: the preview, its name and size, and its padding (as
+/// measured).
+const UPLOAD_CARD_HEIGHT: i32 = 217;
+/// The longest side of an attached picture's preview, in pixels.
+const PREVIEW_SIZE: i32 = 320;
+
+thread_local! {
+    /// Attached pictures' previews, by file (the address of its bytes).
+    static PREVIEWS: RefCell<HashMap<usize, gtk::gdk::Texture>> = RefCell::new(HashMap::new());
+}
+
+fn preview_key(upload: &Upload) -> usize {
+    Arc::as_ptr(&upload.bytes) as usize
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadKind {
+    Picture,
+    Video,
+    Audio,
+    Other,
+}
+
+/// What an attached file is, by its name (or its first bytes).
+fn upload_kind(name: &str, bytes: &[u8]) -> UploadKind {
+    let extension = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
+    match extension.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif" | "tif" | "tiff" => UploadKind::Picture,
+        "mp4" | "webm" | "mov" | "mkv" | "avi" | "m4v" => UploadKind::Video,
+        "mp3" | "ogg" | "opus" | "wav" | "flac" | "m4a" | "aac" => UploadKind::Audio,
+        _ if bytes.starts_with(&[0x89, b'P', b'N', b'G']) || bytes.starts_with(&[0xff, 0xd8, 0xff]) => {
+            UploadKind::Picture
+        }
+        _ => UploadKind::Other,
+    }
+}
+
+/// A picture's preview, at most [`PREVIEW_SIZE`] on its longer side (a
+/// full-size photo would hold its whole size in memory just to be shown
+/// small). Blocking: run away from the main thread.
+fn upload_preview(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
+    use gtk::gdk_pixbuf::Pixbuf;
+    let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
+    let Ok(pixbuf) = Pixbuf::from_stream_at_scale(
+        &stream,
+        PREVIEW_SIZE,
+        PREVIEW_SIZE,
+        true,
+        gtk::gio::Cancellable::NONE,
+    ) else {
+        // WebP and others GdkPixbuf cannot read.
+        return crate::images::decode_blocking(bytes.to_vec());
+    };
+    let format = if pixbuf.has_alpha() {
+        gtk::gdk::MemoryFormat::R8g8b8a8
+    } else {
+        gtk::gdk::MemoryFormat::R8g8b8
+    };
+    Some(
+        gtk::gdk::MemoryTexture::new(
+            pixbuf.width(),
+            pixbuf.height(),
+            format,
+            &pixbuf.read_pixel_bytes(),
+            pixbuf.rowstride() as usize,
+        )
+        .upcast(),
+    )
 }
 
 #[cfg(test)]
