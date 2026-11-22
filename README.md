@@ -255,7 +255,7 @@ ban is unlikely; friending people is the most likely place to get one.
 ### Voice and video
 - **Voice calls**: send and receive audio, and see who's talking.
 - **Per-user volume**: turn anyone up or down, boosted up to 5×.
-- **Call sounds**: Discord's own join, leave, mute and deafen sounds.
+- **Call sounds**: Discord's own join, leave, mute and deafen sounds with individual volume adjustment.
 
   <img src="https://github.com/user-attachments/assets/e46c6fed-7ef3-4d15-b2d2-158508b4c13e" width="653" alt="A voice call">
 
