@@ -835,7 +835,6 @@ impl AppState {
     pub(crate) fn start_existing(self: &Rc<Self>) {
         let accounts = self.model.borrow().accounts.accounts().to_vec();
         if accounts.is_empty() {
-            self.account_button.set_visible(false);
             self.show_login();
             return;
         }
@@ -967,7 +966,6 @@ impl AppState {
                 }
                 None => {
                     // No accounts left running: go back to the login page.
-                    self.account_button.set_visible(false);
                     self.show_login();
                 }
             }
