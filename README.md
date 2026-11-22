@@ -13,6 +13,8 @@ Native GTK4/libadwaita. No Electron, no webview, no patched official client.
 ![GTK4](https://img.shields.io/badge/GTK-4%20%2B%20libadwaita-4a86cf.svg)
 ![Nix](https://img.shields.io/badge/built%20with-Nix-5277c3.svg)
 
+<img src="https://github.com/user-attachments/assets/1feb8354-b94a-44fa-888f-257a3d137bf9" width="820" alt="Kubecord: a server's channels, a chat and the member list">
+
 </div>
 
 ---
@@ -103,14 +105,22 @@ ban is unlikely; friending people is the most likely place to get one.
 - Send and receive audio, see who's talking
 - Per-user volume, boosted up to 5×
 - Discord's own join, leave, mute and deafen sounds
+
+  <img src="https://github.com/user-attachments/assets/e46c6fed-7ef3-4d15-b2d2-158508b4c13e" width="653" alt="A voice call">
+
 - Screen share and webcam, **with audio**: the whole desktop, one window, or a
   dummy node for any patchbay
+
+  <img src="https://github.com/user-attachments/assets/9b550203-9f33-472f-8f1e-3b2de301846b" width="360" alt="Screen-share audio options">
+
 - The screen-share preview shows the *encoded* stream: what you see is what
   others see (barring connection stutters)
 - Debug details for streams you share *and* streams you watch
 - MANY fine-tunable settings (you're in full control)
 - DM and group DM calls, showing when the other side is being rung
 - Noise suppression, echo cancellation, automatic gain and input sensitivity
+
+  <img src="https://github.com/user-attachments/assets/74427ba5-3679-47b1-b78c-f0f7fddfb376" width="420" alt="Voice settings">
 
 ### Chat
 - Send, edit, reply, react and pin
