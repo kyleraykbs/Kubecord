@@ -43,6 +43,8 @@ Pick the one for your system and open it for the steps.
 | --- | --- |
 | **Flatpak** | Any distribution |
 | **AUR** (`kubecord-git`) | Arch Linux and its derivatives |
+| **.deb** | Debian 13, Ubuntu 25.04 and newer |
+| **AppImage** | Ubuntu 26.04, Fedora 44, Arch and newer |
 | **Nix** | NixOS, or Nix on any distribution |
 | **From source** | Anything else |
 
@@ -51,20 +53,25 @@ Pick the one for your system and open it for the steps.
 
 <br>
 
-Kubecord isn't on Flathub yet. Until it is, build and install it from this
-repository with `flatpak-builder`:
+Install it from Kubecord's own Flatpak repository, which also adds the
+repository so `flatpak update` keeps it current:
+
+```sh
+flatpak install --user https://kyleraykbs.github.io/Kubecord/io.github.kyleraykbs.Kubecord.flatpakref
+```
+
+Or add the repository first, then install:
 
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-git clone https://github.com/kyleraykbs/Kubecord.git
-cd Kubecord/flatpak
-flatpak-builder --user --install-deps-from=flathub --install --force-clean build-dir io.github.kyleraykbs.Kubecord.json
-flatpak run io.github.kyleraykbs.Kubecord
+flatpak remote-add --user --if-not-exists kubecord https://kyleraykbs.github.io/Kubecord/kubecord.flatpakrepo
+flatpak install --user kubecord io.github.kyleraykbs.Kubecord
 ```
 
-The first build downloads the GNOME runtime and SDK (a few GB) and compiles
-Kubecord, so it takes a while. To update, `git pull` and run the
-`flatpak-builder` line again.
+Updates are signed with the repository's key. Each
+[release](https://github.com/kyleraykbs/Kubecord/releases) also has a
+`Kubecord.flatpak` file you can install directly with
+`flatpak install --user Kubecord.flatpak` (without automatic updates).
 
 </details>
 
@@ -86,6 +93,42 @@ git clone https://github.com/kyleraykbs/Kubecord.git
 cd Kubecord/packaging/aur/kubecord-git
 makepkg -si
 ```
+
+</details>
+
+<details>
+<summary><b>.deb</b>: Debian 13, Ubuntu 25.04 and newer</summary>
+
+<br>
+
+Download `kubecord_*_amd64.deb` from the latest
+[release](https://github.com/kyleraykbs/Kubecord/releases) and install it,
+which also pulls in the GStreamer plugins it needs:
+
+```sh
+sudo apt install ./kubecord_*_amd64.deb
+```
+
+On niri and other compositors like it, Debian 13's own GTK crashes at start;
+use the Flatpak there.
+
+</details>
+
+<details>
+<summary><b>AppImage</b>: Ubuntu 26.04, Fedora 44, Arch and newer</summary>
+
+<br>
+
+Download `Kubecord-x86_64.AppImage` from the latest
+[release](https://github.com/kyleraykbs/Kubecord/releases), then:
+
+```sh
+chmod +x Kubecord-x86_64.AppImage
+./Kubecord-x86_64.AppImage
+```
+
+The AppImage has no captcha view: if Discord asks for a captcha when you log
+in with email and password, log in with a token instead.
 
 </details>
 
@@ -301,7 +344,10 @@ flake only sees tracked files.
 
 Packaging lives in `flatpak/` (the Flatpak manifest; run
 `python3 flatpak/cargo-sources.py` after changing `Cargo.lock`) and
-`packaging/aur/` (the AUR PKGBUILD).
+`packaging/` (the AUR PKGBUILD, the .deb and AppImage build scripts, and the
+Flatpak repository's files). Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which builds the .deb, AppImage and Flatpak,
+publishes the Flatpak repository on GitHub Pages and makes a release.
 
 ## Files
 
