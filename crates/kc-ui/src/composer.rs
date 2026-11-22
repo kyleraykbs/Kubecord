@@ -643,6 +643,8 @@ impl AppState {
     /// Updates the composer for the selected channel: placeholder text,
     /// whether sending is allowed, and the reply/edit bar.
     pub(crate) fn render_composer(self: &Rc<Self>) {
+        // The right channel's draft in the box (when the channel changed).
+        self.sync_draft();
         let info = self.with_session(|session| {
             let channel_id = session.selected_channel?;
             session.store.read(|state| {
@@ -724,6 +726,12 @@ impl AppState {
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
         self.update_length_indicator(&text);
+        self.note_draft_changed();
+        if crate::drafts::loading() {
+            // A draft put back, not typing: draw its emoji, nothing else.
+            self.queue_composer_emoji();
+            return;
+        }
         self.queue_composer_emoji();
         self.update_completion();
         self.recheck_spelling();
@@ -981,6 +989,11 @@ impl AppState {
         let mention_reply = self.context_ping.is_active();
         self.set_composer_text("");
         TOKENS.with_borrow_mut(Vec::clear);
+        if editing.is_some() {
+            self.restore_draft_after_edit();
+        } else {
+            self.clear_draft();
+        }
         self.with_session_mut(|session| {
             session.editing = None;
             session.reply_to = None;
@@ -1240,6 +1253,7 @@ impl AppState {
             Some(content)
         });
         if let Some(Some(content)) = content {
+            self.set_draft_aside();
             self.set_composer_text(&content);
             self.render_composer();
             self.composer.grab_focus();
@@ -1276,6 +1290,7 @@ impl AppState {
             .unwrap_or(false);
         if was_editing {
             self.set_composer_text("");
+            self.restore_draft_after_edit();
         }
         self.render_composer();
     }
@@ -2923,6 +2938,16 @@ type NextPart = Box<dyn FnOnce(&Rc<AppState>) + Send>;
 pub(crate) struct Then {
     next: NextPart,
     unsent: String,
+}
+
+/// The mentions and emoji in the draft, with what they stand for.
+pub(crate) fn composer_tokens() -> Vec<(String, String)> {
+    TOKENS.with_borrow(Clone::clone)
+}
+
+/// Puts back a draft's mentions and emoji.
+pub(crate) fn set_composer_tokens(tokens: Vec<(String, String)>) {
+    TOKENS.with_borrow_mut(|current| *current = tokens);
 }
 
 /// The longest message Discord takes: 2000 characters, 4000 with Nitro.

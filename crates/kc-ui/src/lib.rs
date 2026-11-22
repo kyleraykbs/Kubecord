@@ -14,6 +14,7 @@ mod declared;
 mod decorations;
 mod demo;
 mod discord_emoji;
+mod drafts;
 mod friends;
 mod gif_favorites;
 mod group_dm;

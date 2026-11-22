@@ -694,6 +694,8 @@ impl AppState {
         let app = self.clone();
         let leaving = Rc::new(std::cell::Cell::new(false));
         self.window.connect_close_request(move |window| {
+            // What was being typed, written before anything else.
+            crate::drafts::save_now();
             app.close_popouts();
             app.close_aux_windows();
             if leaving.get() {

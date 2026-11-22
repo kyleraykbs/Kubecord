@@ -1159,6 +1159,30 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "drafts" => {
+                // A draft per channel: typed in #general, then #topic-00,
+                // then back. KUBECORD_DRAFTS_CHECK only opens #general (a
+                // restart: its draft should be there).
+                self.open_channel(general);
+                let topic = channel(602);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    if std::env::var_os("KUBECORD_DRAFTS_CHECK").is_some() {
+                        eprintln!("demo: after a restart, #general's box: {:?}", app.composer_text());
+                        return;
+                    }
+                    app.set_composer_text("half a thought for general");
+                    let Some(topic) = topic else { return };
+                    let general = app.with_session(|session| session.store.read(|state| state.channels.get(&Snowflake::new(GENERAL)).cloned())).flatten();
+                    app.open_channel(topic);
+                    eprintln!("demo: in #topic-00 the box: {:?}", app.composer_text());
+                    app.set_composer_text("something else for topic");
+                    if let Some(general) = general {
+                        app.open_channel(general);
+                    }
+                    eprintln!("demo: back in #general the box: {:?}", app.composer_text());
+                });
+            }
             "long-message" => {
                 // A draft near the limit, then one far over it (the counter
                 // shows the parts), then sent: offline, the first part fails
