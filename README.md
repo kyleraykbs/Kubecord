@@ -252,4 +252,11 @@ data/               desktop entry and icons
 ```
 
 ## License
-MIT, see [LICENSE](LICENSE).
+GPL-3.0-only, see [LICENSE](LICENSE). Copyright (c) 2026 kyleraykbs.
+
+Kubecord is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, version 3. It is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+more details.
