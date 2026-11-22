@@ -92,7 +92,12 @@ fn watch_scroller(picture: &gtk::Picture) {
     }
 }
 
-/// [`refresh_all`] on the next idle, once however many scroll steps ask.
+/// [`refresh_all`] once the next frame is laid out, once however many ask.
+/// Positions mean something only after layout: a GIF that just arrived (or
+/// whose row just grew) measured straight away can look off screen, and
+/// stayed paused until something else (a channel switch) asked again. So it
+/// waits for the next frame and measures on the idle after it, like the
+/// looping videos (see `player::queue_update`).
 fn queue_refresh() {
     thread_local! {
         static QUEUED: Cell<bool> = const { Cell::new(false) };
@@ -100,10 +105,29 @@ fn queue_refresh() {
     if QUEUED.replace(true) {
         return;
     }
-    glib::idle_add_local_once(|| {
-        QUEUED.set(false);
-        refresh_all();
+    let measure = || {
+        glib::idle_add_local_once(|| {
+            QUEUED.set(false);
+            refresh_all();
+        });
+    };
+    // Any shown GIF's frame clock will do: they share the window's.
+    let shown = PLAYERS.with_borrow(|players| {
+        players
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter_map(|player| player.picture.upgrade())
+            .find(|picture| picture.is_mapped())
     });
+    match shown {
+        Some(picture) => {
+            picture.add_tick_callback(move |_, _| {
+                measure();
+                glib::ControlFlow::Break
+            });
+        }
+        None => measure(),
+    }
 }
 
 /// Called when one of the app's windows gains or loses focus; pauses or
@@ -213,6 +237,7 @@ impl GifPlayer {
             if let Some(player) = weak.upgrade() {
                 player.refresh();
             }
+            queue_refresh();
         });
         let weak = Rc::downgrade(&player);
         picture.connect_unmap(move |_| {
@@ -228,6 +253,8 @@ impl GifPlayer {
         });
         watch_scroller(picture);
         player.refresh();
+        // And again once laid out (just added, it may not be placed yet).
+        queue_refresh();
         Some(player)
     }
 

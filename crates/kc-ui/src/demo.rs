@@ -1137,6 +1137,25 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "gif-sent" => {
+                // A GIF link sent from the picker, as it arrives: the bare
+                // link first, then Discord's update adding the GIF's embed. It
+                // must start playing at the bottom without a channel switch.
+                self.open_channel(general);
+                let id = id_at(0, 58);
+                let full = gif_link_message(id, ME);
+                let mut bare = full.clone();
+                bare["embeds"] = json!([]);
+                let store = store.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                    store.apply("MESSAGE_CREATE", &bare);
+                    eprintln!("demo: gif sent");
+                    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                        store.apply("MESSAGE_UPDATE", &full);
+                        eprintln!("demo: embed arrived");
+                    });
+                });
+            }
             "gif-many" => {
                 // Six GIF messages, more than fit: only those in view play,
                 // and scrolling up starts the ones above.
