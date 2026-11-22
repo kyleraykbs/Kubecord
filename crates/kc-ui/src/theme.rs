@@ -36,6 +36,8 @@ thread_local! {
     static PALETTE_CSS: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
     /// The stylesheet that puts gg sans on every widget, while it is on.
     static FONT_CSS: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    /// The see-through background, while on.
+    static TRANSPARENCY_CSS: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
     /// gg sans has been registered with Pango this run (it cannot be taken
     /// back out; turning the setting off only stops using it).
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
@@ -59,6 +61,40 @@ pub(crate) fn apply_color_scheme(prefs: &CapturePreferences) {
     }
     let palette = (!prefs.follow_system_scheme).then(|| discord_palette(prefs.dark_scheme));
     set_palette_css(palette.as_deref());
+    let see_through = prefs
+        .transparent_background
+        .then(|| transparency_css(prefs.background_opacity));
+    set_css(&TRANSPARENCY_CSS, see_through.as_deref(), 3);
+}
+
+/// The main window's surfaces at `opacity` percent (1-100), the desktop
+/// showing through the rest. Each pane is drawn once, over a clear window,
+/// so the panes keep their own shades rather than stacking up.
+pub(crate) fn transparency_css(opacity: u8) -> String {
+    let opacity = opacity.clamp(1, 100);
+    let see = |color: &str| format!("color-mix(in srgb, {color} {opacity}%, transparent)");
+    format!(
+        "window.kc-main-window {{ background-color: transparent; }}
+window.kc-main-window .kc-title-bar {{ background-color: {header}; box-shadow: none; }}
+window.kc-main-window .kc-rail {{ background-color: {rail}; }}
+window.kc-main-window .kc-pane-sidebar {{ background-color: {sidebar}; }}
+window.kc-main-window .kc-pane-chat {{ background-color: {chat}; }}
+window.kc-main-window .kc-pane-members {{ background-color: {sidebar}; }}
+window.kc-main-window .kc-pane-sidebar headerbar,
+window.kc-main-window .kc-pane-chat headerbar,
+window.kc-main-window .kc-pane-sidebar toolbarview,
+window.kc-main-window .kc-pane-chat toolbarview,
+window.kc-main-window .kc-pane-chat .sidebar-pane,
+window.kc-main-window .kc-pane-chat .content-pane,
+window.kc-main-window .kc-pane-sidebar list,
+window.kc-main-window .kc-pane-chat list,
+window.kc-main-window .kc-pane-members list {{ background-color: transparent; box-shadow: none; }}
+",
+        header = see("@headerbar_bg_color"),
+        rail = see("color-mix(in srgb, @window_bg_color 92%, black)"),
+        sidebar = see("@sidebar_bg_color"),
+        chat = see("@window_bg_color"),
+    )
 }
 
 /// Discord's colors, as libadwaita's palette variables (so every widget
@@ -172,10 +208,20 @@ pub(crate) fn discord_palette(dark: bool) -> String {
 /// Installs (or, with `None`, removes) the palette stylesheet. It ranks just
 /// above kubecord's own stylesheet so its rail and message-box colors win.
 fn set_palette_css(css: Option<&str>) {
+    set_css(&PALETTE_CSS, css, 1);
+}
+
+/// Installs `css` in `slot` (replacing what was there; `None` removes it),
+/// `rank` above kubecord's own stylesheet.
+fn set_css(
+    slot: &'static std::thread::LocalKey<RefCell<Option<gtk::CssProvider>>>,
+    css: Option<&str>,
+    rank: u32,
+) {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
     };
-    PALETTE_CSS.with_borrow_mut(|slot| {
+    slot.with_borrow_mut(|slot| {
         if let Some(old) = slot.take() {
             gtk::style_context_remove_provider_for_display(&display, &old);
         }
@@ -185,7 +231,7 @@ fn set_palette_css(css: Option<&str>) {
             gtk::style_context_add_provider_for_display(
                 &display,
                 &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + rank,
             );
             *slot = Some(provider);
         }

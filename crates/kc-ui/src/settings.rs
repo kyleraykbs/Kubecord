@@ -193,6 +193,11 @@ pub struct CapturePreferences {
     pub discord_font: bool,
     /// Draw emoji with Twemoji, as Discord does. On by default.
     pub discord_emoji: bool,
+    /// See through the main window's background to the desktop behind it.
+    /// Off by default.
+    pub transparent_background: bool,
+    /// How opaque the background is while transparent, in percent (1-100).
+    pub background_opacity: u8,
     /// What the message logger keeps, and for how long.
     pub logger: crate::logger::LoggerPrefs,
     /// Underline misspelled words in the message box. On by default.
@@ -321,6 +326,8 @@ impl Default for CapturePreferences {
             dark_scheme: true,
             discord_font: false,
             discord_emoji: true,
+            transparent_background: false,
+            background_opacity: 80,
             logger: crate::logger::LoggerPrefs::default(),
             noise_suppression: 0,
             echo_cancellation: false,

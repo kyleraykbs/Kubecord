@@ -1052,6 +1052,39 @@ impl AppState {
         colors.add(&scheme);
         page.append(&colors);
 
+        // The desktop behind the window, showing through its background.
+        let window = adw::PreferencesGroup::new();
+        window.set_title("Window");
+        let see_through = adw::SwitchRow::new();
+        see_through.set_title("Transparent Background");
+        see_through.set_subtitle("Let the desktop behind the window show through its background.");
+        see_through.set_subtitle_lines(0);
+        see_through.set_active(self.capture.borrow().transparent_background);
+        let opacity = adw::SpinRow::with_range(1.0, 100.0, 1.0);
+        opacity.set_title("Background Opacity");
+        opacity.set_subtitle("Percent: 100 is solid, lower lets more of the desktop through.");
+        opacity.set_subtitle_lines(0);
+        opacity.set_digits(0);
+        opacity.set_value(f64::from(self.capture.borrow().background_opacity.clamp(1, 100)));
+        opacity.set_sensitive(self.capture.borrow().transparent_background);
+        let app = self.clone();
+        let amount = opacity.clone();
+        see_through.connect_active_notify(move |row| {
+            let on = row.is_active();
+            amount.set_sensitive(on);
+            app.update_prefs(|prefs| prefs.transparent_background = on);
+        });
+        let app = self.clone();
+        opacity.connect_value_notify(move |row| {
+            let value = row.value().round().clamp(1.0, 100.0) as u8;
+            if app.capture.borrow().background_opacity != value {
+                app.update_prefs(|prefs| prefs.background_opacity = value);
+            }
+        });
+        window.add(&see_through);
+        window.add(&opacity);
+        page.append(&window);
+
         let text = adw::PreferencesGroup::new();
         text.set_title("Text");
         let font = adw::SwitchRow::new();

@@ -398,6 +398,7 @@ impl AppState {
         sidebar_body.append(&user_bar);
 
         let channel_sidebar = adw::ToolbarView::new();
+        channel_sidebar.add_css_class("kc-pane-sidebar");
         channel_sidebar.add_top_bar(&sidebar_header);
         channel_sidebar.set_content(Some(&sidebar_body));
         // The paned below sets the width; the minimum keeps the user bar's
@@ -705,6 +706,7 @@ impl AppState {
         members_scroll.set_child(Some(&members_box));
 
         let members_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        members_panel.add_css_class("kc-pane-members");
         members_panel.append(&members_count_label);
         members_panel.append(&members_scroll);
 
@@ -730,6 +732,7 @@ impl AppState {
         content_stack.add_named(&friends_scroll, Some("friends"));
 
         let content = adw::ToolbarView::new();
+        content.add_css_class("kc-pane-chat");
         content.add_top_bar(&content_header);
         content.add_top_bar(&banner);
         content.set_content(Some(&content_stack));
@@ -770,6 +773,7 @@ impl AppState {
         page.set_child(Some(&stack));
         page.add_overlay(&notices);
         window.set_content(Some(&page));
+        window.add_css_class("kc-main-window");
         window.set_size_request(720, 420);
 
         let images = ImageCache::new(runtime.clone());
