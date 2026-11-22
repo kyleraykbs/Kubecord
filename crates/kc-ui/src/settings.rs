@@ -204,6 +204,9 @@ pub struct CapturePreferences {
     pub kde_transparency_workaround: bool,
     /// What the message logger keeps, and for how long.
     pub logger: crate::logger::LoggerPrefs,
+    /// The account shown when the app starts (by its user ID; the first
+    /// account when unset or no longer logged in).
+    pub default_account: Option<kc_core::Snowflake>,
     /// Underline misspelled words in the message box. On by default.
     #[serde(default = "default_true")]
     pub spellcheck: bool,
@@ -334,6 +337,7 @@ impl Default for CapturePreferences {
             background_opacity: 80,
             kde_transparency_workaround: false,
             logger: crate::logger::LoggerPrefs::default(),
+            default_account: None,
             noise_suppression: 0,
             echo_cancellation: false,
             auto_gain_control: false,

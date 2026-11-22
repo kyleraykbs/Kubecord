@@ -841,7 +841,9 @@ impl AppState {
         for account in &accounts {
             self.start_account(account.clone());
         }
-        let first = session::account_id(&accounts[0].token);
+        // The default account, if set and still logged in; else the first.
+        let shown = startup_account(&accounts, self.capture.borrow().default_account);
+        let first = session::account_id(&shown.token);
         self.model.borrow_mut().active = Some(first);
         self.stack.set_visible_child_name("chat");
         self.render_all();
@@ -1491,6 +1493,32 @@ impl AppState {
                 app.switch_account(id);
             });
             line.append(&button);
+
+            // A star: filled on the account shown at start; clicking sets
+            // it (or, on the default, clears it).
+            if let Some(user) = account.user_id {
+                let is_default = self.capture.borrow().default_account == Some(user);
+                let star = gtk::Button::from_icon_name(if is_default {
+                    "starred-symbolic"
+                } else {
+                    "non-starred-symbolic"
+                });
+                star.add_css_class("flat");
+                star.set_valign(gtk::Align::Center);
+                star.set_tooltip_text(Some(if is_default {
+                    "Default account (shown at start). Click to unset."
+                } else {
+                    "Set as default account (shown at start)"
+                }));
+                let app = self.clone();
+                star.connect_clicked(move |_| {
+                    app.update_prefs(|prefs| {
+                        prefs.default_account = if is_default { None } else { Some(user) };
+                    });
+                    app.render_account_controls();
+                });
+                line.append(&star);
+            }
 
             let log_out = gtk::Button::from_icon_name("system-log-out-symbolic");
             log_out.add_css_class("flat");
@@ -2173,5 +2201,34 @@ fn store_event_label(event: &StoreEvent) -> &'static str {
         StoreEvent::SettingsUpdated => "store:settings",
         StoreEvent::MemberListUpdated(_) => "store:member-list",
         StoreEvent::BansUpdated(_) => "store:bans",
+    }
+}
+
+/// The account shown at start: the default one if it is still logged in,
+/// else the first. `accounts` must not be empty.
+fn startup_account(accounts: &[Account], default: Option<Snowflake>) -> &Account {
+    default
+        .and_then(|user| accounts.iter().find(|account| account.user_id == Some(user)))
+        .unwrap_or(&accounts[0])
+}
+
+#[cfg(test)]
+mod default_account_tests {
+    use super::*;
+
+    fn account(user: Option<u64>, token: &str) -> Account {
+        Account {
+            user_id: user.map(Snowflake::new),
+            token: kc_core::Token::new(token.to_owned()),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn the_default_account_is_shown_first_when_still_logged_in() {
+        let accounts = [account(Some(1), "a"), account(Some(2), "b"), account(None, "c")];
+        assert_eq!(startup_account(&accounts, Some(Snowflake::new(2))).user_id, Some(Snowflake::new(2)));
+        assert_eq!(startup_account(&accounts, Some(Snowflake::new(9))).user_id, Some(Snowflake::new(1)));
+        assert_eq!(startup_account(&accounts, None).user_id, Some(Snowflake::new(1)));
     }
 }
