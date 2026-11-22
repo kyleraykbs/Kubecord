@@ -1189,6 +1189,15 @@ impl AppState {
                     app.chat.borrow_mut().channel = None;
                     app.render_messages();
                     eprintln!("demo: jumped: {}", app.jump_to_message(Snowflake::new(target)));
+                    // KUBECORD_JUMP_REBUILD: its row is rebuilt mid-highlight,
+                    // as older messages going in above it do.
+                    if std::env::var_os("KUBECORD_JUMP_REBUILD").is_some() {
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                            app.message_updated(Snowflake::new(GENERAL), Snowflake::new(target));
+                            eprintln!("demo: target row rebuilt");
+                        });
+                    }
                     for ms in [300u64, 1500, 3000, 5000] {
                         let app = app.clone();
                         glib::timeout_add_local_once(Duration::from_millis(ms), move || {

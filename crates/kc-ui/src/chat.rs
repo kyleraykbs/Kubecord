@@ -73,36 +73,59 @@ pub(crate) struct ChatView {
     pending_jump: Option<(Snowflake, Snowflake)>,
     /// The message just jumped to, held in the middle of the view until
     /// this time while the rows around it are still taking their heights
-    /// (images, embeds, wrapped text), or until the user scrolls.
-    pin: Option<(glib::WeakRef<gtk::ListBoxRow>, std::time::Instant)>,
+    /// (images, embeds, wrapped text) and older messages load above it, or
+    /// until the user scrolls. By id: its row can be rebuilt meanwhile.
+    pin: Option<(Snowflake, std::time::Instant)>,
+    /// The message jumped to and when its highlight began; a row rebuilt for
+    /// it meanwhile takes the highlight up where it was.
+    flash: Option<(Snowflake, std::time::Instant)>,
 }
 
 /// How long a message jumped to is held in the middle of the view.
 const PIN_TIME: std::time::Duration = std::time::Duration::from_secs(4);
+/// A message jumped to within this many rows of the oldest one loaded has
+/// too little above it to be centred: older messages are fetched at once.
+const NEAR_TOP_ROWS: usize = 12;
 /// How long the highlight on a message jumped to stays full, before it fades
 /// (over the time in `.kc-flash-out`'s transition).
 const FLASH_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 const FLASH_FADE: std::time::Duration = std::time::Duration::from_millis(2000);
 
-/// Highlights a message jumped to: full for a moment, then fading out.
-fn flash(body: &gtk::Box) {
+/// Highlights a message jumped to, where it is in its course since
+/// `started`: full for a moment, then fading out. A row rebuilt mid-way picks
+/// it up where it was.
+fn show_flash(body: &gtk::Box, started: std::time::Instant) {
+    let elapsed = started.elapsed();
+    body.remove_css_class("kc-flash");
     body.remove_css_class("kc-flash-out");
-    body.add_css_class("kc-flash");
+    if elapsed >= FLASH_HOLD + FLASH_FADE {
+        return;
+    }
     let target = body.downgrade();
-    glib::timeout_add_local_once(FLASH_HOLD, move || {
-        let Some(body) = target.upgrade() else { return };
-        // `.kc-flash-out` carries the transition back to the normal colour.
-        body.add_css_class("kc-flash-out");
-        body.remove_css_class("kc-flash");
+    let clear_after = |body: &gtk::Box, left: std::time::Duration| {
         let target = body.downgrade();
-        glib::timeout_add_local_once(FLASH_FADE, move || {
+        glib::timeout_add_local_once(left, move || {
             if let Some(body) = target.upgrade()
                 && !body.has_css_class("kc-flash")
             {
                 body.remove_css_class("kc-flash-out");
             }
         });
-    });
+    };
+    if elapsed < FLASH_HOLD {
+        body.add_css_class("kc-flash");
+        glib::timeout_add_local_once(FLASH_HOLD - elapsed, move || {
+            let Some(body) = target.upgrade() else { return };
+            // `.kc-flash-out` carries the transition back to the normal colour.
+            body.add_css_class("kc-flash-out");
+            body.remove_css_class("kc-flash");
+            clear_after(&body, FLASH_FADE);
+        });
+    } else {
+        // Rebuilt during the fade: shown as already faded.
+        body.add_css_class("kc-flash-out");
+        clear_after(body, FLASH_HOLD + FLASH_FADE - elapsed);
+    }
 }
 
 /// A small flat text button used for inline actions like Retry / Delete.
@@ -322,10 +345,14 @@ impl AppState {
         let app = self.clone();
         glib::idle_add_local_once(move || {
             app.chat.borrow_mut().settle_queued = false;
-            // A message jumped to stays in the middle while heights settle.
-            let pinned = app.chat.borrow().pin.as_ref().and_then(|(row, until)| {
-                (std::time::Instant::now() < *until).then(|| row.upgrade()).flatten()
-            });
+            // A message jumped to stays in the middle while heights settle
+            // (its row found again by id: it may have been rebuilt).
+            let pinned = {
+                let chat = app.chat.borrow();
+                chat.pin
+                    .filter(|(_, until)| std::time::Instant::now() < *until)
+                    .and_then(|(id, _)| chat.rows.iter().find(|entry| entry.id == id).map(|entry| entry.row.clone()))
+            };
             if let Some(row) = pinned {
                 app.chat.borrow_mut().restore = None;
                 app.scroll_row_to_centre(&row);
@@ -608,6 +635,12 @@ impl AppState {
         let divider = previous.is_some_and(|previous| day_key(&previous.timestamp) != day);
         let (row, body) = self.message_row(message, headed, divider, state);
         self.mark_share_row(&body, message.id);
+        // Rebuilt while highlighted after a jump: keep the highlight.
+        if let Some((id, started)) = self.chat.borrow().flash
+            && id == message.id
+        {
+            show_flash(&body, started);
+        }
         RowEntry {
             id: message.id,
             row,
@@ -899,16 +932,25 @@ impl AppState {
         let Some((row, body)) = found else {
             return false;
         };
-        {
+        let now = std::time::Instant::now();
+        let near_top = {
             let mut chat = self.chat.borrow_mut();
             chat.at_bottom = false;
             chat.restore = None;
             // Held in the middle while the rows around it settle.
-            chat.pin = Some((row.downgrade(), std::time::Instant::now() + PIN_TIME));
-        }
+            chat.pin = Some((message_id, now + PIN_TIME));
+            chat.flash = Some((message_id, now));
+            chat.rows.iter().position(|entry| entry.id == message_id).is_some_and(|index| index < NEAR_TOP_ROWS)
+        };
         self.centre_row(&row);
         self.update_present();
-        flash(&body);
+        show_flash(&body, now);
+        // Too few messages above it to centre it: fetch older ones now (the
+        // pin keeps it centred as they go in), rather than when a scroll
+        // happens to reach the top.
+        if near_top {
+            self.queue_load_older();
+        }
         true
     }
 
