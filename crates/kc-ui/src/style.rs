@@ -18,6 +18,19 @@ const CSS: &str = r#"
     background-color: alpha(@warning_color, 0.16);
 }
 
+/* Near or past the message length limit. */
+.kc-length {
+    color: @warning_color;
+    font-weight: 700;
+    padding: 0 6px;
+    margin: 0 2px 2px 0;
+    border-radius: 6px;
+    background-color: alpha(@window_bg_color, 0.85);
+}
+.kc-length.kc-length-over {
+    color: @error_color;
+}
+
 /* A file attached to the message being written. */
 .kc-upload-card {
     padding: 8px;

@@ -723,6 +723,7 @@ impl AppState {
         }
         let text = self.composer_text();
         self.composer_hint.set_visible(text.is_empty());
+        self.update_length_indicator(&text);
         self.queue_composer_emoji();
         self.update_completion();
         self.recheck_spelling();
@@ -819,8 +820,59 @@ impl AppState {
         });
     }
 
-    pub(crate) fn send_current(self: &Rc<Self>) {
-        let typed = self.composer_text();
+    /// The longest message this account can send.
+    fn message_limit(&self) -> usize {
+        // Nitro (type 2), not Classic or Basic, doubles it.
+        let nitro = self
+            .with_session(|session| session.user.as_ref().and_then(|user| user.premium_type))
+            .flatten()
+            == Some(2);
+        if nitro { MESSAGE_LIMIT_NITRO } else { MESSAGE_LIMIT }
+    }
+
+    /// Shows how close the draft is to the message limit, or how far past
+    /// it and into how many messages it will be split.
+    fn update_length_indicator(self: &Rc<Self>, typed: &str) {
+        let limit = self.message_limit();
+        // Mentions and emoji only get longer when sent, so a draft well
+        // under half the limit cannot be near it: skip the work.
+        let count = if typed.chars().count() * 2 < limit {
+            0
+        } else {
+            self.outgoing_content(typed).chars().count()
+        };
+        let label = &self.length_label;
+        if count + LIMIT_WARNING < limit {
+            label.set_visible(false);
+            return;
+        }
+        label.set_visible(true);
+        let editing = self.with_session(|session| session.editing.is_some()).unwrap_or(false);
+        if count <= limit {
+            label.set_text(&(limit - count).to_string());
+            label.remove_css_class("kc-length-over");
+            label.set_tooltip_text(Some(&format!("{} of {limit} characters left", limit - count)));
+            return;
+        }
+        label.add_css_class("kc-length-over");
+        if editing {
+            label.set_text(&format!("−{}", count - limit));
+            label.set_tooltip_text(Some(&format!(
+                "{} characters over the {limit} limit. An edit cannot be split into several messages.",
+                count - limit
+            )));
+            return;
+        }
+        let parts = split_message(&self.outgoing_content(typed), limit).len();
+        label.set_text(&format!("{count}/{limit} ×{parts}"));
+        label.set_tooltip_text(Some(&format!(
+            "{count} characters is over the {limit} limit: it will be sent as {parts} messages, one after another."
+        )));
+    }
+
+    /// The draft as it will be sent: display tokens (`@Name`, `:emoji:`)
+    /// swapped for what Discord expects, and `:name:` shortcodes expanded.
+    fn outgoing_content(self: &Rc<Self>, typed: &str) -> String {
         let mut content = typed.trim().to_owned();
         // Swap display tokens (`@Name`, `:emoji:`) for what Discord expects.
         TOKENS.with_borrow(|tokens| {
@@ -844,12 +896,17 @@ impl AppState {
                 })
             })
             .unwrap_or_default();
-        content = expand_shortcodes(&content, &|name| {
+        expand_shortcodes(&content, &|name| {
             server_emoji
                 .iter()
                 .find(|(known, _)| known == name)
                 .map(|(_, mention)| mention.clone())
-        });
+        })
+    }
+
+    pub(crate) fn send_current(self: &Rc<Self>) {
+        let typed = self.composer_text();
+        let mut content = self.outgoing_content(&typed);
 
         let Some((channel, editing, reply_to, uploads)) = self
             .with_session(|session| {
@@ -884,8 +941,25 @@ impl AppState {
         if content.is_empty() && uploads.is_empty() {
             return;
         }
-        if content.chars().count() > 2000 {
-            self.set_status("Messages are limited to 2000 characters");
+        // Too long for one message: an edit cannot be split, and in
+        // slowmode the second part would be refused; otherwise it goes as
+        // several messages.
+        let limit = self.message_limit();
+        let parts = split_message(&content, limit);
+        if parts.len() > 1 && editing.is_some() {
+            self.set_status(&format!("Edits are limited to {limit} characters"));
+            return;
+        }
+        if parts.len() > 1
+            && self
+                .with_session(|session| session.store.read(|state| state.slowmode(channel)))
+                .flatten()
+                .is_some_and(|seconds| seconds > 0)
+        {
+            self.set_status(&format!(
+                "Slowmode is on here, so this can't be split into {} messages: shorten it to {limit} characters",
+                parts.len()
+            ));
             return;
         }
         // Slowmode: keep the text and say how long, rather than sending a
@@ -924,21 +998,46 @@ impl AppState {
             return;
         }
 
-        self.dispatch_send(
-            channel,
-            OutgoingDraft {
-                content,
-                reply_to,
-                mention_reply,
-                uploads,
-            },
-        );
+        // One message, or several in order: the reply goes with the first
+        // part and the files with the last.
+        let count = parts.len();
+        let drafts: Vec<OutgoingDraft> = parts
+            .into_iter()
+            .enumerate()
+            .map(|(index, part)| OutgoingDraft {
+                content: part,
+                reply_to: if index == 0 { reply_to } else { None },
+                mention_reply: index == 0 && mention_reply,
+                uploads: if index + 1 == count { uploads.clone() } else { Vec::new() },
+            })
+            .collect();
+        self.send_parts(channel, drafts);
+    }
+
+    /// Sends `drafts` one after another, each once the one before has been
+    /// accepted (so they arrive in order). If one fails, the parts not sent
+    /// go back into the message box.
+    fn send_parts(self: &Rc<Self>, channel: Snowflake, mut drafts: Vec<OutgoingDraft>) {
+        if drafts.is_empty() {
+            return;
+        }
+        let first = drafts.remove(0);
+        if drafts.is_empty() {
+            self.dispatch_send(channel, first, None);
+            return;
+        }
+        let unsent = std::iter::once(first.content.as_str())
+            .chain(drafts.iter().map(|draft| draft.content.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let next: Box<dyn FnOnce(&Rc<AppState>) + Send> = Box::new(move |app| app.send_parts(channel, drafts));
+        self.dispatch_send(channel, first, Some(Then { next, unsent }));
     }
 
     /// Sends a message, showing it at once as a greyed-out "sending" row that
     /// the gateway's confirmation (matched by nonce) replaces. A failed send
     /// stays as a row offering Retry or Delete; retry calls back here.
-    pub(crate) fn dispatch_send(self: &Rc<Self>, channel: Snowflake, draft: OutgoingDraft) {
+    pub(crate) fn dispatch_send(self: &Rc<Self>, channel: Snowflake, draft: OutgoingDraft, then: Option<Then>) {
         let Some((_, http, store)) = self.active() else {
             return;
         };
@@ -1029,6 +1128,10 @@ impl AppState {
                             store.apply("MESSAGE_CREATE", &value);
                         }
                     }
+                    // The next part of a split message.
+                    if let Some(then) = then {
+                        (then.next)(app);
+                    }
                 }
                 Err(error) => {
                     // Slowmode refused it: count down from Discord's own wait.
@@ -1054,6 +1157,13 @@ impl AppState {
                     if let (Some(nonce), Some((_, _, store))) = (&nonce, app.active()) {
                         store.set_send_state(channel, nonce, kc_state::SendState::Failed);
                     }
+                    // A split message stops here: what was not sent goes back
+                    // into the message box, unless something new is there.
+                    if let Some(then) = then
+                        && app.composer_text().trim().is_empty()
+                    {
+                        app.restore_draft(&then.unsent);
+                    }
                     app.set_status(&status);
                 }
             },
@@ -1074,7 +1184,7 @@ impl AppState {
             store.drop_pending(channel, nonce);
         }
         if let Some(draft) = draft {
-            self.dispatch_send(channel, draft);
+            self.dispatch_send(channel, draft, None);
         }
     }
 
@@ -2801,9 +2911,141 @@ fn upload_preview(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
     )
 }
 
+/// What follows a part of a split message: sending the next part once it is
+/// accepted, and, if it fails, the text of every part not sent.
+pub(crate) struct Then {
+    next: Box<dyn FnOnce(&Rc<AppState>) + Send>,
+    unsent: String,
+}
+
+/// The longest message Discord takes: 2000 characters, 4000 with Nitro.
+const MESSAGE_LIMIT: usize = 2000;
+const MESSAGE_LIMIT_NITRO: usize = 4000;
+/// How close to the limit the counter starts showing what is left.
+const LIMIT_WARNING: usize = 200;
+
+/// `text` cut into messages of at most `limit` characters each, at the
+/// best place available: a blank line, else a line break, else a space
+/// (none of them in the first half of a part), else exactly at the limit;
+/// never inside a `<...>` mention or custom emoji. A code block cut in two
+/// is closed at the end of one part and reopened (with its language) at the
+/// start of the next, so both still show as code.
+pub(crate) fn split_message(text: &str, limit: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut rest: String = text.to_owned();
+    // The fence a part has to reopen: "```" plus its language.
+    let mut reopen: Option<String> = None;
+    while !rest.is_empty() {
+        let mut part = String::new();
+        if let Some(fence) = &reopen {
+            part.push_str(fence);
+            part.push('\n');
+        }
+        // Room left in this part, keeping four characters to close a code
+        // block that is still open where it is cut.
+        let room = limit.saturating_sub(part.chars().count()).saturating_sub(4).max(1);
+        if part.chars().count() + rest.chars().count() <= limit {
+            part.push_str(&rest);
+            parts.push(part);
+            break;
+        }
+        let chars: Vec<(usize, char)> = rest.char_indices().collect();
+        let hard = chars.get(room).map_or(rest.len(), |(byte, _)| *byte);
+        let window = &rest[..hard];
+        let half = window.len() / 2;
+        let cut = [window.rfind("\n\n"), window.rfind('\n'), window.rfind(char::is_whitespace)]
+            .into_iter()
+            .flatten()
+            .find(|at| *at >= half && *at > 0)
+            .unwrap_or(hard);
+        // Not inside <@123>, <#123>, <:name:123> and the like.
+        let cut = match (window[..cut].rfind('<'), window[..cut].rfind('>')) {
+            (Some(open), close) if close.is_none_or(|close| close < open) && open > 0 => open,
+            _ => cut,
+        };
+        let (head, tail) = rest.split_at(cut);
+        part.push_str(head.trim_end());
+        // Is a code block open at the end of this part? (A reopened one
+        // starts the part, so its fence line counts like any other.)
+        let mut fence: Option<String> = None;
+        for line in part.lines() {
+            if let Some(after) = line.trim_start().strip_prefix("```") {
+                fence = match fence {
+                    Some(_) => None,
+                    None => Some(format!("```{}", after.split_whitespace().next().unwrap_or(""))),
+                };
+            }
+        }
+        if fence.is_some() {
+            part.push_str("\n```");
+        }
+        parts.push(part);
+        reopen = fence;
+        rest = tail.trim_start_matches([' ', '\t']).trim_start_matches('\n').to_owned();
+        if reopen.is_none() {
+            rest = rest.trim_start().to_owned();
+        }
+    }
+    parts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_messages_stay_whole() {
+        assert_eq!(split_message("hello", 2000), ["hello"]);
+        assert_eq!(split_message(&"a".repeat(2000), 2000).len(), 1);
+    }
+
+    #[test]
+    fn long_messages_split_at_paragraphs_then_lines_then_spaces() {
+        let text = format!("{}\n\n{}", "a".repeat(1500), "b".repeat(1500));
+        assert_eq!(split_message(&text, 2000), ["a".repeat(1500), "b".repeat(1500)]);
+        let words = "word ".repeat(1000);
+        let parts = split_message(words.trim(), 2000);
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|part| part.chars().count() <= 2000));
+        assert!(parts.iter().all(|part| !part.starts_with(' ') && !part.ends_with(' ')));
+        assert_eq!(parts.join(" "), words.trim());
+    }
+
+    #[test]
+    fn text_without_spaces_is_cut_at_the_limit() {
+        let parts = split_message(&"x".repeat(4500), 2000);
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|part| part.chars().count() <= 2000));
+        assert_eq!(parts.concat(), "x".repeat(4500));
+    }
+
+    #[test]
+    fn mentions_and_custom_emoji_are_never_cut() {
+        let text = format!("{}<:blob:123456789012345678> tail", "y".repeat(1990));
+        let parts = split_message(&text, 2000);
+        assert!(parts[1].starts_with("<:blob:123456789012345678>"), "{parts:?}");
+    }
+
+    #[test]
+    fn a_code_block_cut_in_two_is_closed_and_reopened() {
+        let code: String = (0..300).map(|n| format!("let line_{n} = {n};\n")).collect();
+        let text = format!("look:\n```rust\n{code}```\ndone");
+        let parts = split_message(&text, 2000);
+        assert!(parts.len() > 1);
+        assert!(parts.iter().all(|part| part.chars().count() <= 2000), "{:?}", parts.iter().map(|p| p.chars().count()).collect::<Vec<_>>());
+        assert!(parts[0].ends_with("\n```"));
+        assert!(parts[1].starts_with("```rust\n"));
+        for part in &parts {
+            assert_eq!(part.matches("```").count() % 2, 0, "unbalanced: {part}");
+        }
+    }
+
+    #[test]
+    fn unicode_counts_characters_not_bytes() {
+        let parts = split_message(&"é".repeat(3000), 2000);
+        assert_eq!(parts.iter().map(|part| part.chars().count()).collect::<Vec<_>>().iter().sum::<usize>(), 3000);
+        assert!(parts.iter().all(|part| part.chars().count() <= 2000));
+    }
 
     #[test]
     fn previews_keep_the_whole_picture_at_its_shape() {

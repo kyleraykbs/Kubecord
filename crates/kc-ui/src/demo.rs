@@ -1142,6 +1142,29 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "long-message" => {
+                // A draft near the limit, then one far over it (the counter
+                // shows the parts), then sent: offline, the first part fails
+                // and every part's text goes back into the message box.
+                self.open_channel(general);
+                let near = "word ".repeat(380);
+                self.set_composer_text(near.trim());
+                eprintln!("demo: near the limit: {:?} visible={}", self.length_label.text(), self.length_label.is_visible());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    let long = format!("{}\n\n{}", "first paragraph ".repeat(150), "second paragraph ".repeat(150));
+                    app.set_composer_text(&long);
+                    eprintln!("demo: over the limit: {:?} ({} characters)", app.length_label.text(), long.chars().count());
+                    eprintln!("demo: parts: {:?}", crate::composer::split_message(long.trim(), 2000).iter().map(|part| part.chars().count()).collect::<Vec<_>>());
+                    if std::env::var_os("KUBECORD_LONG_SEND").is_some() {
+                        app.send_current();
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                            eprintln!("demo: after sending, the box holds {} characters", app.composer_text().chars().count());
+                        });
+                    }
+                });
+            }
             "gif-sent" => {
                 // A GIF link sent from the picker, as it arrives: the bare
                 // link first, then Discord's update adding the GIF's embed. It

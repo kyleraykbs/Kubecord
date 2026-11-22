@@ -152,6 +152,9 @@ pub(crate) struct AppState {
     pub emoji_button: gtk::MenuButton,
     /// Sends what is in the composer (as Enter does).
     pub send_button: gtk::Button,
+    /// Characters left near the message limit, or how far over it (and into
+    /// how many messages it will be split).
+    pub length_label: gtk::Label,
     pub blocked_label: gtk::Label,
     pub completion: gtk::Popover,
     pub completion_list: gtk::ListBox,
@@ -571,6 +574,16 @@ impl AppState {
         composer_overlay.set_valign(gtk::Align::Center);
         composer_overlay.set_child(Some(&composer_scroll));
         composer_overlay.add_overlay(&composer_hint);
+        // In the text area's bottom-right corner, as in Discord: it takes no
+        // width from the text.
+        let length_label = gtk::Label::new(None);
+        length_label.add_css_class("kc-length");
+        length_label.add_css_class("caption");
+        length_label.set_halign(gtk::Align::End);
+        length_label.set_valign(gtk::Align::End);
+        length_label.set_can_target(false);
+        length_label.set_visible(false);
+        composer_overlay.add_overlay(&length_label);
         composer_hint.set_valign(gtk::Align::Center);
 
         let attach_button = icon_button("list-add-symbolic", "Attach Files");
@@ -863,6 +876,7 @@ impl AppState {
             typing_toggle,
             emoji_button,
             send_button,
+            length_label,
             blocked_label,
             completion,
             completion_list,
