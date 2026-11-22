@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="data/icons/hicolor/256x256/apps/dev.kyle.kubecord.png" width="112" alt="Kubecord logo">
+<img src="data/icons/hicolor/256x256/apps/io.github.kyleraykbs.Kubecord.png" width="112" alt="Kubecord logo">
 
 # Kubecord
 
@@ -178,7 +178,7 @@ ban is unlikely; friending people is the most likely place to get one.
 
   ```kdl
   window-rule {
-      match app-id=r#"^dev\.kyle\.kubecord$"#
+      match app-id=r#"^io\.github\.kyleraykbs\.Kubecord$"#
       draw-border-with-background false
   }
   ```

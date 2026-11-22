@@ -110,7 +110,8 @@
               '';
               # The launcher entry and its icon, in every size.
               postInstall = ''
-                install -Dm644 data/dev.kyle.kubecord.desktop -t $out/share/applications
+                install -Dm644 data/io.github.kyleraykbs.Kubecord.desktop -t $out/share/applications
+                install -Dm644 data/io.github.kyleraykbs.Kubecord.metainfo.xml -t $out/share/metainfo
                 mkdir -p $out/share/icons
                 cp -r data/icons/hicolor $out/share/icons/
               '';

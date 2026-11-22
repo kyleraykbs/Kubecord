@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 kyleraykbs -->
+<component type="desktop-application">
+  <id>io.github.kyleraykbs.Kubecord</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <name>Kubecord</name>
+  <summary>Chat, talk and stream on Discord</summary>
+
+  <developer id="io.github.kyleraykbs">
+    <name>kyleraykbs</name>
+  </developer>
+
+  <description>
+    <p>
+      Kubecord is a native client for Discord, written in Rust with GTK and
+      libadwaita. It is not made by or affiliated with Discord.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Voice and video calls, with screen sharing that includes audio</li>
+      <li>Text chat with images, videos, GIFs, emoji, stickers and embeds</li>
+      <li>Slash commands, buttons, menus and forms from apps and bots</li>
+      <li>A local log of deleted and edited messages</li>
+      <li>Export a range of messages as a picture or as text</li>
+      <li>Multiple accounts</li>
+      <li>Follows your system colors, or uses Discord's own look</li>
+    </ul>
+    <p>
+      Note: third-party clients are against Discord's Terms of Service and
+      can, rarely, lead to an account being banned.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.kyleraykbs.Kubecord.desktop</launchable>
+  <provides>
+    <binary>kubecord</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/kyleraykbs/Kubecord</url>
+  <url type="bugtracker">https://github.com/kyleraykbs/Kubecord/issues</url>
+  <url type="vcs-browser">https://github.com/kyleraykbs/Kubecord</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>A server's channels, a chat and its members</caption>
+      <image>https://github.com/user-attachments/assets/1feb8354-b94a-44fa-888f-257a3d137bf9</image>
+    </screenshot>
+    <screenshot>
+      <caption>A voice call</caption>
+      <image>https://github.com/user-attachments/assets/e46c6fed-7ef3-4d15-b2d2-158508b4c13e</image>
+    </screenshot>
+    <screenshot>
+      <caption>Voice settings</caption>
+      <image>https://github.com/user-attachments/assets/74427ba5-3679-47b1-b78c-f0f7fddfb376</image>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#d9b36c</color>
+    <color type="primary" scheme_preference="dark">#3b3836</color>
+  </branding>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+    <content_attribute id="social-info">moderate</content_attribute>
+  </content_rating>
+
+  <requires>
+    <display_length compare="ge">720</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+    <category>Chat</category>
+  </categories>
+  <keywords>
+    <keyword>discord</keyword>
+    <keyword>chat</keyword>
+    <keyword>voice</keyword>
+  </keywords>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-21">
+      <description>
+        <p>The first release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

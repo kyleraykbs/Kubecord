@@ -1035,7 +1035,7 @@ fn dismiss_notice(notice: &gtk::Revealer) {
 }
 
 /// The logo, as drawn in the title bar.
-const LOGO: &[u8] = include_bytes!("../../../data/icons/hicolor/64x64/apps/dev.kyle.kubecord.png");
+const LOGO: &[u8] = include_bytes!("../../../data/icons/hicolor/64x64/apps/io.github.kyleraykbs.Kubecord.png");
 
 /// The bar across the top of the window: the logo and "Kubecord" in the
 /// middle, the window's buttons at the ends.

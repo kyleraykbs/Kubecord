@@ -34,7 +34,7 @@ pub fn build_app() -> adw::Application {
         gtk::gio::ApplicationFlags::empty()
     };
     adw::Application::builder()
-        .application_id("dev.kyle.kubecord")
+        .application_id("io.github.kyleraykbs.Kubecord")
         .flags(flags)
         .build()
 }
@@ -94,6 +94,8 @@ pub fn run() -> glib::ExitCode {
         // Decompress the spell-check dictionary off the main thread so the first
         // keystroke does not stall.
         std::thread::spawn(crate::spelling::warm);
+        // Before any button picks its icon.
+        crate::widgets::keep_icons_drawable();
 
         let accounts = match AccountStore::load() {
             Ok(accounts) => accounts,
