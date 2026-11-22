@@ -79,18 +79,23 @@ Updates are signed with the repository's key. Each
 
 <br>
 
-Once it's published to the AUR, install it with your AUR helper:
+> [!NOTE]
+> AUR registration is closed at the moment, so `kubecord-git` isn't on the
+> AUR yet. Until it is, build the same package from this repository, or use
+> [Nix](#installation) (it works on Arch too).
 
-```sh
-paru -S kubecord-git    # or: yay -S kubecord-git
-```
-
-Until then, build the same package from this repository:
+Build and install it with the PKGBUILD in this repository:
 
 ```sh
 git clone https://github.com/kyleraykbs/Kubecord.git
 cd Kubecord/packaging/aur/kubecord-git
 makepkg -si
+```
+
+Once it's published, it will install with your AUR helper:
+
+```sh
+paru -S kubecord-git    # or: yay -S kubecord-git
 ```
 
 </details>
@@ -148,15 +153,24 @@ Install it into your profile:
 nix profile install github:kyleraykbs/Kubecord
 ```
 
-Or add the flake to your NixOS or Home Manager configuration:
+Or use the NixOS or Home Manager module, which can also set Kubecord's
+settings declaratively (any you leave out stay changeable in the app):
 
 ```nix
 # In your flake's inputs:
 kubecord.url = "github:kyleraykbs/Kubecord";
 
-# Then in your packages:
-inputs.kubecord.packages.${pkgs.system}.default
+# NixOS: in your modules
+kubecord.nixosModules.default
+{ programs.kubecord.enable = true; }
+
+# Home Manager: in your imports
+kubecord.homeManagerModules.default
+{ programs.kubecord = { enable = true; settings.use_24_hour_time = true; }; }
 ```
+
+See [docs/nix.md](docs/nix.md) for the options, how declared and in-app
+settings combine, and every setting.
 
 </details>
 

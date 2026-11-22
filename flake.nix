@@ -17,6 +17,16 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = import inputs.systems;
 
+      # programs.kubecord for NixOS and Home Manager (see docs/nix.md).
+      flake =
+        let
+          defaultPackage = system: inputs.self.packages.${system}.default;
+        in
+        {
+          nixosModules.default = import ./nix/nixos-module.nix { inherit defaultPackage; };
+          homeManagerModules.default = import ./nix/home-manager-module.nix { inherit defaultPackage; };
+        };
+
       perSystem =
         {
           system,
