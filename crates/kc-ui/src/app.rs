@@ -626,7 +626,7 @@ impl AppState {
             // GIFs (looping videos and animated gifs) play only while the
             // window is focused, unless the setting keeps them running.
             app.queue_players_update();
-            crate::animation::set_window_focused(window.is_active());
+            crate::animation::set_window_focused(crate::animation::app_focused());
             if window.is_active() && app.chat.borrow().at_bottom {
                 let channel = app.chat.borrow().channel;
                 if let Some(channel) = channel {

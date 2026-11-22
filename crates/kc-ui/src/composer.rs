@@ -25,9 +25,6 @@ const MIB: usize = 1024 * 1024;
 const COMPLETIONS: usize = 8;
 /// Custom emoji drawn in the picker before the search has to narrow it.
 const PICKER_EMOJI: usize = 400;
-/// How many GIF-picker tiles animate at once. The rest show a still preview,
-/// so a wall of results does not run dozens of frame timers.
-const GIF_PICKER_ANIMATED: usize = 16;
 /// How many tiles to render per scroll page. Discord's GIF endpoints return a
 /// single (cursor-less) batch, so "load more on scroll" renders that batch
 /// incrementally rather than building every tile up front.
@@ -1891,7 +1888,6 @@ impl AppState {
         }
         GIF_BUFFER.with_borrow_mut(|buffer| *buffer = gifs);
         GIF_RENDERED.with(|rendered| rendered.set(0));
-        GIF_ANIM_BUDGET.with(|budget| budget.set(GIF_PICKER_ANIMATED));
         self.append_gif_page();
     }
 
@@ -1910,18 +1906,9 @@ impl AppState {
         let end = (start + GIF_PAGE).min(total);
         let page = GIF_BUFFER.with_borrow(|buffer| buffer[start..end].to_vec());
         for gif in &page {
-            // Spend the shared animation budget so a wall of results does not
-            // run dozens of frame timers; past it, tiles fall back to a still.
-            let animate = GIF_ANIM_BUDGET.with(|budget| {
-                let left = budget.get();
-                if left > 0 {
-                    budget.set(left - 1);
-                    true
-                } else {
-                    false
-                }
-            });
-            flow.insert(&self.gif_tile(gif, animate), -1);
+            // Every tile animates; only those in view run (a GIF scrolled out
+            // of the picker's view pauses, and starts again scrolled back).
+            flow.insert(&self.gif_tile(gif, true), -1);
         }
         GIF_RENDERED.with(|rendered| rendered.set(end));
     }
@@ -2108,6 +2095,10 @@ impl AppState {
                 .collect()
         };
         let popover = self.gif_button.popover();
+        // A demo cannot take the input grab an auto-hiding popover needs.
+        if let Some(popover) = &popover {
+            popover.set_autohide(false);
+        }
         self.gif_button.popup();
         // `popup` runs the show handler, which clears the cache and kicks off a
         // (dead) favourites fetch. Seed the cache so that pending fetch shows
@@ -2115,6 +2106,53 @@ impl AppState {
         GIF_QUERY.with_borrow_mut(|current| current.clear());
         GIF_TAB.with(|t| t.set(true));
         crate::gif_favorites::set_all(make(6));
+        // KUBECORD_GIF_MANY: many results (`gif`, or a video URL to play
+        // them as videos), and the grid scrolled down, to see the ones
+        // scrolled to start.
+        if let Ok(many) = std::env::var("KUBECORD_GIF_MANY") {
+            let results: Vec<kc_http::Gif> = make(30)
+                .into_iter()
+                .map(|gif| {
+                    if many == "gif" {
+                        gif
+                    } else {
+                        kc_http::Gif {
+                            src: many.clone(),
+                            video: true,
+                            ..gif
+                        }
+                    }
+                })
+                .collect();
+            crate::gif_favorites::set_all(results.clone());
+            self.show_gifs(results);
+            if let Some(popover) = popover.clone() {
+                glib::timeout_add_local_once(Duration::from_millis(3000), move || {
+                    let mut stack = vec![popover.upcast::<gtk::Widget>()];
+                    while let Some(widget) = stack.pop() {
+                        if let Some(scroll) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+                            let adjustment = scroll.vadjustment();
+                            if adjustment.upper() <= adjustment.page_size() {
+                                continue;
+                            }
+                            let half = (adjustment.upper() - adjustment.page_size()) / 2.0;
+                            adjustment.set_value(half);
+                            eprintln!(
+                                "demo: picker scrolled to {} of {}",
+                                adjustment.value(),
+                                adjustment.upper()
+                            );
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(next) = child {
+                            child = next.next_sibling();
+                            stack.push(next);
+                        }
+                    }
+                });
+            }
+            return popover;
+        }
         self.show_gifs(make(6));
         popover
     }
@@ -2427,9 +2465,6 @@ thread_local! {
     static GIF_BUFFER: std::cell::RefCell<Vec<kc_http::Gif>> = const { std::cell::RefCell::new(Vec::new()) };
     /// How many tiles of `GIF_BUFFER` have been rendered so far.
     static GIF_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Remaining animation budget across the whole current result (see
-    /// `GIF_PICKER_ANIMATED`), decremented as pages render.
-    static GIF_ANIM_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The picker's loading spinner, shown while a fetch is in flight.
     static GIF_SPINNER: std::cell::RefCell<Option<gtk::Spinner>> = const { std::cell::RefCell::new(None) };
 }

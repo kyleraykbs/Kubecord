@@ -110,7 +110,7 @@ impl Drop for LoopingVideo {
 
 /// Whether `widget` intersects the viewport of the scrolled window it is in.
 /// Widgets outside any scrolled window count as visible while mapped.
-fn on_screen(widget: &gtk::Widget) -> bool {
+pub(crate) fn on_screen(widget: &gtk::Widget) -> bool {
     if !widget.is_mapped() {
         return false;
     }
@@ -141,7 +141,31 @@ impl AppState {
         widget.connect_map(move |_| queue_update(&app));
         let app = Rc::downgrade(self);
         widget.connect_unmap(move |_| queue_update(&app));
+        self.watch_scroller(widget);
         self.queue_players_update();
+    }
+
+    /// Re-checks which players are on screen whenever the scrolled window
+    /// holding `widget` scrolls (the GIF picker's grid, not only the chat):
+    /// a GIF scrolled into view starts, one scrolled away stops.
+    fn watch_scroller(self: &Rc<Self>, widget: &gtk::Widget) {
+        let Some(scroller) = widget
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+        else {
+            return;
+        };
+        // Once per scroller.
+        if scroller.has_css_class("kc-watched-players") {
+            return;
+        }
+        scroller.add_css_class("kc-watched-players");
+        for adjustment in [scroller.vadjustment(), scroller.hadjustment()] {
+            let app = Rc::downgrade(self);
+            adjustment.connect_value_changed(move |_| queue_update(&app));
+            let app = Rc::downgrade(self);
+            adjustment.connect_changed(move |_| queue_update(&app));
+        }
     }
 
     /// Re-evaluates which players should run, on the next idle.
@@ -152,7 +176,7 @@ impl AppState {
     fn update_players(&self) {
         // Unfocused windows pause looping videos too, unless the setting keeps
         // GIF-style media running.
-        let active = self.window.is_active() || crate::animation::animate_unfocused();
+        let active = crate::animation::app_focused() || crate::animation::animate_unfocused();
         self.players.borrow_mut().retain(|(widget, player)| {
             let (Some(widget), Some(player)) = (widget.upgrade(), player.upgrade()) else {
                 return false;

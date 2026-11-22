@@ -63,8 +63,51 @@ fn refresh_all() {
     }
 }
 
-/// Called when the window gains or loses focus; pauses or resumes GIFs unless
-/// [`set_animate_unfocused`] keeps them running.
+/// Whether any of the app's windows has the focus (the image viewer and the
+/// other pop-out windows count: a GIF opened in the viewer plays there).
+pub(crate) fn app_focused() -> bool {
+    gtk::Window::list_toplevels()
+        .into_iter()
+        .filter_map(|window| window.downcast::<gtk::Window>().ok())
+        .any(|window| window.is_active())
+}
+
+/// Re-checks every GIF when the scrolled window holding `picture` scrolls
+/// (once per scrolled window), so one scrolled into view starts and one
+/// scrolled away stops.
+fn watch_scroller(picture: &gtk::Picture) {
+    let Some(scroller) = picture
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+    else {
+        return;
+    };
+    if scroller.has_css_class("kc-watched-gifs") {
+        return;
+    }
+    scroller.add_css_class("kc-watched-gifs");
+    for adjustment in [scroller.vadjustment(), scroller.hadjustment()] {
+        adjustment.connect_value_changed(|_| queue_refresh());
+        adjustment.connect_changed(|_| queue_refresh());
+    }
+}
+
+/// [`refresh_all`] on the next idle, once however many scroll steps ask.
+fn queue_refresh() {
+    thread_local! {
+        static QUEUED: Cell<bool> = const { Cell::new(false) };
+    }
+    if QUEUED.replace(true) {
+        return;
+    }
+    glib::idle_add_local_once(|| {
+        QUEUED.set(false);
+        refresh_all();
+    });
+}
+
+/// Called when one of the app's windows gains or loses focus; pauses or
+/// resumes GIFs unless [`set_animate_unfocused`] keeps them running.
 pub(crate) fn set_window_focused(focused: bool) {
     if WINDOW_FOCUSED.swap(focused, Ordering::Relaxed) != focused {
         refresh_all();
@@ -183,17 +226,19 @@ impl GifPlayer {
         picture.connect_destroy(move |_| {
             keep.stop();
         });
+        watch_scroller(picture);
         player.refresh();
         Some(player)
     }
 
-    /// Runs the timer when the picture is mapped and GIFs are awake (window
-    /// focused, or the unfocused-animation setting is on); otherwise stops it.
+    /// Runs the timer when the picture is on screen (mapped, and inside its
+    /// scrolled window's view) and GIFs are awake (window focused, or the
+    /// unfocused-animation setting is on); otherwise stops it.
     fn refresh(self: &Rc<Self>) {
         let mapped = self
             .picture
             .upgrade()
-            .is_some_and(|picture| picture.is_mapped());
+            .is_some_and(|picture| crate::player::on_screen(picture.upcast_ref()));
         if mapped && awake() {
             self.start();
         } else {
@@ -248,9 +293,10 @@ impl GifPlayer {
         {
             picture.set_paintable(Some(&texture));
         }
-        // Stop if the window went unfocused since the last frame; a focus or
-        // setting change resumes it via `refresh`.
-        if awake() {
+        // Stop if the window went unfocused or the picture scrolled out of
+        // view since the last frame; a focus change, a setting change or a
+        // scroll resumes it via `refresh`.
+        if awake() && crate::player::on_screen(picture.upcast_ref()) {
             self.schedule_next();
         } else {
             self.stop();

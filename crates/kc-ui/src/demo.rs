@@ -1137,6 +1137,20 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "gif-many" => {
+                // Six GIF messages, more than fit: only those in view play,
+                // and scrolling up starts the ones above.
+                for index in 0..6 {
+                    store.apply("MESSAGE_CREATE", &gif_message(id_at(0, 41 + index), ADA));
+                }
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(4000), move || {
+                    let adjustment = app.messages_scroll.vadjustment();
+                    eprintln!("demo: scrolling up from {}", adjustment.value());
+                    adjustment.set_value(adjustment.value() - 1200.0);
+                });
+            }
             "gif" | "gif-viewer" => {
                 // A message with a real animated-GIF attachment. The still
                 // placeholder, GIF tag and layout render offline; the motion

@@ -73,6 +73,14 @@ impl AppState {
             glib::Propagation::Proceed
         });
         window.add_controller(keys);
+        // GIFs keep playing while any of the app's windows has the focus.
+        let app = Rc::downgrade(self);
+        window.connect_is_active_notify(move |_| {
+            if let Some(app) = app.upgrade() {
+                app.queue_players_update();
+            }
+            crate::animation::set_window_focused(crate::animation::app_focused());
+        });
         let app = Rc::downgrade(self);
         let key_owned = key.to_owned();
         window.connect_close_request(move |closing| {
