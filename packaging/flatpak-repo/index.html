@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubecord Flatpak repository</title>
+<link rel="icon" href="icon.png">
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --fg: #222; --muted: #666; --code: #ececec; --accent: #3584e4; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1e1e1e; --fg: #eee; --muted: #aaa; --code: #2d2d2d; --accent: #78aeed; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 16px; }
+  header { display: flex; align-items: center; gap: 16px; }
+  header img { width: 72px; height: 72px; }
+  h1 { margin: 0; }
+  p.lead { color: var(--muted); margin-top: 4px; }
+  pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+  code { font-family: ui-monospace, monospace; font-size: 14px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.png" alt="">
+    <div>
+      <h1>Kubecord</h1>
+      <p class="lead">A native Discord client for Linux. This is its Flatpak repository.</p>
+    </div>
+  </header>
+
+  <h2>Install</h2>
+  <p>Add Flathub (for the GNOME runtime) and this repository, once, then install:</p>
+  <pre><code>flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists kubecord https://kyleraykbs.github.io/Kubecord/kubecord.flatpakrepo
+flatpak install --user kubecord io.github.kyleraykbs.Kubecord</code></pre>
+  <p>Or in one step, which adds this repository (and Flathub, if needed) for you:</p>
+  <pre><code>flatpak install --user https://kyleraykbs.github.io/Kubecord/io.github.kyleraykbs.Kubecord.flatpakref</code></pre>
+
+  <h2>Update</h2>
+  <pre><code>flatpak update</code></pre>
+
+  <h2>More</h2>
+  <p>Other packages (AUR, .deb, AppImage, Nix) and the source are on
+  <a href="https://github.com/kyleraykbs/Kubecord">GitHub</a>.
+  Updates are signed with the <a href="kubecord-repo.gpg">repository key</a>.</p>
+</main>
+</body>
+</html>

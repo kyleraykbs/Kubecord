@@ -1,0 +1,123 @@
+# On a version tag (v0.1.0, ...): builds the .deb and AppImage on Debian 13,
+# builds the Flatpak into a signed repository published on GitHub Pages (with
+# a .flatpak bundle), and makes a GitHub release carrying all three.
+#
+# Needs the repository secret FLATPAK_GPG_PRIVATE_KEY (the ASCII-armoured
+# private half of packaging/flatpak-repo/kubecord-repo.gpg) and Pages set to
+# deploy from GitHub Actions.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    container: docker.io/library/rust:1-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the .deb
+        run: bash packaging/deb/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+
+  appimage:
+    runs-on: ubuntu-24.04
+    container: docker.io/library/rust:1-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the AppImage
+        run: bash packaging/appimage/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: target/appimage/Kubecord-x86_64.AppImage
+
+  flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flatpak tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak flatpak-builder appstream
+          flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: Import the signing key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          echo "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          KEY=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "KEY=$KEY" >> "$GITHUB_ENV"
+      - name: Build into a signed repository
+        working-directory: flatpak
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse \
+            --force-clean --default-branch=stable \
+            --repo="$GITHUB_WORKSPACE/public/repo" \
+            --gpg-sign="$KEY" --gpg-homedir="$GNUPGHOME" \
+            "$RUNNER_TEMP/build" io.github.kyleraykbs.Kubecord.json
+          flatpak build-update-repo --generate-static-deltas --prune \
+            --gpg-sign="$KEY" --gpg-homedir="$GNUPGHOME" \
+            "$GITHUB_WORKSPACE/public/repo"
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            "$GITHUB_WORKSPACE/public/repo" "$GITHUB_WORKSPACE/Kubecord.flatpak" \
+            io.github.kyleraykbs.Kubecord stable
+      - name: Add the repository's files and page
+        run: |
+          cp packaging/flatpak-repo/kubecord.flatpakrepo \
+             packaging/flatpak-repo/io.github.kyleraykbs.Kubecord.flatpakref \
+             packaging/flatpak-repo/kubecord-repo.gpg \
+             packaging/flatpak-repo/index.html public/
+          cp data/icons/hicolor/128x128/apps/io.github.kyleraykbs.Kubecord.png public/icon.png
+          touch public/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: Kubecord.flatpak
+
+  pages:
+    needs: flatpak
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  release:
+    needs: [deb, appimage, flatpak]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.deb
+            artifacts/*.AppImage
+            artifacts/*.flatpak

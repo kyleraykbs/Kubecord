@@ -23,3 +23,35 @@ tracing-subscriber.workspace = true
 [features]
 default = ["captcha"]
 captcha = ["kc-ui/captcha"]
+
+# `cargo deb -p kubecord`: the Debian package (built on Debian 13; see
+# packaging/deb/build.sh). Libraries the binary links come from `$auto`;
+# the GStreamer plugins and tools it loads at run time are listed by hand.
+[package.metadata.deb]
+name = "kubecord"
+maintainer = "kyleraykbs"
+copyright = "2026 kyleraykbs"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A native Discord client written in Rust with GTK4 and libadwaita: voice and \
+video calls with screen sharing, text chat with media, apps and bots, a local \
+message logger and message export. Not made by or affiliated with Discord."""
+section = "net"
+priority = "optional"
+depends = """$auto, \
+gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, \
+gstreamer1.0-plugins-ugly, gstreamer1.0-libav, gstreamer1.0-gtk4, \
+gstreamer1.0-pipewire, pipewire-bin, glib-networking"""
+assets = [
+    ["target/release/kubecord", "usr/bin/", "755"],
+    ["../../data/io.github.kyleraykbs.Kubecord.desktop", "usr/share/applications/", "644"],
+    ["../../data/io.github.kyleraykbs.Kubecord.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../data/icons/hicolor/16x16/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["../../data/icons/hicolor/24x24/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["../../data/icons/hicolor/32x32/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["../../data/icons/hicolor/48x48/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["../../data/icons/hicolor/64x64/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["../../data/icons/hicolor/128x128/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["../../data/icons/hicolor/256x256/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../data/icons/hicolor/512x512/apps/io.github.kyleraykbs.Kubecord.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+]
