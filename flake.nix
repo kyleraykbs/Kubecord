@@ -45,7 +45,9 @@
             src = ./.;
             filter =
               path: type:
-              (builtins.match ".*/assets/.*" path != null) || (craneLib.filterCargoSources path type);
+              (builtins.match ".*/assets/.*" path != null)
+              || (builtins.match ".*/data(/.*)?" path != null)
+              || (craneLib.filterCargoSources path type);
           };
 
           gstPlugins = with pkgs.gst_all_1; [
@@ -105,6 +107,12 @@
                   # it the GIF loader is not found and GIFs render as a still.
                   --set GDK_PIXBUF_MODULE_FILE "${pkgs.librsvg}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
                 )
+              '';
+              # The launcher entry and its icon, in every size.
+              postInstall = ''
+                install -Dm644 data/dev.kyle.kubecord.desktop -t $out/share/applications
+                mkdir -p $out/share/icons
+                cp -r data/icons/hicolor $out/share/icons/
               '';
               meta = {
                 description = "A Discord client";

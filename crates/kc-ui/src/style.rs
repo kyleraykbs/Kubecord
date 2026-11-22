@@ -4,6 +4,15 @@
 use gtk::gdk;
 
 const CSS: &str = r#"
+/* The slim bar across the top of the window, with the app's name. */
+headerbar.kc-title-bar {
+    min-height: 34px;
+}
+headerbar.kc-title-bar windowcontrols button {
+    min-height: 22px;
+    min-width: 22px;
+    padding: 2px;
+}
 .kc-rail {
     background-color: @headerbar_shade_color;
     background-color: color-mix(in srgb, @window_bg_color 92%, black);

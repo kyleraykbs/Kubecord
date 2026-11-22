@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kubecord
+GenericName=Chat
+Comment=A Discord client
+Exec=kubecord
+Icon=dev.kyle.kubecord
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=discord;chat;voice;
+StartupNotify=true

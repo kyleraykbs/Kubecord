@@ -446,6 +446,9 @@ impl AppState {
 
         let content_header = adw::HeaderBar::new();
         content_header.set_show_title(false);
+        // The window's buttons are on the title bar above.
+        content_header.set_show_end_title_buttons(false);
+        content_header.set_show_start_title_buttons(false);
         content_header.pack_start(&title_box);
         content_header.pack_end(&search_entry);
         content_header.pack_end(&members_toggle);
@@ -750,14 +753,19 @@ impl AppState {
         let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         body.append(&guild_scroll);
         body.append(&sidebar_paned);
-        stack.add_named(&body, Some("chat"));
+        // Across the top: the app's name with its logo, in the middle, and
+        // the window's buttons.
+        let chat_page = adw::ToolbarView::new();
+        chat_page.add_top_bar(&title_bar());
+        chat_page.set_content(Some(&body));
+        stack.add_named(&chat_page, Some("chat"));
 
         // Notices drop in at the top, under the header bars, where they do
         // not cover the message box.
         let notices = gtk::Box::new(gtk::Orientation::Vertical, 6);
         notices.set_halign(gtk::Align::Center);
         notices.set_valign(gtk::Align::Start);
-        notices.set_margin_top(54);
+        notices.set_margin_top(90);
         let page = gtk::Overlay::new();
         page.set_child(Some(&stack));
         page.add_overlay(&notices);
@@ -1017,4 +1025,26 @@ fn dismiss_notice(notice: &gtk::Revealer) {
             parent.remove(&notice);
         }
     });
+}
+
+/// The logo, as drawn in the title bar.
+const LOGO: &[u8] = include_bytes!("../../../data/icons/hicolor/64x64/apps/dev.kyle.kubecord.png");
+
+/// The bar across the top of the window: the logo and "Kubecord" in the
+/// middle, the window's buttons at the ends.
+fn title_bar() -> adw::HeaderBar {
+    let logo = gtk::Image::new();
+    logo.set_pixel_size(20);
+    if let Ok(texture) = gtk::gdk::Texture::from_bytes(&gtk::glib::Bytes::from_static(LOGO)) {
+        logo.set_paintable(Some(&texture));
+    }
+    let name = gtk::Label::new(Some("Kubecord"));
+    name.add_css_class("heading");
+    let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    title.append(&logo);
+    title.append(&name);
+    let bar = adw::HeaderBar::new();
+    bar.add_css_class("kc-title-bar");
+    bar.set_title_widget(Some(&title));
+    bar
 }
