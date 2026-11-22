@@ -90,14 +90,18 @@ window.kc-main-window .kc-title-bar:backdrop > windowhandle,
 window.kc-main-window toolbarview > .top-bar:backdrop > windowhandle {{ filter: none; }}
 window.kc-main-window toolbarview > .top-bar,
 window.kc-main-window toolbarview > .top-bar:backdrop {{ background-color: transparent; box-shadow: none; }}
+/* Dividers, otherwise a faint line the desktop shows through. */
+window.kc-main-window paned > separator {{ background-color: {chat}; }}
 window.kc-main-window .kc-rail {{ background-color: {rail}; }}
 window.kc-main-window .kc-pane-sidebar {{ background-color: {sidebar}; }}
-window.kc-main-window .kc-chat-header,
-window.kc-main-window .kc-chat-header:backdrop,
+window.kc-main-window .kc-pane-chat > .top-bar,
+window.kc-main-window .kc-pane-chat > .top-bar:backdrop,
 window.kc-main-window .kc-chat-body,
 window.kc-main-window .kc-pane-friends {{ background-color: {chat}; box-shadow: none; }}
 window.kc-main-window .kc-pane-members {{ background-color: {sidebar}; }}
 window.kc-main-window .kc-pane-chat,
+window.kc-main-window .kc-chat-header,
+window.kc-main-window .kc-chat-header:backdrop,
 window.kc-main-window .kc-pane-sidebar headerbar,
 window.kc-main-window .kc-pane-sidebar headerbar:backdrop,
 window.kc-main-window .kc-pane-sidebar toolbarview,

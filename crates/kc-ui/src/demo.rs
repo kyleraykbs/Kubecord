@@ -926,6 +926,8 @@ impl AppState {
                     app.demo_share(folder);
                 });
             }
+            // The home page: the friends list.
+            "friends" => self.open_home(),
             "font-toggle" => {
                 // Theming's "Use Discord's Font" switched on and off by its
                 // own switch, as a click does.
