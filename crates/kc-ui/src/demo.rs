@@ -974,6 +974,23 @@ impl AppState {
                         Err(error) => eprintln!("demo: could not read {}: {error}", path.display()),
                     }
                 }
+
+                // KUBECORD_UPLOAD_SEND: send them with no text. Offline the
+                // upload fails, which shows that a send was attempted.
+                if std::env::var_os("KUBECORD_UPLOAD_SEND").is_some() {
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                        app.send_current();
+                        let left = app.with_session(|session| session.uploads.len()).unwrap_or(0);
+                        eprintln!("demo: sent with no text; {left} attachments left in the box");
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                            let notices = descendants::<gtk::Label>(&app.notices.clone().upcast());
+                            let texts: Vec<String> = notices.iter().map(|label| label.text().to_string()).collect();
+                            eprintln!("demo: notices: {texts:?}");
+                        });
+                    });
+                }
             }
             "spelling" => {
                 // Right-click a misspelled word: its corrections, then Add to

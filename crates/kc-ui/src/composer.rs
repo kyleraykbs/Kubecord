@@ -945,7 +945,11 @@ impl AppState {
         // slowmode the second part would be refused; otherwise it goes as
         // several messages.
         let limit = self.message_limit();
-        let parts = split_message(&content, limit);
+        // No text (files only) is still one message, carrying the files.
+        let mut parts = split_message(&content, limit);
+        if parts.is_empty() {
+            parts.push(String::new());
+        }
         if parts.len() > 1 && editing.is_some() {
             self.set_status(&format!("Edits are limited to {limit} characters"));
             return;
@@ -2995,6 +2999,12 @@ pub(crate) fn split_message(text: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_text_is_no_parts() {
+        // send_current turns this into one empty part for the files.
+        assert!(split_message("", 2000).is_empty());
+    }
 
     #[test]
     fn short_messages_stay_whole() {
