@@ -1279,21 +1279,47 @@ impl AppState {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
         card.add_css_class("card");
         card.add_css_class("kc-upload-card");
-        card.set_size_request(UPLOAD_CARD, -1);
+        card.set_size_request(UPLOAD_CARD_MIN, -1);
         card.set_valign(gtk::Align::Start);
         card.set_tooltip_text(Some(&upload.name));
 
         let frame = gtk::Overlay::new();
         let kind = upload_kind(&upload.name, &upload.bytes);
         if kind == UploadKind::Picture {
+            // The whole picture, at its own shape: as tall as a preview and
+            // as wide as that makes it (narrower for a very wide one). Its
+            // natural size is the full image, so clamps hold it to that.
             let picture = gtk::Picture::new();
-            picture.set_content_fit(gtk::ContentFit::Cover);
+            picture.set_content_fit(gtk::ContentFit::Contain);
             picture.set_can_shrink(true);
-            picture.set_size_request(UPLOAD_CARD - 16, UPLOAD_CARD - 16);
             picture.set_overflow(gtk::Overflow::Hidden);
             picture.add_css_class("kc-upload-preview");
+            let across = libadwaita::Clamp::new();
+            across.set_orientation(gtk::Orientation::Horizontal);
+            across.set_child(Some(&picture));
+            let down = libadwaita::Clamp::new();
+            down.set_orientation(gtk::Orientation::Vertical);
+            down.set_child(Some(&across));
+            down.set_halign(gtk::Align::Center);
+            let size_to = {
+                let down = down.clone();
+                move |width: i32, height: i32| {
+                    across.set_maximum_size(width);
+                    across.set_tightening_threshold(width);
+                    down.set_maximum_size(height);
+                    down.set_tightening_threshold(height);
+                    across.set_size_request(width, height);
+                }
+            };
+            size_to(PREVIEW_HEIGHT, PREVIEW_HEIGHT);
+            picture.connect_paintable_notify(move |picture| {
+                if let Some(paintable) = picture.paintable() {
+                    let (width, height) = preview_fit(paintable.intrinsic_width(), paintable.intrinsic_height());
+                    size_to(width, height);
+                }
+            });
             self.fill_upload_preview(&picture, upload);
-            frame.set_child(Some(&picture));
+            frame.set_child(Some(&down));
         } else {
             let icon = gtk::Image::from_icon_name(match kind {
                 UploadKind::Video => "video-x-generic",
@@ -1301,7 +1327,7 @@ impl AppState {
                 _ => "text-x-generic",
             });
             icon.set_pixel_size(64);
-            icon.set_size_request(UPLOAD_CARD - 16, UPLOAD_CARD - 16);
+            icon.set_size_request(UPLOAD_CARD_MIN - 16, PREVIEW_HEIGHT);
             icon.add_css_class("kc-upload-preview");
             frame.set_child(Some(&icon));
         }
@@ -2644,8 +2670,15 @@ mod slowmode_tests {
     }
 }
 
-/// The width of an attached file's card.
-const UPLOAD_CARD: i32 = 176;
+/// The narrowest an attached file's card gets (room for its name).
+const UPLOAD_CARD_MIN: i32 = 136;
+/// How tall an attached picture's preview is.
+const PREVIEW_HEIGHT: i32 = 160;
+/// The widest an attached picture's preview gets (a wider picture is shown
+/// whole, shorter).
+const PREVIEW_MAX_WIDTH: i32 = 360;
+/// The narrowest it gets (a taller picture is shown whole, narrower).
+const PREVIEW_MIN_WIDTH: i32 = 40;
 /// Its height: the preview, its name and size, and its padding (as
 /// measured).
 const UPLOAD_CARD_HEIGHT: i32 = 217;
@@ -2655,6 +2688,23 @@ const PREVIEW_SIZE: i32 = 320;
 thread_local! {
     /// Attached pictures' previews, by file (the address of its bytes).
     static PREVIEWS: RefCell<HashMap<usize, gtk::gdk::Texture>> = RefCell::new(HashMap::new());
+}
+
+/// The size a picture of `width` x `height` is previewed at: whole, at its
+/// own shape, [`PREVIEW_HEIGHT`] tall unless that would make it wider than
+/// [`PREVIEW_MAX_WIDTH`].
+fn preview_fit(width: i32, height: i32) -> (i32, i32) {
+    if width <= 0 || height <= 0 {
+        return (PREVIEW_HEIGHT, PREVIEW_HEIGHT);
+    }
+    let (width, height) = (f64::from(width), f64::from(height));
+    let preview = f64::from(PREVIEW_HEIGHT);
+    let across = width * preview / height;
+    if across > f64::from(PREVIEW_MAX_WIDTH) {
+        let max = f64::from(PREVIEW_MAX_WIDTH);
+        return (PREVIEW_MAX_WIDTH, (height * max / width).round().max(1.0) as i32);
+    }
+    (across.round().max(f64::from(PREVIEW_MIN_WIDTH)) as i32, PREVIEW_HEIGHT)
 }
 
 fn preview_key(upload: &Upload) -> usize {
@@ -2719,6 +2769,15 @@ fn upload_preview(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_keep_the_whole_picture_at_its_shape() {
+        assert_eq!(preview_fit(1200, 400), (PREVIEW_MAX_WIDTH, 120));
+        assert_eq!(preview_fit(300, 900), (53, PREVIEW_HEIGHT));
+        assert_eq!(preview_fit(400, 400), (PREVIEW_HEIGHT, PREVIEW_HEIGHT));
+        assert_eq!(preview_fit(10, 4000), (PREVIEW_MIN_WIDTH, PREVIEW_HEIGHT));
+        assert_eq!(preview_fit(0, 0), (PREVIEW_HEIGHT, PREVIEW_HEIGHT));
+    }
 
     fn snap(text: &str) -> Snapshot {
         Snapshot {

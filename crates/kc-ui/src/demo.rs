@@ -958,6 +958,10 @@ impl AppState {
                 if let Some(gif) = std::env::var_os("KUBECORD_UPLOAD_GIF") {
                     files.insert(1, gif.into());
                 }
+                // KUBECORD_UPLOAD_FILES: these instead (paths, `:`-separated).
+                if let Some(list) = std::env::var_os("KUBECORD_UPLOAD_FILES") {
+                    files = std::env::split_paths(&list).collect();
+                }
                 for path in files {
                     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
                     match std::fs::read(&path) {
