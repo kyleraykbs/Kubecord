@@ -1159,6 +1159,17 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "select-across" => {
+                // A selection dragged across several messages, one with
+                // emoji in Discord's art (it copies as the emoji).
+                store.apply("MESSAGE_CREATE", &message(id_at(0, 50), GRACE, "Nice work on that 👍🏽 really"));
+                store.apply("MESSAGE_CREATE", &message(id_at(0, 51), GRACE, "and one more thing"));
+                self.open_channel(general);
+                let app = self.clone();
+                if std::env::var_os("KUBECORD_NO_SELECT").is_none() {
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || app.demo_select_across());
+                }
+            }
             "jump" => {
                 // A jump to an older message with GIFs around it still loading
                 // (their rows grow after the jump): it must stay in the middle,

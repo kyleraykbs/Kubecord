@@ -490,7 +490,7 @@ const SETTLE_FRAMES: u32 = 30;
 
 /// Asks a text view's parent to measure it again whenever its height (for
 /// its width) differs from what it was given, for [`SETTLE_FRAMES`] frames.
-fn settle_height(view: &gtk::TextView) {
+pub(crate) fn settle_height(view: &gtk::TextView) {
     let frames = std::cell::Cell::new(0);
     view.add_tick_callback(move |view, _| {
         let width = view.width();
@@ -540,6 +540,8 @@ impl AppState {
         }
 
         let text = gtk::Label::new(None);
+        // The message's text, for selecting across messages.
+        text.add_css_class("kc-message-text");
         text.set_xalign(0.0);
         text.set_wrap(true);
         text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -645,10 +647,16 @@ impl AppState {
         view.set_cursor_visible(false);
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         view.add_css_class("kc-rich");
+        view.add_css_class("kc-message-text");
         let links: Rc<Links> = Rc::default();
         let pieces = Rc::new(pieces);
         let emoji_texts: Rc<EmojiTexts> = Rc::default();
         self.fill_emoji_text(&view, &pieces, resolver, false, &links, &emoji_texts);
+        // For copying a selection across messages, which reaches this view.
+        EMOJI_TEXTS.with_borrow_mut(|views| {
+            views.retain(|(view, _)| view.upgrade().is_some());
+            views.push((view.downgrade(), emoji_texts.clone()));
+        });
         // Copying gives each emoji image as text (the emoji, or `:name:`),
         // not the blank a text view gives an embedded widget.
         let texts = emoji_texts.clone();
@@ -1783,6 +1791,25 @@ mod link_media_tests {
 /// itself, or `:name:` for a custom one.
 pub(crate) type EmojiTexts = RefCell<Vec<(gtk::TextChildAnchor, String)>>;
 
+thread_local! {
+    /// Each emoji text view's emoji texts, for copying across messages.
+    static EMOJI_TEXTS: RefCell<Vec<(glib::WeakRef<gtk::TextView>, Rc<EmojiTexts>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The text of `view` from `start` to `end`, emoji included.
+pub(crate) fn view_text(view: &gtk::TextView, start: &gtk::TextIter, end: &gtk::TextIter) -> String {
+    let texts = EMOJI_TEXTS.with_borrow(|views| {
+        views
+            .iter()
+            .find(|(known, _)| known.upgrade().as_ref() == Some(view))
+            .map(|(_, texts)| texts.clone())
+    });
+    match texts {
+        Some(texts) => text_with_emoji(start, end, &texts),
+        None => view.buffer().slice(start, end, false).to_string(),
+    }
+}
+
 /// The text from `start` to `end`, each emoji image given as its text.
 pub(crate) fn text_with_emoji(start: &gtk::TextIter, end: &gtk::TextIter, texts: &EmojiTexts) -> String {
     let texts = texts.borrow();
@@ -1808,12 +1835,9 @@ pub(crate) fn text_with_emoji(start: &gtk::TextIter, end: &gtk::TextIter, texts:
 mod emoji_copy_tests {
     use super::*;
 
-    #[test]
+    // On GTK's shared test thread, like the other tests that need GTK.
+    #[gtk::test]
     fn copied_text_gives_each_emoji_image_its_text() {
-        // Needs a display (skipped in a sandboxed build).
-        if gtk::init().is_err() {
-            return;
-        }
         let buffer = gtk::TextBuffer::new(None);
         let texts: EmojiTexts = RefCell::default();
         buffer.insert(&mut buffer.end_iter(), "nice ");

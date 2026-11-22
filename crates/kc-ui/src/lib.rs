@@ -7,6 +7,7 @@ mod app_forms;
 mod captcha;
 mod channel_settings;
 mod chat;
+mod chat_select;
 mod components;
 mod composer;
 mod content;

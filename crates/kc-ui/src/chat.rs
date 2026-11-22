@@ -265,6 +265,7 @@ impl AppState {
         self.chat.borrow_mut().present = Some(present);
 
         self.connect_toolbar();
+        self.connect_cross_select();
 
         // The content height changes when rows are added and when images
         // finish loading; keep the reading position through both.
