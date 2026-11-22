@@ -1159,6 +1159,46 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "jump" => {
+                // A jump to an older message with GIFs around it still loading
+                // (their rows grow after the jump): it must stay in the middle,
+                // and its highlight fade.
+                let target = id_at(0, 30);
+                for index in 0..4 {
+                    store.apply("MESSAGE_CREATE", &gif_message(id_at(0, 20 + index), ADA));
+                }
+                store.apply("MESSAGE_CREATE", &message(target, GRACE, "This is the message the jump goes to."));
+                for index in 0..4 {
+                    store.apply("MESSAGE_CREATE", &gif_message(id_at(0, 40 + index), ADA));
+                }
+                self.open_channel(general);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                    // Rebuilt first, as after fetching the page around it.
+                    app.chat.borrow_mut().channel = None;
+                    app.render_messages();
+                    eprintln!("demo: jumped: {}", app.jump_to_message(Snowflake::new(target)));
+                    for ms in [300u64, 1500, 3000, 5000] {
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(ms), move || {
+                            let chat = app.chat.borrow();
+                            let Some(entry) = chat.rows.iter().find(|entry| entry.id == Snowflake::new(target)) else { return };
+                            let Some(bounds) = entry.row.compute_bounds(&app.messages_scroll) else { return };
+                            let centre = f64::from(bounds.y() + bounds.height() / 2.0);
+                            let view = f64::from(app.messages_scroll.height()) / 2.0;
+                            let adjustment = app.messages_scroll.vadjustment();
+                            eprintln!(
+                                "demo: after {ms} ms the target is {:+.0} px from the middle (scroll {:.0} of {:.0}, flash={} fading={})",
+                                centre - view,
+                                adjustment.value(),
+                                adjustment.upper() - adjustment.page_size(),
+                                entry.body.has_css_class("kc-flash"),
+                                entry.body.has_css_class("kc-flash-out")
+                            );
+                        });
+                    }
+                });
+            }
             "drafts" => {
                 // A draft per channel: typed in #general, then #topic-00,
                 // then back. KUBECORD_DRAFTS_CHECK only opens #general (a

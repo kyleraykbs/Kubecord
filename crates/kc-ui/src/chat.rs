@@ -71,6 +71,38 @@ pub(crate) struct ChatView {
     /// A message to jump to once this channel's first page of history is in
     /// (set when a notification opens a channel that is still loading).
     pending_jump: Option<(Snowflake, Snowflake)>,
+    /// The message just jumped to, held in the middle of the view until
+    /// this time while the rows around it are still taking their heights
+    /// (images, embeds, wrapped text), or until the user scrolls.
+    pin: Option<(glib::WeakRef<gtk::ListBoxRow>, std::time::Instant)>,
+}
+
+/// How long a message jumped to is held in the middle of the view.
+const PIN_TIME: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long the highlight on a message jumped to stays full, before it fades
+/// (over the time in `.kc-flash-out`'s transition).
+const FLASH_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+const FLASH_FADE: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// Highlights a message jumped to: full for a moment, then fading out.
+fn flash(body: &gtk::Box) {
+    body.remove_css_class("kc-flash-out");
+    body.add_css_class("kc-flash");
+    let target = body.downgrade();
+    glib::timeout_add_local_once(FLASH_HOLD, move || {
+        let Some(body) = target.upgrade() else { return };
+        // `.kc-flash-out` carries the transition back to the normal colour.
+        body.add_css_class("kc-flash-out");
+        body.remove_css_class("kc-flash");
+        let target = body.downgrade();
+        glib::timeout_add_local_once(FLASH_FADE, move || {
+            if let Some(body) = target.upgrade()
+                && !body.has_css_class("kc-flash")
+            {
+                body.remove_css_class("kc-flash-out");
+            }
+        });
+    });
 }
 
 /// A small flat text button used for inline actions like Retry / Delete.
@@ -238,6 +270,37 @@ impl AppState {
         // finish loading; keep the reading position through both.
         let app = self.clone();
         adjustment.connect_changed(move |_| app.queue_scroll_settle());
+
+        // Scrolling by hand (wheel, touchpad, dragging the scrollbar, the
+        // keyboard) lets go of a message jumped to.
+        let release = {
+            let app = Rc::downgrade(self);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    app.chat.borrow_mut().pin = None;
+                }
+            }
+        };
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let let_go = release.clone();
+        wheel.connect_scroll(move |_, _, _| {
+            let_go();
+            glib::Propagation::Proceed
+        });
+        self.messages_scroll.add_controller(wheel);
+        let press = gtk::GestureClick::new();
+        press.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let let_go = release.clone();
+        press.connect_pressed(move |_, _, _, _| let_go());
+        self.messages_scroll.vscrollbar().add_controller(press);
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, _, _, _| {
+            release();
+            glib::Propagation::Proceed
+        });
+        self.messages_scroll.add_controller(keys);
     }
 
     /// Puts the list back where it belongs after its content changed
@@ -258,6 +321,16 @@ impl AppState {
         let app = self.clone();
         glib::idle_add_local_once(move || {
             app.chat.borrow_mut().settle_queued = false;
+            // A message jumped to stays in the middle while heights settle.
+            let pinned = app.chat.borrow().pin.as_ref().and_then(|(row, until)| {
+                (std::time::Instant::now() < *until).then(|| row.upgrade()).flatten()
+            });
+            if let Some(row) = pinned {
+                app.chat.borrow_mut().restore = None;
+                app.scroll_row_to_centre(&row);
+                return;
+            }
+            app.chat.borrow_mut().pin = None;
             let adjustment = app.messages_scroll.vadjustment();
             let restore = app.chat.borrow_mut().restore.take();
             if let Some((upper, value)) = restore {
@@ -825,13 +898,16 @@ impl AppState {
         let Some((row, body)) = found else {
             return false;
         };
-        self.chat.borrow_mut().at_bottom = false;
+        {
+            let mut chat = self.chat.borrow_mut();
+            chat.at_bottom = false;
+            chat.restore = None;
+            // Held in the middle while the rows around it settle.
+            chat.pin = Some((row.downgrade(), std::time::Instant::now() + PIN_TIME));
+        }
         self.centre_row(&row);
         self.update_present();
-        body.add_css_class("kc-flash");
-        glib::timeout_add_seconds_local_once(2, move || {
-            body.remove_css_class("kc-flash");
-        });
+        flash(&body);
         true
     }
 
@@ -857,13 +933,19 @@ impl AppState {
     /// viewport's centre, clamped to the scrollable range.
     fn scroll_row_to_centre(&self, row: &gtk::ListBoxRow) {
         let adjustment = self.messages_scroll.vadjustment();
-        // The vertical adjustment tracks the scroll's child (the message
-        // column), so measure the row's bounds within that content.
-        let Some(bounds) = self
+        // Measured within the scrolled content (the message column inside
+        // the viewport), whose top is position 0 of the adjustment. Not
+        // against the viewport itself: it moves with the scroll, so a row's
+        // place in it is relative to where the view happened to be (and lags
+        // a frame behind a new value), which sent jumps far off target.
+        let content = self
             .messages_scroll
             .child()
-            .and_then(|content| row.compute_bounds(&content))
-        else {
+            .and_then(|viewport| match viewport.downcast_ref::<gtk::Viewport>() {
+                Some(viewport) => viewport.child(),
+                None => Some(viewport),
+            });
+        let Some(bounds) = content.and_then(|content| row.compute_bounds(&content)) else {
             return;
         };
         let page = adjustment.page_size();

@@ -187,8 +187,12 @@ headerbar.kc-title-bar windowcontrols button {
     background-color: alpha(@window_fg_color, 0.04);
 }
 
+/* A message jumped to: highlighted, then fading back (see chat::flash). */
 .kc-message.kc-flash {
-    background-color: alpha(@accent_bg_color, 0.18);
+    background-color: alpha(@accent_bg_color, 0.30);
+}
+.kc-message.kc-flash-out {
+    transition: background-color 2000ms ease-out;
 }
 
 /* Share mode: the chosen messages, the redacted ones (blurred behind
