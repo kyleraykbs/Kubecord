@@ -409,7 +409,17 @@ impl AppState {
             crate::video_setup::spawn_local(
                 self,
                 async move {
-                    let mut index = http.command_index(scope).await?;
+                    // A place Discord has no index for (it answers some DMs
+                    // with "Unknown Channel") has no commands of its own; it
+                    // is remembered like any other answer, not asked again
+                    // every few seconds.
+                    let mut index = match http.command_index(scope).await {
+                        Ok(index) => index,
+                        Err(error) => {
+                            tracing::debug!(%error, "no commands here");
+                            CommandIndex::default()
+                        }
+                    };
                     // The user's own installed apps, where they allow it.
                     if let Ok(mine) = http.command_index(CommandScope::User).await {
                         index.merge(mine);
