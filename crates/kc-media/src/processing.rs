@@ -162,7 +162,12 @@ pub(crate) fn chain(
 ) -> String {
     let mut chain = String::new();
     let echo = processing.echo_cancellation && probe;
-    let webrtc_noise = processing.noise_suppression == NoiseSuppression::Standard;
+    // Strong suppression is RNNoise; where it is not installed (the Flatpak
+    // runtime has no audiornnoise) WebRTC's own suppression stands in, rather
+    // than none at all.
+    let rnnoise = processing.noise_suppression == NoiseSuppression::Strong && available("audiornnoise");
+    let webrtc_noise = processing.noise_suppression == NoiseSuppression::Standard
+        || (processing.noise_suppression == NoiseSuppression::Strong && !rnnoise);
     if (echo || webrtc_noise || processing.auto_gain) && available("webrtcdsp") {
         chain.push_str(&format!(
             " ! webrtcdsp name=dsp probe={ECHO_PROBE} echo-cancel={echo} \
@@ -173,14 +178,12 @@ pub(crate) fn chain(
     } else if echo || webrtc_noise || processing.auto_gain {
         tracing::warn!("webrtcdsp is not installed; microphone processing is off");
     }
-    if processing.noise_suppression == NoiseSuppression::Strong {
-        if available("audiornnoise") {
-            chain.push_str(&format!(
-                " ! audioconvert ! audiornnoise ! audioconvert ! {CAPTURE_CAPS}"
-            ));
-        } else {
-            tracing::warn!("audiornnoise is not installed; strong noise suppression is off");
-        }
+    if rnnoise {
+        chain.push_str(&format!(
+            " ! audioconvert ! audiornnoise ! audioconvert ! {CAPTURE_CAPS}"
+        ));
+    } else if processing.noise_suppression == NoiseSuppression::Strong {
+        tracing::warn!("audiornnoise is not installed; using WebRTC noise suppression instead");
     }
     chain
 }
@@ -503,6 +506,17 @@ mod tests {
 
         // Missing plugins are left out rather than failing the capture.
         assert_eq!(chain(&strong, false, &|_: &str| false), "");
+    }
+
+    #[test]
+    fn strong_suppression_falls_back_to_webrtc_without_rnnoise() {
+        let strong = VoiceProcessing {
+            noise_suppression: NoiseSuppression::Strong,
+            ..VoiceProcessing::default()
+        };
+        let line = chain(&strong, false, &|name: &str| name != "audiornnoise");
+        assert!(line.contains("noise-suppression=true"));
+        assert!(!line.contains("audiornnoise"));
     }
 
     #[test]
