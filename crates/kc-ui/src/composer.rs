@@ -681,6 +681,12 @@ impl AppState {
             self.can_make_polls(),
             Box::new(|app| app.show_create_poll()),
         );
+        add(
+            "audio-input-microphone-symbolic",
+            "Record Voice Message",
+            self.can_send_voice_messages(),
+            Box::new(|app| app.record_voice_message()),
+        );
         popover.set_child(Some(&items));
         popover.connect_closed(|popover| popover.unparent());
         popover.popup();

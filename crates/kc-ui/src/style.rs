@@ -427,6 +427,24 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-voice-message {
+    padding: 8px 12px 8px 8px;
+    border-radius: 24px;
+    background-color: alpha(@window_fg_color, 0.06);
+}
+
+.kc-recording-dot {
+    min-width: 10px;
+    min-height: 10px;
+    border-radius: 5px;
+    background-color: @error_color;
+    animation: kc-recording-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes kc-recording-pulse {
+    50% { opacity: 0.3; }
+}
+
 .kc-poll {
     padding: 12px;
     border-radius: 10px;

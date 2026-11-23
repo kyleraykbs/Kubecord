@@ -32,6 +32,8 @@ pub struct Outgoing {
     /// Forwards this message (its guild, channel and id); Discord wants no
     /// content with it, so a note goes in a message of its own.
     pub forward: Option<(Option<Snowflake>, Snowflake, Snowflake)>,
+    /// A voice message: the one attachment is its recording.
+    pub voice: bool,
 }
 
 /// A poll to create: a question, two to ten answers, how long it runs and
@@ -83,6 +85,7 @@ impl Default for Outgoing {
             silent: false,
             poll: None,
             forward: None,
+            voice: false,
         }
     }
 }
@@ -1281,7 +1284,7 @@ impl HttpClient {
             "content": message.content,
             "nonce": nonce,
             "tts": false,
-            "flags": if message.silent { 1 << 12 } else { 0 },
+            "flags": if message.silent { 1 << 12 } else { 0 } | if message.voice { 1 << 13 } else { 0 },
         });
         if let Some(reply_to) = message.reply_to {
             body["message_reference"] = json!({
@@ -1758,6 +1761,38 @@ impl HttpClient {
         }
 
         Ok(upload)
+    }
+
+    /// Sends a voice message: uploads the recording, then posts it with its
+    /// length and waveform, as the web client does.
+    pub async fn send_voice_message(
+        &self,
+        channel_id: Snowflake,
+        ogg: Vec<u8>,
+        duration_secs: f64,
+        waveform: &[u8],
+        reply_to: Option<Snowflake>,
+    ) -> Result<Message> {
+        use base64::Engine as _;
+        let filename = "voice-message.ogg";
+        let upload = self.upload_attachment(channel_id, filename, ogg).await?;
+        let attachment = json!({
+            "id": "0",
+            "filename": filename,
+            "uploaded_filename": upload["upload_filename"],
+            "duration_secs": (duration_secs * 100.0).round() / 100.0,
+            "waveform": base64::engine::general_purpose::STANDARD.encode(waveform),
+        });
+        self.send(
+            channel_id,
+            &Outgoing {
+                attachments: vec![attachment],
+                reply_to,
+                voice: true,
+                ..Outgoing::default()
+            },
+        )
+        .await
     }
 
     pub async fn send_message_with_attachments(

@@ -24,9 +24,30 @@ pub struct Attachment {
     pub description: Option<String>,
     #[serde(default)]
     pub flags: u64,
+    /// A voice message's length.
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// A voice message's loudness over time: base64 of up to 256 bytes.
+    #[serde(default)]
+    pub waveform: Option<String>,
 }
 
 impl Attachment {
+    /// A recorded voice message (with its length and waveform), not just an
+    /// audio file.
+    pub fn is_voice_message(&self) -> bool {
+        self.duration_secs.is_some() && self.waveform.is_some()
+    }
+
+    /// A voice message's waveform, each value 0-255.
+    pub fn waveform_levels(&self) -> Vec<u8> {
+        use base64::Engine as _;
+        self.waveform
+            .as_deref()
+            .and_then(|waveform| base64::engine::general_purpose::STANDARD.decode(waveform).ok())
+            .unwrap_or_default()
+    }
+
     pub fn is_spoiler(&self) -> bool {
         self.filename.starts_with("SPOILER_") || self.flags & (1 << 3) != 0
     }
@@ -514,6 +535,8 @@ impl Message {
     pub const FLAG_EPHEMERAL: u64 = 1 << 6;
     /// The app is still working on its answer ("is thinking…").
     pub const FLAG_LOADING: u64 = 1 << 7;
+    /// A voice message: one Ogg Opus attachment and no text.
+    pub const FLAG_VOICE_MESSAGE: u64 = 1 << 13;
     /// Laid out with components alone (text, sections, containers...).
     pub const FLAG_COMPONENTS_V2: u64 = 1 << 15;
 

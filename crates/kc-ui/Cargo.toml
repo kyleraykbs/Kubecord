@@ -24,6 +24,7 @@ kc-core.workspace = true
 kc-gateway.workspace = true
 kc-http.workspace = true
 kc-media.workspace = true
+base64.workspace = true
 kc-state.workspace = true
 kc-voice.workspace = true
 libadwaita = { workspace = true, features = ["v1_7"] }

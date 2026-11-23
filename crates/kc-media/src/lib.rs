@@ -13,6 +13,7 @@ pub mod receive;
 pub mod share_audio;
 pub mod sound;
 pub mod video;
+pub mod voice_message;
 
 pub use error::{Error, Result};
 

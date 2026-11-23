@@ -912,6 +912,9 @@ impl AppState {
 
     /// An image, video poster, audio or file card for one attachment.
     pub(crate) fn attachment_widget(self: &Rc<Self>, attachment: &Attachment) -> gtk::Widget {
+        if attachment.is_voice_message() {
+            return self.voice_message_widget(attachment);
+        }
         let visual = attachment.is_image() || attachment.is_video();
         if let (true, Some(width), Some(height)) = (visual, attachment.width, attachment.height) {
             let still = if attachment.proxy_url.is_empty() {

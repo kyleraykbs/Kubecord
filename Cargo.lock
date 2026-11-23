@@ -2176,6 +2176,7 @@ dependencies = [
  "anyhow",
  "ashpd",
  "async-channel",
+ "base64 0.22.1",
  "emojis",
  "flate2",
  "gdk4-wayland",

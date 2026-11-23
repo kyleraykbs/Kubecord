@@ -41,7 +41,7 @@ impl Sound {
 }
 
 /// Where sounds play: the configured output, or the default one.
-fn output_sink() -> Result<gst::Element> {
+pub(crate) fn output_sink() -> Result<gst::Element> {
     let sink = match crate::devices::output_device() {
         Some(device) => gst::ElementFactory::make("pulsesink")
             .property("device", device)

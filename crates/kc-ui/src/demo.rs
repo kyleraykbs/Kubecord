@@ -538,6 +538,25 @@ impl AppState {
                     }
                 });
             }
+            "voice-messages" => {
+                // A voice message, and recording another (from a test tone).
+                use base64::Engine as _;
+                let waveform: Vec<u8> = (0..120).map(|i: u32| ((i * 37 % 200) + 40 + (i % 7) * 2) as u8).collect();
+                let mut posted = message(id_at(60_000, 30), 2, "");
+                posted["flags"] = json!(8192);
+                posted["attachments"] = json!([{
+                    "id": "900", "filename": "voice-message.ogg", "size": 30000,
+                    "url": "https://cdn.discordapp.com/attachments/1/900/voice-message.ogg",
+                    "proxy_url": "", "content_type": "audio/ogg", "duration_secs": 14.6,
+                    "waveform": base64::engine::general_purpose::STANDARD.encode(&waveform)
+                }]);
+                store.apply("MESSAGE_CREATE", &posted);
+                self.open_channel(general.clone());
+                // SAFETY: set before any thread reads the environment for it.
+                unsafe { std::env::set_var("KUBECORD_TEST_MIC", "audiotestsrc is-live=true wave=pink-noise volume=0.4") };
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || app.record_voice_message());
+            }
             "polls" | "poll-create" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.
