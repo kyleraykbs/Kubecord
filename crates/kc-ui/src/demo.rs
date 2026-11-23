@@ -549,6 +549,43 @@ impl AppState {
                     });
                 });
             }
+            "search-hold" => {
+                // Scrolled up a little, the side panel opens and closes: the
+                // message at the top of the view must stay put.
+                self.open_channel(general.clone());
+                let app = self.clone();
+                let top_row = move |app: &Rc<AppState>| -> String {
+                    let value = app.messages_scroll.vadjustment().value();
+                    app.chat
+                        .borrow()
+                        .rows
+                        .iter()
+                        .find_map(|entry| {
+                            let bounds = entry.row.compute_bounds(&app.messages_list)?;
+                            (f64::from(bounds.y() + bounds.height()) > value)
+                                .then(|| format!("{} at {:.0}", entry.id, f64::from(bounds.y()) - value))
+                        })
+                        .unwrap_or_default()
+                };
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    let adjustment = app.messages_scroll.vadjustment();
+                    adjustment.set_value((adjustment.upper() - adjustment.page_size() - 700.0).max(0.0));
+                    let app2 = app.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                        eprintln!("demo: hold before: {}", top_row(&app2));
+                        app2.demo_search("cats", Vec::new());
+                        let app3 = app2.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                            eprintln!("demo: hold with panel: {}", top_row(&app3));
+                            app3.close_search();
+                            let app4 = app3.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                                eprintln!("demo: hold after close: {}", top_row(&app4));
+                            });
+                        });
+                    });
+                });
+            }
             "search-focus" => {
                 // Clicking into the search box: the panel opens on its hints.
                 self.open_channel(general.clone());

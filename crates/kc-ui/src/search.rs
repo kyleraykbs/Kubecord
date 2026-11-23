@@ -218,26 +218,46 @@ pub(crate) struct SearchPanel {
     scroll: gtk::ScrolledWindow,
     footer: gtk::Label,
     run: RefCell<Run>,
+    /// A search is open (in the DM or server it was opened in).
+    active: Cell<bool>,
     /// Set while the tab and sort widgets are being set from code.
     quiet: Cell<bool>,
 }
 
 impl AppState {
-    /// Whether the search panel is showing.
+    /// Whether a search is open for the DM or server on screen (it stays
+    /// with the one it was opened in).
     pub(crate) fn search_open(&self) -> bool {
+        let here = self.search_scope().map(|(scope, _)| scope);
         self.search
             .borrow()
             .as_ref()
-            .is_some_and(|_| self.sidebar_stack.visible_child_name().as_deref() == Some("search"))
+            .is_some_and(|panel| panel.active.get() && Some(panel.run.borrow().scope) == here)
     }
 
-    /// Shows or hides the member list, unless search results hold the side.
-    pub(crate) fn show_member_side(&self, show: bool) {
-        if self.search_open() {
-            self.split.set_show_sidebar(true);
-        } else {
-            self.split.set_show_sidebar(show);
+    /// Shows the side for what is on screen: the search results where a
+    /// search is open, else the member list (when `show`), keeping the
+    /// chat's view in place as its width changes.
+    pub(crate) fn show_member_side(self: &Rc<Self>, show: bool) {
+        let search = self.search_open();
+        let page = if search { "search" } else { "members" };
+        let shown = search || show;
+        let changes = self.split.shows_sidebar() != shown
+            || (shown && self.sidebar_stack.visible_child_name().as_deref() != Some(page));
+        if changes {
+            self.hold_scroll_through_resize();
         }
+        self.sidebar_stack.set_visible_child_name(page);
+        if search {
+            self.split.set_min_sidebar_width(340.0);
+            self.split.set_max_sidebar_width(460.0);
+            self.split.set_sidebar_width_fraction(0.32);
+        } else {
+            self.split.set_min_sidebar_width(220.0);
+            self.split.set_max_sidebar_width(260.0);
+            self.split.set_sidebar_width_fraction(0.25);
+        }
+        self.split.set_show_sidebar(shown);
     }
 
     /// The scope a search from the open channel covers: its server, or the
@@ -414,11 +434,8 @@ impl AppState {
             button.set_active(*tab == Tab::Messages);
         }
         panel.quiet.set(false);
-        self.sidebar_stack.set_visible_child_name("search");
-        self.split.set_min_sidebar_width(340.0);
-        self.split.set_max_sidebar_width(460.0);
-        self.split.set_sidebar_width_fraction(0.32);
-        self.split.set_show_sidebar(true);
+        panel.active.set(true);
+        self.show_member_side(true);
         self.rerun_search();
     }
 
@@ -439,11 +456,8 @@ impl AppState {
             run.total = messages.len() as u64;
             run.offset = messages.len() as u32;
         }
-        self.sidebar_stack.set_visible_child_name("search");
-        self.split.set_min_sidebar_width(340.0);
-        self.split.set_max_sidebar_width(460.0);
-        self.split.set_sidebar_width_fraction(0.32);
-        self.split.set_show_sidebar(true);
+        panel.active.set(true);
+        self.show_member_side(true);
         self.render_chips(&panel);
         panel.title.set_label(&format!("{} Results", messages.len()));
         self.append_results(&panel, messages);
@@ -520,11 +534,8 @@ impl AppState {
     pub(crate) fn close_search(self: &Rc<Self>) {
         if let Some(panel) = self.search.borrow().as_ref() {
             panel.run.borrow_mut().generation += 1;
+            panel.active.set(false);
         }
-        self.sidebar_stack.set_visible_child_name("members");
-        self.split.set_min_sidebar_width(220.0);
-        self.split.set_max_sidebar_width(260.0);
-        self.split.set_sidebar_width_fraction(0.25);
         self.render_members();
     }
 
@@ -1188,6 +1199,7 @@ fn build_panel() -> SearchPanel {
             retries: 0,
         }),
         quiet: Cell::new(false),
+        active: Cell::new(false),
     }
 }
 

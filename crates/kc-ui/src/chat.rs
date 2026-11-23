@@ -393,6 +393,50 @@ impl AppState {
         });
     }
 
+    /// Keeps what is on screen in place while the chat's width changes (a
+    /// side panel opening or closing rewraps every message): at the bottom
+    /// it stays at the bottom, otherwise the message at the top of the view
+    /// keeps its place, for the frames the new layout takes to settle.
+    pub(crate) fn hold_scroll_through_resize(self: &Rc<Self>) {
+        const FRAMES: u32 = 30;
+        let adjustment = self.messages_scroll.vadjustment();
+        let at_bottom = self.chat.borrow().at_bottom;
+        let anchor = (!at_bottom)
+            .then(|| {
+                let top = adjustment.value();
+                self.chat.borrow().rows.iter().find_map(|entry| {
+                    let bounds = entry.row.compute_bounds(&self.messages_list)?;
+                    let y = f64::from(bounds.y());
+                    (y + f64::from(bounds.height()) > top).then(|| (entry.row.downgrade(), y - top))
+                })
+            })
+            .flatten();
+        let left = std::cell::Cell::new(FRAMES);
+        let app = Rc::downgrade(self);
+        self.messages_scroll.add_tick_callback(move |_, _| {
+            let Some(app) = app.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let adjustment = app.messages_scroll.vadjustment();
+            match &anchor {
+                Some((row, offset)) => {
+                    if let Some(bounds) = row.upgrade().and_then(|row| row.compute_bounds(&app.messages_list)) {
+                        let value = f64::from(bounds.y()) - offset;
+                        if (adjustment.value() - value).abs() > 0.5 {
+                            adjustment.set_value(value);
+                        }
+                    }
+                }
+                None if at_bottom => {
+                    adjustment.set_value(adjustment.upper() - adjustment.page_size());
+                }
+                None => {}
+            }
+            left.set(left.get() - 1);
+            if left.get() == 0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
+    }
+
     fn scroll_to_bottom(self: &Rc<Self>) {
         self.chat.borrow_mut().at_bottom = true;
         let adjustment = self.messages_scroll.vadjustment();
