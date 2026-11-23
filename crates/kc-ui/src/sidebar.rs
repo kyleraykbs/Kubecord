@@ -905,6 +905,7 @@ impl AppState {
                 http,
                 store,
                 channel: channel.id,
+                limit: crate::chat::initial_page(self.window.height()),
             });
         }
         self.render_all();

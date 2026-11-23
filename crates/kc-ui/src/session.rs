@@ -309,6 +309,8 @@ pub enum Command {
         http: HttpClient,
         store: Store,
         channel: Snowflake,
+        /// How many messages (sized to the window, as the web client does).
+        limit: u8,
     },
     SendTyping {
         account: AccountId,
@@ -589,7 +591,8 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
             http,
             store,
             channel,
-        } => match http.messages(channel, 50, None).await {
+            limit,
+        } => match http.messages(channel, limit, None).await {
             Ok(messages) => store.load_history(channel, messages),
             Err(error) => send_http_error(&ui, Some(account), &error).await,
         },
@@ -817,9 +820,10 @@ fn spawn_account(
     }
 
     tokio::spawn(async move {
-        // The web client reads its experiment assignments as it loads, and
-        // Discord hands out the installation id with them; the identify
-        // carries it once known. A slow answer does not hold up the login.
+        // Discord hands out the installation id with the experiment
+        // assignments; the identify carries it once known. Like the web
+        // client (which keeps its assignments), ask only until there is one.
+        // A slow answer does not hold up the login.
         if kc_core::super_properties::installation_id().is_none() {
             let http = kc_http::HttpClient::new(token.clone());
             let _ = tokio::time::timeout(
@@ -827,9 +831,6 @@ fn spawn_account(
                 http.fetch_installation_id(),
             )
             .await;
-        } else {
-            let http = kc_http::HttpClient::new(token.clone());
-            tokio::spawn(async move { http.fetch_installation_id().await });
         }
         let (handle, mut gateway_rx, gateway_task) = Gateway::new(token).start();
         handle.set_focused(crate::animation::window_focused());

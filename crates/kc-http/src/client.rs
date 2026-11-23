@@ -103,6 +103,38 @@ pub struct HttpClient {
     timezone: String,
     limiter: RateLimiter,
     profiles: ProfileCache,
+    /// The token the last ack's answer carried; the next ack sends it back,
+    /// as the web client does (`null` until there is one).
+    ack_token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// `path` with its snowflakes replaced by `{id}`, for logs.
+fn redact_ids(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut digits = String::new();
+    for ch in path.chars().chain(std::iter::once('/')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.len() >= 15 {
+            out.push_str("{id}");
+        } else {
+            out.push_str(&digits);
+        }
+        digits.clear();
+        out.push(ch);
+    }
+    out.pop();
+    out
+}
+
+/// Days since Discord's epoch (2015-01-01), rounded up: the `last_viewed`
+/// the web client sends with an ack.
+fn days_since_discord_epoch(now_ms: u64) -> u64 {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    const DAY_MS: u64 = 86_400_000;
+    now_ms.saturating_sub(DISCORD_EPOCH_MS).div_ceil(DAY_MS)
 }
 
 /// Profiles fetched lately, by user and server, with when they were
@@ -136,10 +168,12 @@ impl HttpClient {
             timezone: std::env::var("TZ").unwrap_or_else(|_| "UTC".to_owned()),
             limiter: RateLimiter::default(),
             profiles: ProfileCache::default(),
+            ack_token: Default::default(),
         }
     }
 
     fn request(&self, method: Method, path: &str) -> wreq::RequestBuilder {
+        tracing::debug!(target: "kc_http::requests", %method, path = %redact_ids(path), "request");
         // A change to the account's own profile (name, bio, avatar, a
         // server profile) makes the kept copy of it stale.
         if method != Method::GET
@@ -1486,12 +1520,22 @@ impl HttpClient {
         Ok(())
     }
 
+    /// Marks a channel read up to `message_id`, with the body the web client
+    /// sends: the previous ack's token and the day the channel was viewed.
     pub async fn ack_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
-        self.post(
-            &format!("/channels/{channel_id}/messages/{message_id}/ack"),
-            json!({ "token": null }),
-        )
-        .await?;
+        let token = self.ack_token.lock().ok().and_then(|token| token.clone());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        let answer = self
+            .post(
+                &format!("/channels/{channel_id}/messages/{message_id}/ack"),
+                json!({ "token": token, "last_viewed": days_since_discord_epoch(now_ms) }),
+            )
+            .await?;
+        if let Ok(mut kept) = self.ack_token.lock() {
+            *kept = answer["token"].as_str().map(str::to_owned);
+        }
         Ok(())
     }
 
@@ -2174,6 +2218,14 @@ pub fn channel_notification_payload(channel_id: Snowflake, muted: bool, level: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_viewed_counts_days_since_discords_epoch() {
+        // 2026-11-23 06:00 UTC is in day 4345 since 2015-01-01 (rounded up).
+        assert_eq!(days_since_discord_epoch(1_795_413_600_000), 4345);
+        assert_eq!(days_since_discord_epoch(1_420_070_400_000), 0);
+        assert_eq!(days_since_discord_epoch(1_420_070_400_001), 1);
+    }
 
     #[test]
     fn notification_settings_payloads() {

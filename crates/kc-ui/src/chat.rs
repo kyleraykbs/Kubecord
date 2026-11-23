@@ -20,7 +20,24 @@ use crate::widgets::{clear_box, clear_list, empty_state, hex_color, icon_button,
 const GROUP_WINDOW_MS: u64 = 7 * 60 * 1000;
 /// Rows built when a channel is opened; older ones load on scroll.
 const INITIAL_ROWS: usize = 60;
+/// Rows built at a time from messages already loaded; also the page for a
+/// jump to a message (the messages around it).
 const PAGE: u8 = 50;
+
+/// How many messages the web client fetches when a channel opens: enough to
+/// fill its window, by its own formula (the window less 145 px, at least
+/// 400, over a 91 px message, plus 5%), between 10 and 30. Fetching a fixed
+/// 50 every time is a pattern no browser makes.
+pub(crate) fn initial_page(window_height: i32) -> u8 {
+    let viewport = f64::from((window_height - 145).max(400));
+    (1.05 * (viewport / 91.0).ceil()).ceil().clamp(10.0, 30.0) as u8
+}
+
+/// The page fetched when scrolling past what is loaded: twice the first, as
+/// the web client did in a capture (10, then 20).
+fn scroll_page(window_height: i32) -> u8 {
+    initial_page(window_height) * 2
+}
 
 pub(crate) struct RowEntry {
     pub id: Snowflake,
@@ -227,7 +244,14 @@ impl AppState {
         // moves what is on screen without a scroll: re-check which looping
         // GIFs are visible then too.
         let app = self.clone();
-        adjustment.connect_changed(move |_| app.queue_players_update());
+        adjustment.connect_changed(move |adjustment| {
+            app.queue_players_update();
+            // Too few messages to scroll: a scroll will never reach the top,
+            // so fetch older ones now (once per page; stops at the top).
+            if adjustment.upper() <= adjustment.page_size() + 1.0 && app.chat.borrow().channel.is_some() {
+                app.queue_load_older();
+            }
+        });
         let app = self.clone();
         adjustment.connect_value_changed(move |_| {
             app.queue_players_update();
@@ -551,13 +575,14 @@ impl AppState {
             return;
         };
         self.chat.borrow_mut().newer_loading = true;
+        let page = scroll_page(self.window.height());
         self.spawn(
-            async move { http.messages_after(channel_id, PAGE, newest_shown).await },
+            async move { http.messages_after(channel_id, page, newest_shown).await },
             move |app, result| {
                 app.chat.borrow_mut().newer_loading = false;
                 match result {
                     Ok(messages) => {
-                        let full_page = messages.len() >= PAGE as usize;
+                        let full_page = messages.len() >= page as usize;
                         let mut ids: Vec<_> = messages.iter().map(|message| message.id).collect();
                         ids.sort();
                         store.write(|state| state.load_newer(channel_id, messages, full_page));
@@ -604,8 +629,9 @@ impl AppState {
         self.with_session_mut(|session| {
             session.history.insert(channel_id, Default::default());
         });
+        let first_page = initial_page(self.window.height());
         self.spawn(
-            async move { http.messages(channel_id, PAGE, None).await },
+            async move { http.messages(channel_id, first_page, None).await },
             move |app, result| {
                 if let Some(button) = &app.chat.borrow().present {
                     button.set_sensitive(true);
@@ -897,11 +923,12 @@ impl AppState {
         }
         self.history_spinner.set_visible(true);
         self.history_spinner.set_spinning(true);
+        let page = scroll_page(self.window.height());
         self.spawn(
-            async move { http.messages(channel_id, PAGE, Some(oldest_shown)).await },
+            async move { http.messages(channel_id, page, Some(oldest_shown)).await },
             move |app, result| match result {
                 Ok(messages) => {
-                    let reached_top = messages.len() < PAGE as usize;
+                    let reached_top = messages.len() < page as usize;
                     app.with_session_mut(|session| {
                         session.history.entry(channel_id).or_default().reached_top = reached_top;
                     });
@@ -2515,5 +2542,21 @@ mod typing_tests {
             typing_text(&names(&["Ana", "Bo", "Cy", "Dee", "you"])),
             "Ana, Bo, Cy, Dee and you are typing…"
         );
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_page_fills_the_window_like_the_web_client() {
+        // A small window: the 400 px floor, five 91 px rows, plus 5%; at least 10.
+        assert_eq!(initial_page(500), 10);
+        assert_eq!(initial_page(1080), 12);
+        assert_eq!(initial_page(1440), 16);
+        // A very tall window stops at 30.
+        assert_eq!(initial_page(4000), 30);
+        assert_eq!(scroll_page(500), 20);
     }
 }
