@@ -1284,28 +1284,19 @@ impl HttpClient {
         Ok(())
     }
 
-    /// Full-text search in a guild (optionally one channel) or in a DM.
-    /// Returns the total hit count and one page of 25 hits, newest first.
-    /// Discord answers 202 while it is still indexing; that surfaces as an
-    /// empty page with `indexing` set.
+    /// Searches messages in a server or a DM (see [`crate::search`]).
+    /// Returns the total hit count and one page of hits. Discord answers
+    /// 202 while it is still indexing; that surfaces as an empty page with
+    /// `indexing` set.
     pub async fn search(
         &self,
-        guild_id: Option<Snowflake>,
-        channel_id: Snowflake,
-        query: &str,
+        scope: crate::search::Scope,
+        params: &crate::search::SearchParams,
+        tab: crate::search::Tab,
+        sort: crate::search::Sort,
         offset: u32,
     ) -> Result<SearchPage> {
-        let mut path = match guild_id {
-            Some(guild_id) => {
-                format!("/guilds/{guild_id}/messages/search?channel_id={channel_id}&")
-            }
-            None => format!("/channels/{channel_id}/messages/search?"),
-        };
-        path.push_str(&format!("content={}", percent_encode(query)));
-        if offset > 0 {
-            path.push_str(&format!("&offset={offset}"));
-        }
-        let value = self.get(&path).await?;
+        let value = self.get(&params.path(scope, tab, sort, offset, true)).await?;
         let Some(groups) = value["messages"].as_array() else {
             return Ok(SearchPage {
                 total: 0,
@@ -1313,6 +1304,7 @@ impl HttpClient {
                 indexing: value.get("retry_after").is_some() || value["code"] == 110000,
             });
         };
+        // Each hit comes with the messages around it; the hit is marked.
         let messages = groups
             .iter()
             .filter_map(|group| {

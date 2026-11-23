@@ -8,6 +8,7 @@ pub mod commands;
 pub mod error;
 mod favorites;
 mod rate_limit;
+pub mod search;
 
 pub use client::{
     AvatarEdit, Ban, CaptchaAnswer, ChannelEdit, FAVORITE_GIF_FORMAT_IMAGE,
