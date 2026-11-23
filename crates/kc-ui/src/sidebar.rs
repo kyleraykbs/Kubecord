@@ -547,6 +547,29 @@ impl AppState {
         button.set_child(Some(&content));
 
         let voice = is_voice_only(channel);
+        // A voice channel's chat, from the sidebar without joining: a button
+        // at the row's end, shown while the pointer is over the row.
+        if voice {
+            let chat = crate::widgets::icon_button(
+                crate::widgets::first_icon(&["chat-bubbles-text-symbolic", "chat-symbolic", "mail-message-new-symbolic"]),
+                "Open Chat",
+            );
+            chat.add_css_class("flat");
+            chat.add_css_class("kc-channel-chat");
+            chat.set_valign(gtk::Align::Center);
+            let app = self.clone();
+            let target = channel.clone();
+            chat.connect_clicked(move |_| {
+                app.open_channel(target.clone());
+                if app.side_chat_toggle.is_active() {
+                    // Already showing chats: this channel's opened above.
+                    app.render_all();
+                } else {
+                    app.side_chat_toggle.set_active(true);
+                }
+            });
+            content.append(&chat);
+        }
         let app = self.clone();
         let target = channel.clone();
         button.connect_clicked(move |_| {

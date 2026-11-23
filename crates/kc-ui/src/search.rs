@@ -21,7 +21,7 @@ use kc_http::search::{AuthorType, Has, Scope, SearchParams, Sort, Tab};
 use kc_state::{ChannelType, Message};
 
 use crate::shell::AppState;
-use crate::widgets::{clear_box, empty_state, first_icon, icon_button, label};
+use crate::widgets::{clear_box, clear_list, empty_state, first_icon, icon_button, label};
 
 /// The filters the box understands, by the name typed before the colon.
 const KEYS: [(&str, Key); 17] = [
@@ -450,6 +450,72 @@ impl AppState {
         panel.footer.set_label("That's everything.");
     }
 
+    /// Opens the panel as the search box takes focus: on what the box
+    /// already holds, or on the filters to start from.
+    pub(crate) fn open_search_from_focus(self: &Rc<Self>) {
+        if self.search_open() {
+            return;
+        }
+        let Some((scope, guild)) = self.search_scope() else {
+            return;
+        };
+        let text = self.search_entry.text().to_string();
+        let (filters, _) = self.resolve_search(&text, guild);
+        self.start_search(scope, guild, filters);
+    }
+
+    /// The empty panel: each filter, to add to the box with a click.
+    fn show_filter_hints(self: &Rc<Self>, panel: &Rc<SearchPanel>) {
+        let guild = matches!(panel.run.borrow().scope, Scope::Guild(_));
+        let hints: Vec<(&str, &str)> = [
+            ("from:", "a person"),
+            ("mentions:", "a person"),
+            ("has:", "link, embed, file, image, video, sound, sticker, poll or forward"),
+            ("in:", "a channel"),
+            ("before:", "a date, like 2026-01-31"),
+            ("during:", "a date, today or yesterday"),
+            ("after:", "a date"),
+            ("pinned:", "true or false"),
+            ("authorType:", "user, bot or webhook"),
+            ("linkFrom:", "a website, like youtube.com"),
+            ("fileType:", "an extension, like pdf"),
+            ("fileName:", "part of a file's name"),
+        ]
+        .into_iter()
+        .filter(|(key, _)| guild || *key != "in:")
+        .collect();
+        panel.list.append(&label("Search for words, or add a filter:", &["dim-label", "caption"]));
+        let rows = gtk::ListBox::new();
+        rows.add_css_class("boxed-list");
+        rows.set_selection_mode(gtk::SelectionMode::None);
+        for (key, what) in hints {
+            let row = adw::ActionRow::new();
+            row.set_title(key);
+            row.set_subtitle(what);
+            row.set_activatable(true);
+            let app = self.clone();
+            let key = key.to_owned();
+            row.connect_activated(move |_| {
+                let mut text = app.search_entry.text().to_string();
+                if !text.is_empty() && !text.ends_with(' ') {
+                    text.push(' ');
+                }
+                text.push_str(&key);
+                app.search_entry.set_text(&text);
+                app.search_entry.grab_focus();
+                app.search_entry.set_position(-1);
+            });
+            rows.append(&row);
+        }
+        panel.list.append(&rows);
+        let filters = gtk::Button::with_label("More Filters…");
+        filters.add_css_class("flat");
+        filters.set_halign(gtk::Align::Start);
+        let app = self.clone();
+        filters.connect_clicked(move |_| app.show_search_filters());
+        panel.list.append(&filters);
+    }
+
     /// Closes the panel; the member list comes back.
     pub(crate) fn close_search(self: &Rc<Self>) {
         if let Some(panel) = self.search.borrow().as_ref() {
@@ -478,7 +544,7 @@ impl AppState {
         if panel.run.borrow().filters.is_empty() {
             panel.title.set_label("Search");
             panel.footer.set_label("");
-            panel.list.append(&empty_state("edit-find-symbolic", "Nothing to Search For", "Type in the search box, or add filters."));
+            self.show_filter_hints(&panel);
             return;
         }
         panel.title.set_label("Searching…");
@@ -1125,6 +1191,346 @@ fn build_panel() -> SearchPanel {
     }
 }
 
+
+// -- autocomplete -------------------------------------------------------------
+
+/// The word being typed at `cursor` (a character index): where it starts
+/// and its text.
+pub(crate) fn token_at(text: &str, cursor: usize) -> (usize, String) {
+    let before: Vec<char> = text.chars().take(cursor).collect();
+    let mut start = before.len();
+    let mut quotes = before.iter().filter(|c| **c == '"').count() % 2 == 1;
+    while start > 0 {
+        let c = before[start - 1];
+        if c == '"' {
+            quotes = !quotes;
+        } else if c.is_whitespace() && !quotes {
+            break;
+        }
+        start -= 1;
+    }
+    (start, before[start..].iter().collect())
+}
+
+/// The filter names starting with `typed` (`fr` → `from:`).
+pub(crate) fn key_suggestions(typed: &str, guild: bool) -> Vec<(String, String)> {
+    let typed = typed.to_lowercase();
+    let all: [(Key, &str); 12] = [
+        (Key::From, "a person"),
+        (Key::Mentions, "a person"),
+        (Key::Has, "link, image, video, file, …"),
+        (Key::In, "a channel"),
+        (Key::Before, "a date"),
+        (Key::During, "a date"),
+        (Key::After, "a date"),
+        (Key::Pinned, "true or false"),
+        (Key::AuthorType, "user, bot or webhook"),
+        (Key::LinkFrom, "a website"),
+        (Key::FileType, "an extension"),
+        (Key::FileName, "part of a file's name"),
+    ];
+    all.into_iter()
+        .filter(|(key, _)| guild || *key != Key::In)
+        .filter(|(key, _)| key.name().to_lowercase().starts_with(&typed) && !typed.is_empty())
+        .map(|(key, what)| (format!("{}:", key.name()), what.to_owned()))
+        .collect()
+}
+
+/// What the dropdown offers: text shown, its detail, and the word it
+/// becomes (a value ends with a space, a filter name with its colon).
+type Suggestion = (String, String, String);
+
+struct Completion {
+    popover: gtk::Popover,
+    list: gtk::ListBox,
+    items: RefCell<Vec<Suggestion>>,
+    /// Where the word being completed starts (a character index).
+    start: Cell<usize>,
+    /// Set while the box's text is changed from here.
+    quiet: Cell<bool>,
+}
+
+thread_local! {
+    static COMPLETION: RefCell<Option<Rc<Completion>>> = const { RefCell::new(None) };
+}
+
+impl AppState {
+    fn completion(self: &Rc<Self>) -> Rc<Completion> {
+        if let Some(completion) = COMPLETION.with_borrow(Clone::clone) {
+            return completion;
+        }
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::Browse);
+        list.add_css_class("navigation-sidebar");
+        let popover = gtk::Popover::new();
+        popover.set_child(Some(&list));
+        popover.set_autohide(false);
+        popover.set_can_focus(false);
+        popover.set_has_arrow(false);
+        popover.set_position(gtk::PositionType::Bottom);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_parent(&self.search_entry);
+        let completion = Rc::new(Completion {
+            popover,
+            list,
+            items: RefCell::new(Vec::new()),
+            start: Cell::new(0),
+            quiet: Cell::new(false),
+        });
+        let app = self.clone();
+        completion.list.connect_row_activated(move |_, row| {
+            app.accept_search_completion(row.index().max(0) as usize);
+        });
+        COMPLETION.with_borrow_mut(|slot| *slot = Some(completion.clone()));
+        completion
+    }
+
+    /// Wires the search box's autocomplete.
+    pub(crate) fn connect_search_completion(self: &Rc<Self>) {
+        // After the change has settled: during it, the cursor has not moved
+        // past what was typed yet.
+        let queued = Rc::new(Cell::new(false));
+        let queue = {
+            let app = self.clone();
+            move || {
+                if queued.replace(true) {
+                    return;
+                }
+                let app = app.clone();
+                let queued = queued.clone();
+                glib::idle_add_local_once(move || {
+                    queued.set(false);
+                    app.update_search_completion();
+                });
+            }
+        };
+        let on_change = queue.clone();
+        self.search_entry.connect_changed(move |_| on_change());
+        self.search_entry.connect_notify_local(Some("cursor-position"), move |_, _| queue());
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let app = self.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            use gtk::gdk::Key;
+            let completion = app.completion();
+            if !completion.popover.is_visible() {
+                return glib::Propagation::Proceed;
+            }
+            let count = completion.items.borrow().len() as i32;
+            let selected = completion.list.selected_row().map_or(-1, |row| row.index());
+            match key {
+                Key::Down | Key::Up => {
+                    let step = if key == Key::Down { 1 } else { -1 };
+                    let next = (selected + step).rem_euclid(count.max(1));
+                    if let Some(row) = completion.list.row_at_index(next) {
+                        completion.list.select_row(Some(&row));
+                    }
+                    glib::Propagation::Stop
+                }
+                Key::Tab | Key::Return | Key::KP_Enter => {
+                    app.accept_search_completion(selected.max(0) as usize);
+                    glib::Propagation::Stop
+                }
+                Key::Escape => {
+                    completion.popover.popdown();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.search_entry.add_controller(keys);
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(|_| {
+            if let Some(completion) = COMPLETION.with_borrow(Clone::clone) {
+                completion.popover.popdown();
+            }
+        });
+        self.search_entry.add_controller(focus);
+    }
+
+    /// Offers completions for the word at the cursor.
+    fn update_search_completion(self: &Rc<Self>) {
+        let completion = self.completion();
+        if completion.quiet.get() {
+            return;
+        }
+        let text = self.search_entry.text().to_string();
+        let cursor = (self.search_entry.position().max(0) as usize).min(text.chars().count());
+        let (start, token) = token_at(&text, cursor);
+        let guild = self.search_scope().and_then(|(_, guild)| guild);
+        let items: Vec<Suggestion> = match token.split_once(':') {
+            None => key_suggestions(&token, guild.is_some())
+                .into_iter()
+                .map(|(key, what)| (key.clone(), what, key))
+                .collect(),
+            Some((key, partial)) => {
+                let key = key.to_ascii_lowercase().replace('_', "");
+                match KEYS.iter().find(|(name, _)| *name == key) {
+                    Some((_, key)) => self.search_value_suggestions(*key, partial.trim_matches('"'), guild),
+                    None => Vec::new(),
+                }
+            }
+        };
+        // Nothing to add to what is already typed.
+        let useful = items.iter().any(|(_, _, word)| word.trim_end() != token);
+        if items.is_empty() || !useful {
+            completion.popover.popdown();
+            return;
+        }
+        completion.start.set(start);
+        clear_list(&completion.list);
+        for (shown, detail, _) in &items {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            row.set_margin_top(2);
+            row.set_margin_bottom(2);
+            let name = label(shown, &[]);
+            name.set_xalign(0.0);
+            row.append(&name);
+            if !detail.is_empty() {
+                let detail = label(detail, &["dim-label", "caption"]);
+                detail.set_xalign(0.0);
+                detail.set_hexpand(true);
+                detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row.append(&detail);
+            }
+            completion.list.append(&row);
+        }
+        if let Some(first) = completion.list.row_at_index(0) {
+            completion.list.select_row(Some(&first));
+        }
+        *completion.items.borrow_mut() = items;
+        completion.popover.set_size_request(self.search_entry.width().max(260), -1);
+        completion.popover.popup();
+    }
+
+    /// The values a filter can take that start with (or contain) `partial`.
+    fn search_value_suggestions(&self, key: Key, partial: &str, guild: Option<Snowflake>) -> Vec<Suggestion> {
+        let lower = partial.to_lowercase();
+        let matches = |name: &str| lower.is_empty() || name.to_lowercase().contains(&lower);
+        let word = |value: &str| format!("{}:{} ", key.name(), quote(value));
+        let fixed = |values: &[(&str, &str)]| -> Vec<Suggestion> {
+            let mut found: Vec<Suggestion> = values
+                .iter()
+                .filter(|(value, _)| matches(value))
+                .map(|(value, detail)| (value.to_string(), detail.to_string(), word(value)))
+                .collect();
+            // Those starting with what was typed first.
+            found.sort_by_key(|(shown, _, _)| !shown.to_lowercase().starts_with(&lower));
+            found
+        };
+        match key {
+            Key::Has => {
+                let kinds: Vec<(&str, &str)> = Has::ALL
+                    .iter()
+                    .map(|has| (has.label(), ""))
+                    .collect();
+                fixed(&kinds)
+                    .into_iter()
+                    .map(|(shown, detail, _)| {
+                        let value = shown.to_lowercase();
+                        (shown, detail, word(&value))
+                    })
+                    .collect()
+            }
+            Key::AuthorType => fixed(&[("user", "a person"), ("bot", "an app"), ("webhook", "a webhook")]),
+            Key::Pinned => fixed(&[("true", "pinned"), ("false", "not pinned")]),
+            Key::Before | Key::After | Key::During => {
+                let today = glib::DateTime::now_local()
+                    .ok()
+                    .and_then(|now| now.format("%Y-%m-%d").ok())
+                    .map(|date| date.to_string())
+                    .unwrap_or_default();
+                let mut values = vec![("today", ""), ("yesterday", "")];
+                if !today.is_empty() {
+                    values.push((today.as_str(), "a date: year-month-day"));
+                }
+                fixed(&values)
+            }
+            Key::From | Key::Mentions => self
+                .with_session(|session| {
+                    session.store.read(|state| {
+                        let mut users: Vec<kc_state::User> = match guild {
+                            Some(guild) => state.guild_member_users(guild),
+                            None => session
+                                .selected_channel
+                                .and_then(|id| state.channels.get(&id))
+                                .and_then(|channel| channel.recipients.clone())
+                                .unwrap_or_default(),
+                        };
+                        users.extend(state.me.clone());
+                        users.sort_by_key(|user| user.username.to_lowercase());
+                        users.dedup_by_key(|user| user.id);
+                        let mut found: Vec<Suggestion> = users
+                            .iter()
+                            .filter(|user| {
+                                matches(&user.username)
+                                    || user.global_name.as_deref().is_some_and(matches)
+                                    || matches(&state.display_name(guild, user))
+                            })
+                            .map(|user| {
+                                let shown = state.display_name(guild, user);
+                                let detail = if shown == user.username { String::new() } else { user.username.clone() };
+                                (shown, detail, word(&user.username))
+                            })
+                            .collect();
+                        // Names starting with what was typed come first.
+                        found.sort_by_key(|(shown, username, _)| {
+                            !(shown.to_lowercase().starts_with(&lower) || username.to_lowercase().starts_with(&lower))
+                        });
+                        found.truncate(8);
+                        found
+                    })
+                })
+                .unwrap_or_default(),
+            Key::In => self
+                .with_session(|session| {
+                    session.store.read(|state| {
+                        let Some(guild) = guild else { return Vec::new() };
+                        let mut found: Vec<Suggestion> = state
+                            .channel_tree(guild)
+                            .into_iter()
+                            .flat_map(|section| section.channels)
+                            .filter(|channel| channel.kind.is_text())
+                            .filter_map(|channel| {
+                                let name = channel.name.clone()?;
+                                matches(&name).then(|| (format!("# {name}"), String::new(), word(&name)))
+                            })
+                            .collect();
+                        found.truncate(8);
+                        found
+                    })
+                })
+                .unwrap_or_default(),
+            Key::LinkFrom | Key::FileType | Key::FileName => Vec::new(),
+        }
+    }
+
+    /// Puts the chosen completion in place of the word being typed.
+    fn accept_search_completion(self: &Rc<Self>, index: usize) {
+        let completion = self.completion();
+        let Some((_, _, word)) = completion.items.borrow().get(index).cloned() else {
+            completion.popover.popdown();
+            return;
+        };
+        let text = self.search_entry.text().to_string();
+        let cursor = (self.search_entry.position().max(0) as usize).min(text.chars().count());
+        let start = completion.start.get().min(cursor);
+        let chars: Vec<char> = text.chars().collect();
+        let before: String = chars[..start].iter().collect();
+        let after: String = chars[cursor..].iter().collect();
+        let new = format!("{before}{word}{}", after.trim_start());
+        completion.quiet.set(true);
+        self.search_entry.set_text(&new);
+        completion.quiet.set(false);
+        self.search_entry.set_position((before.chars().count() + word.chars().count()) as i32);
+        completion.popover.popdown();
+        // A filter name goes straight on to its values.
+        if word.ends_with(':') {
+            self.update_search_completion();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1576,20 @@ mod tests {
         let (content, items) = parse_query(&text);
         assert_eq!(content, "hello there");
         assert_eq!(items, filters.items);
+    }
+
+    #[test]
+    fn the_word_at_the_cursor_is_completed() {
+        assert_eq!(token_at("cats fr", 7), (5, "fr".to_owned()));
+        assert_eq!(token_at("from:ada has:im", 15), (9, "has:im".to_owned()));
+        assert_eq!(token_at("in:\"general ch", 14), (0, "in:\"general ch".to_owned()));
+        assert_eq!(token_at("cats ", 5), (5, String::new()));
+        let keys: Vec<String> = key_suggestions("fr", true).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["from:"]);
+        let keys: Vec<String> = key_suggestions("f", false).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["from:", "fileType:", "fileName:"]);
+        assert!(key_suggestions("i", false).is_empty(), "no in: outside a server");
+        assert!(key_suggestions("", true).is_empty());
     }
 
     #[test]

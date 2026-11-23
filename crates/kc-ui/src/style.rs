@@ -414,6 +414,20 @@ button.kc-link-button:hover {
     opacity: 0.55;
 }
 
+/* A voice channel's chat button: there while the pointer is on the row. */
+.kc-channel-chat {
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+    margin: -4px 0;
+    opacity: 0;
+}
+
+button:hover .kc-channel-chat,
+.kc-channel-chat:focus-visible {
+    opacity: 1;
+}
+
 .kc-search-chip {
     border-radius: 999px;
     padding: 0 0 0 10px;

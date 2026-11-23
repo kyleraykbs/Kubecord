@@ -524,6 +524,39 @@ impl AppState {
                     self.open_channel(lounge);
                 }
             }
+            "search-complete" => {
+                // Typing KUBECORD_SEARCH_TYPE into the search box: its
+                // autocomplete, saved as <screenshot>.menu.png.
+                self.open_channel(general.clone());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    app.search_entry.grab_focus();
+                    let text = std::env::var("KUBECORD_SEARCH_TYPE").unwrap_or_else(|_| "fr".to_owned());
+                    app.search_entry.set_text(&text);
+                    app.search_entry.set_position(-1);
+                    glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                        let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") else { return };
+                        let popover = app.search_entry.last_child().and_downcast::<gtk::Popover>();
+                        match popover {
+                            Some(popover) if popover.is_visible() => {
+                                let path = format!("{path}.menu.png");
+                                if let Err(error) = crate::app::save_window_png(&popover, std::path::Path::new(&path)) {
+                                    eprintln!("demo: could not save the dropdown: {error}");
+                                }
+                            }
+                            _ => eprintln!("demo: no dropdown showing"),
+                        }
+                    });
+                });
+            }
+            "search-focus" => {
+                // Clicking into the search box: the panel opens on its hints.
+                self.open_channel(general.clone());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    app.search_entry.grab_focus();
+                });
+            }
             "search" | "search-filters" => {
                 // Search results for typed filters, answered locally; with
                 // `search-filters`, the Filters dialog over them.

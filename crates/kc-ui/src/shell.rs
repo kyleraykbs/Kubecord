@@ -76,8 +76,6 @@ pub(crate) struct AppState {
     pub channel_title_label: gtk::Label,
     pub channel_topic_label: gtk::Label,
     pub search_entry: gtk::SearchEntry,
-    /// Opens the search filters.
-    pub search_filters_button: gtk::Button,
     pub pins_button: gtk::Button,
     /// Share mode: choose messages to export as a picture or text.
     pub share_button: gtk::Button,
@@ -445,10 +443,6 @@ impl AppState {
         search_entry.set_placeholder_text(Some("Search"));
         search_entry.set_width_request(180);
         search_entry.set_valign(gtk::Align::Center);
-        let search_filters_button = icon_button(
-            first_icon(&["funnel-symbolic", "filter-symbolic", "view-more-horizontal-symbolic", "view-more-symbolic"]),
-            "Search Filters",
-        );
 
         let pins_button = icon_button("view-pin-symbolic", "Pinned Messages");
         let share_button = icon_button(
@@ -477,7 +471,6 @@ impl AppState {
         content_header.set_show_start_title_buttons(false);
         content_header.pack_start(&title_box);
         content_header.pack_end(&search_entry);
-        content_header.pack_end(&search_filters_button);
         content_header.pack_end(&members_toggle);
         content_header.pack_end(&share_button);
         content_header.pack_end(&pins_button);
@@ -856,7 +849,6 @@ impl AppState {
             channel_title_label,
             channel_topic_label,
             search_entry,
-            search_filters_button,
             pins_button,
             share_button,
             members_toggle,

@@ -616,6 +616,12 @@ impl AppState {
         // the box closes the results.
         let app = self.clone();
         self.search_entry.connect_activate(move |_| app.search_from_entry());
+        // Clicking into the box opens the results side straight away.
+        let focus = gtk::EventControllerFocus::new();
+        let app = self.clone();
+        focus.connect_enter(move |_| app.open_search_from_focus());
+        self.search_entry.add_controller(focus);
+        self.connect_search_completion();
         let app = self.clone();
         self.search_entry.connect_stop_search(move |entry| {
             entry.set_text("");
@@ -623,8 +629,7 @@ impl AppState {
                 app.close_search();
             }
         });
-        let app = self.clone();
-        self.search_filters_button.connect_clicked(move |_| app.show_search_filters());
+
         let app = self.clone();
         self.pins_button.connect_clicked(move |_| app.show_pins());
         let app = self.clone();
