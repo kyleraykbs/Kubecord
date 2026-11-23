@@ -45,6 +45,8 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 gdk4-wayland = { version = "0.11", features = ["wayland_crate"] }
 wayland-client = "0.31"
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-default-fancy"] }
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 
 [features]
 # Solve Discord's captchas in an embedded WebKitGTK view.

@@ -1,7 +1,7 @@
 //! Selecting text across several messages.
 //!
-//! Each message's text is its own widget, and GTK selects within one widget
-//! only. A drag gesture on the message list watches (without taking part)
+//! Each message's text is its own widget (or several: code blocks are their
+//! own), and GTK selects within one widget only. A drag gesture on the message list watches (without taking part)
 //! while a selection stays inside one message; once the pointer moves into
 //! another message it takes the drag over and selects from where it began to
 //! the pointer itself: the rest of the first message, every message between
@@ -18,11 +18,14 @@ use kc_core::Snowflake;
 use crate::shell::AppState;
 
 /// A point in the selection: a message (by its index in the list) and a
-/// character offset in its text.
+/// character offset in its text, which runs through all its text widgets
+/// (prose and code blocks), one line break between each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Point {
     row: usize,
     offset: usize,
+    /// Which of the message's text widgets it is in.
+    piece: usize,
 }
 
 #[derive(Default)]
@@ -41,19 +44,67 @@ thread_local! {
     static SELECTION: RefCell<Selection> = RefCell::new(Selection::default());
 }
 
-/// The message text widget (label or text view) in a message's body.
-fn text_of(body: &gtk::Widget) -> Option<gtk::Widget> {
-    if body.has_css_class("kc-message-text") {
-        return Some(body.clone());
-    }
-    let mut child = body.first_child();
-    while let Some(widget) = child {
-        if let Some(found) = text_of(&widget) {
-            return Some(found);
+/// The message's text widgets (labels, text views), in order: its prose
+/// and each code block.
+fn texts_of(body: &gtk::Widget) -> Vec<gtk::Widget> {
+    fn collect(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+        if widget.has_css_class("kc-message-text") {
+            out.push(widget.clone());
+            return;
         }
-        child = widget.next_sibling();
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            collect(&next, out);
+            child = next.next_sibling();
+        }
     }
-    None
+    let mut out = Vec::new();
+    collect(body, &mut out);
+    out
+}
+
+/// Where each text widget's characters start in the message's text.
+fn bases(texts: &[gtk::Widget]) -> Vec<usize> {
+    let mut base = 0;
+    texts
+        .iter()
+        .map(|text| {
+            let start = base;
+            base += length(text) + 1;
+            start
+        })
+        .collect()
+}
+
+/// How many characters the message's text holds.
+fn total_length(texts: &[gtk::Widget]) -> usize {
+    bases(texts).last().zip(texts.last()).map_or(0, |(base, text)| base + length(text))
+}
+
+/// Selects message characters `from..to` across its text widgets.
+fn select_all_in(texts: &[gtk::Widget], from: usize, to: usize) {
+    for (text, base) in texts.iter().zip(bases(texts)) {
+        let len = length(text);
+        let a = from.saturating_sub(base).min(len);
+        let b = to.saturating_sub(base).min(len);
+        select(text, a, b);
+    }
+}
+
+/// The message's characters `from..to`, a line break between its pieces.
+fn text_across(texts: &[gtk::Widget], from: usize, to: usize) -> String {
+    let mut out = String::new();
+    for (text, base) in texts.iter().zip(bases(texts)) {
+        let len = length(text);
+        if to <= base || from > base + len {
+            continue;
+        }
+        if !out.is_empty() || (from < base && base > 0) {
+            out.push('\n');
+        }
+        out.push_str(&text_in(text, from.saturating_sub(base).min(len), to.saturating_sub(base).min(len)));
+    }
+    out
 }
 
 /// How many characters a text widget holds.
@@ -165,13 +216,20 @@ impl AppState {
         let row = picked.ancestor(gtk::ListBoxRow::static_type())?;
         let chat = self.chat.borrow();
         let index = chat.rows.iter().position(|entry| *entry.row.upcast_ref::<gtk::Widget>() == row)?;
-        let Some(text) = text_of(chat.rows[index].body.upcast_ref()) else {
-            return Some(Point { row: index, offset: 0 });
-        };
-        let point = list.compute_point(&text, &gtk::graphene::Point::new(x as f32, y as f32))?;
+        let texts = texts_of(chat.rows[index].body.upcast_ref());
+        if texts.is_empty() {
+            return Some(Point { row: index, offset: 0, piece: 0 });
+        }
+        // The last text widget that starts above the pointer (the first one
+        // when it is above them all).
+        let at = gtk::graphene::Point::new(x as f32, y as f32);
+        let local: Vec<_> = texts.iter().map(|text| list.compute_point(text, &at)).collect();
+        let piece = local.iter().rposition(|point| point.is_some_and(|point| point.y() >= 0.0)).unwrap_or(0);
+        let point = local[piece]?;
         Some(Point {
             row: index,
-            offset: offset_at(&text, f64::from(point.x()), f64::from(point.y())),
+            offset: bases(&texts)[piece] + offset_at(&texts[piece], f64::from(point.x()), f64::from(point.y())),
+            piece,
         })
     }
 
@@ -182,11 +240,11 @@ impl AppState {
         let mut marked = Vec::new();
         for index in first.row..=last.row {
             let Some(entry) = chat.rows.get(index) else { continue };
-            let Some(text) = text_of(entry.body.upcast_ref()) else { continue };
+            let texts = texts_of(entry.body.upcast_ref());
             let from = if index == first.row { first.offset } else { 0 };
-            let to = if index == last.row { last.offset } else { length(&text) };
-            select(&text, from, to);
-            marked.push(text);
+            let to = if index == last.row { last.offset } else { total_length(&texts) };
+            select_all_in(&texts, from, to);
+            marked.extend(texts);
         }
         drop(chat);
         SELECTION.with_borrow_mut(|selection| {
@@ -238,10 +296,10 @@ impl AppState {
         let mut previous_author = None;
         for (position, index) in (first.row..=last.row).enumerate() {
             let Some(entry) = chat.rows.get(index) else { continue };
-            let Some(text) = text_of(entry.body.upcast_ref()) else { continue };
+            let texts = texts_of(entry.body.upcast_ref());
             let from = if index == first.row { first.offset } else { 0 };
-            let to = if index == last.row { last.offset } else { length(&text) };
-            let piece = text_in(&text, from, to);
+            let to = if index == last.row { last.offset } else { total_length(&texts) };
+            let piece = text_across(&texts, from, to);
             if piece.is_empty() {
                 continue;
             }
@@ -292,11 +350,12 @@ impl AppState {
             let Some(point) = app.select_point(x, y) else { return };
             let across = SELECTION.with_borrow(|selection| selection.across);
             if !across {
-                if point.row == start.row {
-                    // Still inside one message: its own selection handles it.
+                if point.row == start.row && point.piece == start.piece {
+                    // Still inside one text: its own selection handles it.
                     return;
                 }
-                // Into another message: the drag is ours from here.
+                // Into another message (or from a message's text into its
+                // code block): the drag is ours from here.
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 SELECTION.with_borrow_mut(|selection| selection.across = true);
             }
@@ -359,7 +418,7 @@ impl AppState {
         let middle = |index_from_end: usize| -> Option<(f64, f64)> {
             let chat = self.chat.borrow();
             let entry = chat.rows.iter().rev().nth(index_from_end)?;
-            let text = text_of(entry.body.upcast_ref())?;
+            let text = texts_of(entry.body.upcast_ref()).into_iter().next()?;
             let bounds = text.compute_bounds(&self.messages_list)?;
             Some((f64::from(bounds.x() + bounds.width() / 3.0), f64::from(bounds.y() + bounds.height() / 2.0)))
         };

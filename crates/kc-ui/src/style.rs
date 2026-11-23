@@ -392,10 +392,26 @@ button.kc-link-button:hover {
     box-shadow: inset 0 0 0 1px @accent_bg_color;
 }
 
+/* Code blocks: monospace on a block darker than the chat behind it. */
 .kc-codeblock {
-    padding: 8px;
+    padding: 8px 10px;
     border-radius: 6px;
-    background-color: alpha(@window_fg_color, 0.06);
+    background-color: alpha(black, 0.07);
+    border: 1px solid alpha(@window_fg_color, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+    .kc-codeblock {
+        background-color: alpha(black, 0.30);
+    }
+}
+.kc-code-text {
+    font-family: monospace;
+    font-size: 0.95em;
+}
+.kc-code-language {
+    font-size: 0.75em;
+    font-weight: bold;
+    opacity: 0.55;
 }
 
 .kc-composer {

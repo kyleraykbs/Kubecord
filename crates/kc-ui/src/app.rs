@@ -94,6 +94,8 @@ pub fn run() -> glib::ExitCode {
         // Decompress the spell-check dictionary off the main thread so the first
         // keystroke does not stall.
         std::thread::spawn(crate::spelling::warm);
+        // And the code block languages, ahead of the first code block.
+        std::thread::spawn(crate::code::warm);
         // Before any button picks its icon.
         crate::widgets::keep_icons_drawable();
 

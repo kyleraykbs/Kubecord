@@ -1159,6 +1159,23 @@ impl AppState {
                     eprintln!("demo: preview attached");
                 });
             }
+            "code" => {
+                let blocks = [
+                    "Here's the fix:\n```rust\nfn main() {\n    // Greets the world.\n    let name = \"world\";\n    println!(\"Hello, {name}! {}\", 1 + 2);\n}\n```\nworks now",
+                    "```py\nimport os\n\ndef walk(path: str) -> list[str]:\n    return [f for f in os.listdir(path) if f.endswith('.py')]\n```",
+                    "config 👍\n```nix\n{ pkgs, ... }: {\n  programs.kubecord.enable = true;\n  environment.systemPackages = [ pkgs.git ];\n}\n```",
+                    "```ts\nconst add = (a: number, b: number): number => a + b; // <b>not bold</b>\n```\n```\nno language here, just text\n```\n```madeuplang\nplain too\n```",
+                ];
+                for (index, content) in blocks.iter().enumerate() {
+                    store.apply("MESSAGE_CREATE", &message(id_at(0, 50 + index as u64), GRACE, content));
+                }
+                self.open_channel(general);
+                // KUBECORD_CODE_SELECT: a selection across the code blocks.
+                if std::env::var_os("KUBECORD_CODE_SELECT").is_some() {
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || app.demo_select_across());
+                }
+            }
             "select-across" => {
                 // A selection dragged across several messages, one with
                 // emoji in Discord's art (it copies as the emoji).

@@ -8,6 +8,7 @@ mod captcha;
 mod channel_settings;
 mod chat;
 mod chat_select;
+mod code;
 mod components;
 mod composer;
 mod content;

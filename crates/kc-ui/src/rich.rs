@@ -63,8 +63,10 @@ pub struct Style {
     pub strike: bool,
     /// Inline `code`.
     pub code: bool,
-    /// Fenced ``` code block (text keeps its newlines; language tag dropped).
+    /// Fenced ``` code block (text keeps its newlines).
     pub code_block: bool,
+    /// A code block's language tag (` ```rust `), for highlighting.
+    pub language: Option<String>,
     pub spoiler: bool,
     /// Inside a `> ` or `>>> ` block quote.
     pub quote: bool,
@@ -313,7 +315,8 @@ enum Tok {
         can_close: bool,
     },
     Code(String),
-    CodeBlock(String),
+    /// A code block's code and language tag.
+    CodeBlock(String, Option<String>),
     Mention(Mention),
     Emoji {
         id: Snowflake,
@@ -648,10 +651,10 @@ impl<'a> Lexer<'a> {
         let Some(close) = self.fence.find(self.src, start) else {
             return false;
         };
-        let Some(body) = self.src.get(start..close).and_then(code_block_body) else {
+        let Some((body, language)) = self.src.get(start..close).and_then(code_block_parts) else {
             return false;
         };
-        self.toks.push(Tok::CodeBlock(body.to_owned()));
+        self.toks.push(Tok::CodeBlock(body.to_owned(), language.map(str::to_owned)));
         self.pos = close + 3;
         true
     }
@@ -826,20 +829,23 @@ fn heading_level(line: &str) -> Option<u8> {
         .then_some(level)
 }
 
-/// Extracts the code of a fenced block from the text between its fences,
-/// dropping a language tag and surrounding blank lines. `None` when empty.
-fn code_block_body(raw: &str) -> Option<&str> {
+/// The code of a fenced block (the text between its fences, without the
+/// language tag or surrounding blank lines) and its language tag, if any.
+/// `None` when empty.
+fn code_block_parts(raw: &str) -> Option<(&str, Option<&str>)> {
     let mut body = raw;
+    let mut language = None;
     if let Some((first, rest)) = raw.split_once('\n') {
         let is_language = first
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '_' | '.' | '#'));
         if is_language && !rest.trim().is_empty() {
             body = rest;
+            language = Some(first).filter(|tag| !tag.is_empty());
         }
     }
     let body = body.trim_matches('\n');
-    (!body.trim().is_empty()).then_some(body)
+    (!body.trim().is_empty()).then_some((body, language))
 }
 
 /// Parses `<@id>`, `<@!id>`, `<@&id>`, `<#id>`, `<:name:id>`, `<a:name:id>`,
@@ -1095,11 +1101,12 @@ fn build(toks: Vec<Tok>) -> Vec<Piece> {
                     },
                 });
             }
-            Tok::CodeBlock(code) => {
+            Tok::CodeBlock(code, language) => {
                 pieces.push(Piece::Text {
                     text: code,
                     style: Style {
                         code_block: true,
+                        language,
                         ..style.clone()
                     },
                 });
@@ -1940,7 +1947,13 @@ mod tests {
         };
         assert_eq!(
             parse("```rust\nfn main() {}\n```"),
-            vec![text("fn main() {}", block.clone())]
+            vec![text(
+                "fn main() {}",
+                Style {
+                    language: Some("rust".to_owned()),
+                    ..block.clone()
+                }
+            )]
         );
         assert_eq!(
             parse("```\nline one\n  line two\n```"),
@@ -2712,6 +2725,7 @@ mod tests {
                     heading: 9,
                     subtext: true,
                     link: Some("not\"a<url>".to_owned()),
+                    language: Some("x\"<y>".to_owned()),
                 },
             ),
             text("", plain()),

@@ -509,6 +509,88 @@ pub(crate) fn settle_height(view: &gtk::TextView) {
     });
 }
 
+/// A message split at its code blocks.
+enum CodeSegment {
+    Prose(Vec<Piece>),
+    Code { code: String, language: Option<String> },
+}
+
+/// The message as prose and code blocks in order, or `None` when it has no
+/// code block (or a spoilered one, which stays inline to stay hidden).
+fn split_code_blocks(pieces: &[Piece]) -> Option<Vec<CodeSegment>> {
+    let is_block = |piece: &Piece| matches!(piece, Piece::Text { style, .. } if style.code_block);
+    if !pieces.iter().any(is_block)
+        || pieces.iter().any(|piece| matches!(piece, Piece::Text { style, .. } if style.code_block && style.spoiler))
+    {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut prose: Vec<Piece> = Vec::new();
+    let flush = |prose: &mut Vec<Piece>, segments: &mut Vec<CodeSegment>| {
+        let mut taken = std::mem::take(prose);
+        // The line breaks around a block belong to the block's layout (and
+        // can be spread over pieces, some left empty).
+        while let Some(Piece::Text { text, .. }) = taken.first_mut() {
+            *text = text.trim_start_matches('\n').to_owned();
+            if !text.is_empty() {
+                break;
+            }
+            taken.remove(0);
+        }
+        while let Some(Piece::Text { text, .. }) = taken.last_mut() {
+            *text = text.trim_end_matches('\n').to_owned();
+            if !text.is_empty() {
+                break;
+            }
+            taken.pop();
+        }
+        let blank = taken.iter().all(|piece| matches!(piece, Piece::Text { text, .. } if text.trim().is_empty()));
+        if !blank {
+            segments.push(CodeSegment::Prose(taken));
+        }
+    };
+    for piece in pieces {
+        match piece {
+            Piece::Text { text, style } if style.code_block => {
+                flush(&mut prose, &mut segments);
+                segments.push(CodeSegment::Code { code: text.clone(), language: style.language.clone() });
+            }
+            other => prose.push(other.clone()),
+        }
+    }
+    flush(&mut prose, &mut segments);
+    Some(segments)
+}
+
+/// A fenced code block: monospace on a darker block, highlighted for its
+/// language (about 200 known; others show plain), the language named above.
+fn code_block(code: &str, language: Option<&str>) -> gtk::Widget {
+    let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    block.add_css_class("kc-codeblock");
+    let dark = adw::StyleManager::default().is_dark();
+    let highlighted = language.and_then(|language| crate::code::highlight(code, language, dark));
+    if let Some(language) = language.filter(|_| highlighted.is_some()) {
+        let tag = gtk::Label::new(Some(language));
+        tag.add_css_class("kc-code-language");
+        tag.set_xalign(0.0);
+        block.append(&tag);
+    }
+    let text = gtk::Label::new(None);
+    // Part of the message's text, for selecting across messages.
+    text.add_css_class("kc-message-text");
+    text.add_css_class("kc-code-text");
+    text.set_xalign(0.0);
+    text.set_wrap(true);
+    text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    text.set_selectable(true);
+    match highlighted {
+        Some(markup) => text.set_markup(&markup),
+        None => text.set_text(code),
+    }
+    block.append(&text);
+    block.upcast()
+}
+
 /// Whether any (non-code) text in `pieces` has an emoji drawn in Discord's art.
 fn has_discord_emoji(pieces: &[Piece]) -> bool {
     crate::discord_emoji::active()
@@ -535,8 +617,31 @@ impl AppState {
         if rich::is_emoji_only(&pieces) {
             return Some(self.jumbo_emoji(&pieces));
         }
+        // Code blocks are blocks of their own between the prose.
+        if let Some(segments) = split_code_blocks(&pieces) {
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            for segment in segments {
+                let widget = match segment {
+                    CodeSegment::Prose(pieces) => self.prose_widget(pieces, guild, &resolver),
+                    CodeSegment::Code { code, language } => code_block(&code, language.as_deref()),
+                };
+                column.append(&widget);
+            }
+            return Some(column.upcast());
+        }
+        Some(self.prose_widget(pieces, guild, &resolver))
+    }
+
+    /// Formatted text without code blocks: a label, or a text view when it
+    /// has emoji drawn as images.
+    fn prose_widget(
+        self: &Rc<Self>,
+        pieces: Vec<Piece>,
+        guild: Option<Snowflake>,
+        resolver: &StateResolver,
+    ) -> gtk::Widget {
         if rich::has_custom_emoji(&pieces) || has_discord_emoji(&pieces) {
-            return Some(self.emoji_text(pieces, guild, &resolver));
+            return self.emoji_text(pieces, guild, resolver);
         }
 
         let text = gtk::Label::new(None);
@@ -546,7 +651,7 @@ impl AppState {
         text.set_wrap(true);
         text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         text.set_selectable(true);
-        text.set_markup(&rich::to_markup(&pieces, &resolver, false));
+        text.set_markup(&rich::to_markup(&pieces, resolver, false));
         let app = self.clone();
         text.connect_activate_link(move |text, uri| {
             if uri == "kubecord://spoiler" {
@@ -563,7 +668,7 @@ impl AppState {
             }
             glib::Propagation::Stop
         });
-        Some(text.upcast())
+        text.upcast()
     }
 
     /// Handles a link clicked in message text.
