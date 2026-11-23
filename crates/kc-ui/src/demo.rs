@@ -1236,6 +1236,70 @@ impl AppState {
                     }
                 });
             }
+            "composer-lines" => {
+                // KUBECORD_NO_OVERLAY_SCROLL: scrollbars that take room, as
+                // some desktops set.
+                if std::env::var_os("KUBECORD_NO_OVERLAY_SCROLL").is_some()
+                    && let Some(settings) = gtk::Settings::default()
+                {
+                    settings.set_gtk_overlay_scrolling(false);
+                }
+                // Typed a character a frame until the text wraps onto a
+                // second line, as typing does; KUBECORD_COMPOSER_CHARS sets
+                // how many.
+                self.open_channel(general);
+                let count: usize = std::env::var("KUBECORD_COMPOSER_CHARS")
+                    .ok()
+                    .and_then(|count| count.parse().ok())
+                    .unwrap_or(70);
+                let text: Vec<char> = std::env::var("KUBECORD_COMPOSER_TEXT")
+                    .unwrap_or_else(|_| "sdfsdfklsjdfklsdfkljsdklfjsjdklfjkls sdlkfjskldfjklsdlkfjklsd sldkfjsdlkjfklsjdfjkls".to_owned())
+                    .chars()
+                    .cycle()
+                    .take(count)
+                    .collect();
+                let app = self.clone();
+                let typed = std::cell::Cell::new(0);
+                glib::timeout_add_local(Duration::from_millis(30), move || {
+                    if typed.get() < text.len() {
+                        let view = app.composer.upcast_ref::<gtk::Widget>();
+                        let (needed, ..) = view.measure(gtk::Orientation::Vertical, view.width());
+                        if needed != view.height() {
+                            eprintln!("demo: after {} chars the composer is {} tall, its text needs {needed}", typed.get(), view.height());
+                        }
+                        app.composer.emit_insert_at_cursor(&text[typed.get()].to_string());
+                        typed.set(typed.get() + 1);
+                        return glib::ControlFlow::Continue;
+                    }
+                    let view = app.composer.upcast_ref::<gtk::Widget>();
+                    let (natural, ..) = view.measure(gtk::Orientation::Vertical, view.width());
+                    let scroll = view.parent().and_downcast::<gtk::ScrolledWindow>().map(|scroll| {
+                        let adjustment = scroll.vadjustment();
+                        (scroll.height(), adjustment.value(), adjustment.upper(), adjustment.page_size())
+                    });
+                    eprintln!(
+                        "demo: composer is {} tall, its text needs {natural}; scroll (height, value, upper, page) {scroll:?}",
+                        view.height()
+                    );
+                    let mut widget = view.clone();
+                    while let Some(parent) = widget.parent() {
+                        let bounds = widget.compute_bounds(&parent);
+                        eprintln!(
+                            "demo:   {} in {} at y {:?} height {:?} (parent {} tall)",
+                            widget.type_(),
+                            parent.type_(),
+                            bounds.map(|b| b.y()),
+                            bounds.map(|b| b.height()),
+                            parent.height()
+                        );
+                        if parent.has_css_class("kc-composer") {
+                            break;
+                        }
+                        widget = parent;
+                    }
+                    glib::ControlFlow::Break
+                });
+            }
             "drafts" => {
                 // A draft per channel: typed in #general, then #topic-00,
                 // then back. KUBECORD_DRAFTS_CHECK only opens #general (a

@@ -109,9 +109,14 @@ pub fn run() -> glib::ExitCode {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Kubecord")
-            .default_width(1100)
-            // Development aid: `KUBECORD_WINDOW_HEIGHT` makes the window
-            // taller, so a screenshot shows more of a long page.
+            // Development aid: `KUBECORD_WINDOW_WIDTH` and
+            // `KUBECORD_WINDOW_HEIGHT` size the window for a screenshot.
+            .default_width(
+                std::env::var("KUBECORD_WINDOW_WIDTH")
+                    .ok()
+                    .and_then(|width| width.parse().ok())
+                    .unwrap_or(1100),
+            )
             .default_height(
                 std::env::var("KUBECORD_WINDOW_HEIGHT")
                     .ok()

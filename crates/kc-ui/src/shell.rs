@@ -553,6 +553,7 @@ impl AppState {
         composer.set_bottom_margin(16);
         composer.set_left_margin(4);
         composer.set_right_margin(4);
+        settle_composer_height(&composer);
 
         let composer_hint = gtk::Label::new(None);
         composer_hint.set_xalign(0.0);
@@ -1102,4 +1103,38 @@ mod title_tests {
         assert_eq!(super::layout_without_icon("close,icon:menu"), "close:menu");
         assert_eq!(super::layout_without_icon(":close"), ":close");
     }
+}
+
+/// The composer's text view does not always ask to be measured again when
+/// its text changes how it wraps, so the box kept an old height: a line too
+/// tall (the text sat at its top) or too short. For a few frames after each
+/// change its height is checked against its text and put right.
+fn settle_composer_height(composer: &gtk::TextView) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    /// Frames to check for after a change.
+    const FRAMES: u32 = 10;
+    let left = Rc::new(Cell::new(0u32));
+    let view = composer.downgrade();
+    composer.buffer().connect_changed(move |_| {
+        let Some(view) = view.upgrade() else { return };
+        // One check running at a time, kept going while typing continues.
+        let running = left.get() > 0;
+        left.set(FRAMES);
+        if running {
+            return;
+        }
+        let left = left.clone();
+        view.add_tick_callback(move |view, _| {
+            let width = view.width();
+            if width > 0 {
+                let (height, ..) = view.measure(gtk::Orientation::Vertical, width);
+                if height != view.height() {
+                    view.queue_resize();
+                }
+            }
+            left.set(left.get().saturating_sub(1));
+            if left.get() > 0 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+        });
+    });
 }
