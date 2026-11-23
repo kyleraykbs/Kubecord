@@ -196,6 +196,11 @@ async fn main() -> Result<()> {
         "watch" => {
             watch(token, false).await?;
         }
+        "subscribe" => {
+            let guild_id = parse_id(filtered.get(1))?;
+            let channel_id = parse_id(filtered.get(2))?;
+            subscribe(token, guild_id, channel_id).await?;
+        }
         "screen" => {
             let portal = kc_media::portal::request(None).await?;
             let (tx, rx) = std::sync::mpsc::channel();
@@ -596,6 +601,32 @@ async fn playback_test() -> Result<()> {
 fn parse_id(value: Option<&String>) -> Result<Snowflake> {
     let value = value.context("missing id argument")?;
     Snowflake::from_str(value).map_err(Into::into)
+}
+
+/// Subscribes to a channel's member list once READY arrives and reports
+/// which events come back (names only), for checking the gateway protocol.
+async fn subscribe(token: Token, guild_id: Snowflake, channel_id: Snowflake) -> Result<()> {
+    let (handle, mut events, _task) = Gateway::new(token).start();
+    handle.set_focused(true);
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            GatewayEvent::Dispatch { name, .. } => {
+                if name == "READY" {
+                    handle.subscribe_channel(guild_id, channel_id);
+                }
+                eprintln!("dispatch {name}");
+                *counts.entry(name).or_default() += 1;
+            }
+            GatewayEvent::Closed { code, reason, .. } => {
+                eprintln!("closed {code:?} {reason}");
+                break;
+            }
+            other => eprintln!("{other:?}"),
+        }
+    }
+    println!("{counts:?}");
+    Ok(())
 }
 
 async fn watch(token: Token, dms_only: bool) -> Result<()> {

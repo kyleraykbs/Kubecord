@@ -1,5 +1,6 @@
 //! Discord user gateway: one WebSocket, heartbeats, identify, resume.
 
+pub mod compress;
 pub mod session;
 
 pub use session::{Gateway, GatewayEvent, Outcome};

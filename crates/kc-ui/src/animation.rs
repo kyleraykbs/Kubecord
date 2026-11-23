@@ -135,7 +135,18 @@ fn queue_refresh() {
 pub(crate) fn set_window_focused(focused: bool) {
     if WINDOW_FOCUSED.swap(focused, Ordering::Relaxed) != focused {
         refresh_all();
+        // Discord's heartbeats say whether the user is at the app.
+        if let Ok(gateways) = crate::session::GATEWAYS.lock() {
+            for gateway in gateways.values() {
+                gateway.set_focused(focused);
+            }
+        }
     }
+}
+
+/// Whether one of the app's windows had the focus when last checked.
+pub(crate) fn window_focused() -> bool {
+    WINDOW_FOCUSED.load(Ordering::Relaxed)
 }
 
 /// Sets whether GIFs animate while the window is unfocused.

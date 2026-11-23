@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -9,7 +11,15 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
+use crate::compress::ZlibStream;
 use crate::{DEFAULT_GATEWAY, GATEWAY_VERSION};
+
+/// Guild subscriptions (the web client's op 37; op 14 is deprecated).
+const GUILD_SUBSCRIPTIONS_BULK: i64 = 37;
+/// The heartbeat the web client sends: op 1 plus whether the user is there.
+const QOS_HEARTBEAT: i64 = 40;
+/// The version of the heartbeat's QoS payload the web client sends.
+const QOS_VERSION: u64 = 31;
 
 /// Discord closes a connection that sends more than this many messages in
 /// [`SEND_WINDOW`] (close code 4008).
@@ -64,32 +74,71 @@ fn enqueue(pending: &mut VecDeque<Value>, payload: Value) {
                 !(queued["op"].as_i64() == Some(4) && queued["d"]["guild_id"] == guild)
             });
         }
-        Some(14) => {
+        Some(GUILD_SUBSCRIPTIONS_BULK) => {
             if let Some(queued) = pending
                 .iter_mut()
-                .find(|queued| queued["op"].as_i64() == Some(14) && queued["d"]["guild_id"] == guild)
+                .find(|queued| queued["op"].as_i64() == Some(GUILD_SUBSCRIPTIONS_BULK))
             {
-                let mut merged = queued.clone();
-                if let (Some(into), Some(from)) = (
-                    merged["d"]["channels"].as_object_mut(),
-                    payload["d"]["channels"].as_object(),
-                ) {
-                    for (channel, ranges) in from {
-                        into.insert(channel.clone(), ranges.clone());
-                    }
-                }
-                for key in ["typing", "activities", "threads"] {
-                    if !payload["d"][key].is_null() {
-                        merged["d"][key] = payload["d"][key].clone();
-                    }
-                }
-                *queued = merged;
+                merge_subscriptions(&mut queued["d"]["subscriptions"], &payload["d"]["subscriptions"]);
                 return;
             }
         }
         _ => {}
     }
     pending.push_back(payload);
+}
+
+/// Folds guild subscriptions into ones already waiting: per guild, the
+/// channel ranges merge and the newest feature flags win.
+fn merge_subscriptions(into: &mut Value, from: &Value) {
+    let (Some(into), Some(from)) = (into.as_object_mut(), from.as_object()) else {
+        return;
+    };
+    for (guild, update) in from {
+        let entry = into.entry(guild.clone()).or_insert_with(|| json!({}));
+        let Some(update) = update.as_object() else {
+            continue;
+        };
+        for (key, value) in update {
+            match (entry.get_mut(key), key.as_str()) {
+                (Some(Value::Object(channels)), "channels") => {
+                    if let Some(new) = value.as_object() {
+                        for (channel, ranges) in new {
+                            channels.insert(channel.clone(), ranges.clone());
+                        }
+                    }
+                }
+                _ => {
+                    entry[key] = value.clone();
+                }
+            }
+        }
+    }
+}
+
+/// Whether the user is at the app, for the heartbeat's QoS payload and the
+/// identify's `client_app_state`, as the web client reports them.
+#[derive(Default)]
+struct Activity {
+    focused: AtomicBool,
+    rtc_connected: AtomicBool,
+}
+
+impl Activity {
+    fn qos(&self) -> Value {
+        let mut reasons = Vec::new();
+        if self.focused.load(Ordering::Relaxed) {
+            reasons.push("foregrounded");
+        }
+        if self.rtc_connected.load(Ordering::Relaxed) {
+            reasons.push("rtc_connected");
+        }
+        json!({"active": !reasons.is_empty(), "ver": QOS_VERSION, "reasons": reasons})
+    }
+
+    fn active(&self) -> bool {
+        self.focused.load(Ordering::Relaxed) || self.rtc_connected.load(Ordering::Relaxed)
+    }
 }
 
 /// Events a gateway connection publishes to its consumer.
@@ -125,12 +174,19 @@ pub enum Outcome {
 pub struct Gateway {
     token: Token,
     properties: SuperProperties,
+    activity: Arc<Activity>,
 }
 
 struct Session {
     id: Option<String>,
     resume_url: Option<String>,
     seq: Option<u64>,
+    /// READY's `qos_token`, handed back in the next identify.
+    qos_token: Option<String>,
+    /// Identifies sent so far; the first is a cold start.
+    identifies: u32,
+    /// The presence last sent (op 3), which a new identify repeats.
+    presence: Option<Value>,
 }
 
 /// A handle for sending payloads (voice state, streams, presence) over the
@@ -138,6 +194,7 @@ struct Session {
 #[derive(Clone)]
 pub struct GatewayHandle {
     tx: mpsc::UnboundedSender<Value>,
+    activity: Arc<Activity>,
 }
 
 impl GatewayHandle {
@@ -145,7 +202,31 @@ impl GatewayHandle {
     /// returned receiver. For tests of what would be sent.
     pub fn detached() -> (Self, mpsc::UnboundedReceiver<Value>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                activity: Arc::default(),
+            },
+            rx,
+        )
+    }
+
+    /// Whether a window of the app has focus. Becoming active sends a
+    /// heartbeat at once, as the web client does.
+    pub fn set_focused(&self, focused: bool) {
+        self.set_activity(&self.activity.focused, focused);
+    }
+
+    /// Whether the account is in a call or voice channel.
+    pub fn set_rtc_connected(&self, connected: bool) {
+        self.set_activity(&self.activity.rtc_connected, connected);
+    }
+
+    fn set_activity(&self, flag: &AtomicBool, value: bool) {
+        let was_active = self.activity.active();
+        if flag.swap(value, Ordering::Relaxed) != value && !was_active && self.activity.active() {
+            self.send(json!({"op": QOS_HEARTBEAT}));
+        }
     }
 
     pub fn send(&self, payload: Value) {
@@ -160,6 +241,7 @@ impl GatewayHandle {
         self_deaf: bool,
         self_video: bool,
     ) {
+        self.set_rtc_connected(channel_id.is_some());
         self.send(json!({
             "op": 4,
             "d": {
@@ -273,17 +355,15 @@ impl GatewayHandle {
     /// lazy guild subscriptions; without this, existing members (and their
     /// voice states) in a channel are not delivered.
     pub fn subscribe_channel(&self, guild_id: Snowflake, channel_id: Snowflake) {
-        let mut channels = serde_json::Map::new();
-        channels.insert(channel_id.to_string(), json!([[0, 99], [100, 199]]));
+        let subscription = json!({
+            "typing": true,
+            "threads": true,
+            "activities": true,
+            "channels": { channel_id.to_string(): [[0, 99], [100, 199]] },
+        });
         self.send(json!({
-            "op": 14,
-            "d": {
-                "guild_id": guild_id,
-                "channels": channels,
-                "typing": true,
-                "activities": true,
-                "threads": true,
-            }
+            "op": GUILD_SUBSCRIPTIONS_BULK,
+            "d": { "subscriptions": { guild_id.to_string(): subscription } }
         }));
     }
 }
@@ -293,6 +373,7 @@ impl Gateway {
         Self {
             token,
             properties: SuperProperties::new(),
+            activity: Arc::default(),
         }
     }
 
@@ -307,8 +388,16 @@ impl Gateway {
     ) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let activity = self.activity.clone();
         let task = tokio::spawn(self.run_with(event_tx, command_rx));
-        (GatewayHandle { tx: command_tx }, event_rx, task)
+        (
+            GatewayHandle {
+                tx: command_tx,
+                activity,
+            },
+            event_rx,
+            task,
+        )
     }
 
     /// Connects and publishes events until the connection ends. Reconnects with
@@ -327,6 +416,9 @@ impl Gateway {
             id: None,
             resume_url: None,
             seq: None,
+            qos_token: None,
+            identifies: 0,
+            presence: None,
         };
         let mut backoff_ms = 1_000u64;
 
@@ -367,11 +459,8 @@ impl Gateway {
         established: &mut bool,
     ) -> Outcome {
         let url = match (&session.id, &session.resume_url) {
-            (Some(_), Some(resume)) => format!(
-                "{}/?v={GATEWAY_VERSION}&encoding=json",
-                resume.trim_end_matches('/')
-            ),
-            _ => format!("{DEFAULT_GATEWAY}/?v={GATEWAY_VERSION}&encoding=json"),
+            (Some(_), Some(resume)) => gateway_url(resume),
+            _ => gateway_url(DEFAULT_GATEWAY),
         };
         debug!(url, "gateway connecting");
 
@@ -383,10 +472,19 @@ impl Gateway {
             }
         };
         let (mut write, mut read) = stream.split();
+        let mut inflate = ZlibStream::new();
 
         // HELLO must arrive first; wait for it before starting the heartbeat.
         let hello = loop {
             match read.next().await {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if let Ok(Some(text)) = inflate.feed(&bytes)
+                        && let Ok(value) = serde_json::from_str::<Value>(&text)
+                        && value["op"].as_i64() == Some(10)
+                    {
+                        break value["d"]["heartbeat_interval"].as_u64().unwrap_or(41_250);
+                    }
+                }
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&text)
                         && value["op"].as_i64() == Some(10)
@@ -427,8 +525,9 @@ impl Gateway {
             }
         } else {
             info!("gateway identifying (new session)");
-            let payload = identify_payload(&self.token, &self.properties);
-            if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
+            let payload = identify_payload(&self.token, &self.properties, &self.activity, session);
+            session.identifies += 1;
+            if let Err(error) = write.send(Message::Text(payload.into())).await {
                 warn!(%error, "gateway identify send failed");
                 return Outcome::Reconnect { resumable: true };
             }
@@ -452,6 +551,9 @@ impl Gateway {
                     break;
                 };
                 budget.record(Instant::now());
+                if payload["op"].as_i64() == Some(3) {
+                    session.presence = Some(payload["d"].clone());
+                }
                 if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
                     warn!(%error, "gateway command send failed");
                     return Outcome::Reconnect { resumable: true };
@@ -470,6 +572,19 @@ impl Gateway {
                     let Some(payload) = command else {
                         continue;
                     };
+                    // The user came back: tell Discord now, not at the next beat.
+                    if payload["op"].as_i64() == Some(QOS_HEARTBEAT) {
+                        if !*established {
+                            continue;
+                        }
+                        let payload = heartbeat_payload(session.seq, &self.activity);
+                        budget.record(Instant::now());
+                        if write.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            return Outcome::Reconnect { resumable: true };
+                        }
+                        awaiting_ack = true;
+                        continue;
+                    }
                     enqueue(&mut pending, payload);
                 }
                 _ = tokio::time::sleep(throttled.unwrap_or(Duration::ZERO)), if throttled.is_some() => {}
@@ -478,7 +593,7 @@ impl Gateway {
                         warn!("gateway heartbeat not acknowledged; reconnecting");
                         return Outcome::Reconnect { resumable: true };
                     }
-                    let payload = json!({ "op": 1, "d": session.seq });
+                    let payload = heartbeat_payload(session.seq, &self.activity);
                     budget.record(Instant::now());
                     if let Err(error) = write.send(Message::Text(payload.to_string().into())).await {
                         warn!(%error, "gateway heartbeat send failed");
@@ -497,6 +612,17 @@ impl Gateway {
                             warn!(%error, "gateway read failed");
                             return Outcome::Reconnect { resumable: true };
                         }
+                    };
+                    let message = match message {
+                        Message::Binary(bytes) => match inflate.feed(&bytes) {
+                            Ok(Some(text)) => Message::Text(text.into()),
+                            Ok(None) => continue,
+                            Err(error) => {
+                                warn!(%error, "gateway sent a frame that does not inflate");
+                                return Outcome::Reconnect { resumable: false };
+                            }
+                        },
+                        other => other,
                     };
                     match message {
                         Message::Text(text) => {
@@ -517,6 +643,7 @@ impl Gateway {
                                         session.resume_url = data["resume_gateway_url"]
                                             .as_str()
                                             .map(str::to_owned);
+                                        session.qos_token = data["qos_token"].as_str().map(str::to_owned);
                                         *established = true;
                                         info!(
                                             user = data.pointer("/user/username").and_then(|value| value.as_str()).unwrap_or("?"),
@@ -535,7 +662,7 @@ impl Gateway {
                                     });
                                 }
                                 1 => {
-                                    let payload = json!({ "op": 1, "d": session.seq });
+                                    let payload = heartbeat_payload(session.seq, &self.activity);
                                     budget.record(Instant::now());
                                     if write.send(Message::Text(payload.to_string().into())).await.is_err() {
                                         return Outcome::Reconnect { resumable: true };
@@ -560,10 +687,7 @@ impl Gateway {
                                 _ => {}
                             }
                         }
-                        Message::Binary(_) => {
-                            // zlib-stream frames are only sent when the
-                            // connection advertised compression; we do not.
-                        }
+                        Message::Binary(_) => {}
                         Message::Close(frame) => {
                             let (code, reason) = close_parts(frame);
                             error!(?code, reason, "gateway closed");
@@ -600,29 +724,103 @@ fn dump_dispatch(name: &str, data: &Value) {
     }
 }
 
-fn identify_payload(token: &Token, properties: &SuperProperties) -> Value {
-    json!({
+/// The gateway URL, with the query the web client sends: JSON over one
+/// zlib stream.
+fn gateway_url(base: &str) -> String {
+    format!(
+        "{}/?encoding=json&v={GATEWAY_VERSION}&compress=zlib-stream",
+        base.trim_end_matches('/')
+    )
+}
+
+/// A heartbeat as the web client sends it: op 40, with whether the user is
+/// at the app.
+fn heartbeat_payload(seq: Option<u64>, activity: &Activity) -> Value {
+    json!({"op": QOS_HEARTBEAT, "d": {"seq": seq, "qos": activity.qos()}})
+}
+
+/// The identify the web client sends, field for field and in its order: its
+/// capabilities (which shape READY and some events), its properties plus the
+/// connection's, and no cached client state.
+fn identify_payload(
+    token: &Token,
+    properties: &SuperProperties,
+    activity: &Activity,
+    session: &Session,
+) -> String {
+    #[derive(serde::Serialize)]
+    struct Properties<'a> {
+        #[serde(flatten)]
+        base: &'a SuperProperties,
+        client_app_state: &'static str,
+        is_fast_connect: bool,
+        gateway_connect_reasons: &'static str,
+    }
+    let properties = Properties {
+        base: properties,
+        client_app_state: if activity.focused.load(Ordering::Relaxed) {
+            "focused"
+        } else {
+            "unfocused"
+        },
+        is_fast_connect: false,
+        gateway_connect_reasons: if session.identifies == 0 {
+            "COLD_START"
+        } else {
+            "NO_REASONS"
+        },
+    };
+    let payload = json!({
         "op": 2,
         "d": {
             "token": token.expose(),
             "capabilities": kc_core::super_properties::CAPABILITIES,
             "properties": properties,
-            "compress": false,
-            "client_state": {
-                "guild_hashes": {},
-                "highest_last_message_id": "0",
-                "read_state_version": 0,
-                "user_guild_settings_version": -1,
-                "user_settings_version": -1
-            },
-            "presence": {
-                "status": "online",
+            // Until the account's status is known the web client says
+            // "unknown"; after that, what it last set.
+            "presence": session.presence.clone().unwrap_or_else(|| json!({
+                "status": "unknown",
                 "since": 0,
-                "afk": false,
-                "activities": []
-            }
+                "activities": [],
+                "afk": false
+            })),
+            "compress": false,
+            "client_state": { "guild_versions": {} },
+            "qos_token": qos_token(activity.active(), session.qos_token.as_deref()),
         }
-    })
+    });
+    payload.to_string()
+}
+
+/// The identify's `qos_token`: base64 of a `QosToken` protobuf holding
+/// whether the user is active (field 1) and the token READY last gave
+/// (field 2, its bytes as sent).
+fn qos_token(active: bool, derived: Option<&str>) -> String {
+    use base64::Engine;
+    let engine = &base64::engine::general_purpose::STANDARD;
+    let mut bytes = vec![0x0a];
+    if active {
+        bytes.extend([0x02, 0x08, 0x01]);
+    } else {
+        bytes.push(0x00);
+    }
+    if let Some(derived) = derived.and_then(|token| engine.decode(token).ok())
+        && !derived.is_empty()
+    {
+        bytes.push(0x12);
+        let mut length = derived.len();
+        loop {
+            let byte = (length & 0x7f) as u8;
+            length >>= 7;
+            if length == 0 {
+                bytes.push(byte);
+                break;
+            }
+            bytes.push(byte | 0x80);
+        }
+        bytes.extend(derived);
+    }
+    engine.encode(bytes)
 }
 
 fn close_parts(
@@ -668,38 +866,108 @@ mod tests {
     #[test]
     fn queued_commands_fold_where_only_the_newest_matters() {
         let mut pending = VecDeque::new();
-        let subscribe = |channel: &str| {
-            json!({"op": 14, "d": {"guild_id": "1", "channels": {channel: [[0, 99]]}, "typing": true}})
+        let subscribe = |guild: &str, channel: &str| {
+            json!({"op": 37, "d": {"subscriptions": {guild: {"typing": true, "channels": {channel: [[0, 99]]}}}}})
         };
-        enqueue(&mut pending, subscribe("10"));
-        enqueue(&mut pending, subscribe("11"));
-        enqueue(&mut pending, json!({"op": 14, "d": {"guild_id": "2", "channels": {"20": [[0, 99]]}}}));
+        enqueue(&mut pending, subscribe("1", "10"));
+        enqueue(&mut pending, subscribe("1", "11"));
+        enqueue(&mut pending, subscribe("2", "20"));
+        enqueue(&mut pending, json!({"op": 37, "d": {"subscriptions": {"1": {"typing": false}}}}));
         enqueue(&mut pending, json!({"op": 3, "d": {"status": "idle"}}));
         enqueue(&mut pending, json!({"op": 3, "d": {"status": "online"}}));
         enqueue(&mut pending, json!({"op": 4, "d": {"guild_id": "1", "channel_id": "5"}}));
         enqueue(&mut pending, json!({"op": 4, "d": {"guild_id": "1", "channel_id": null}}));
-        // One subscription per server, channels merged; the newest presence
-        // and voice state only.
-        assert_eq!(pending.len(), 4, "{pending:?}");
-        let merged = pending.iter().find(|p| p["d"]["guild_id"] == "1" && p["op"] == 14).unwrap();
-        assert!(merged["d"]["channels"]["10"].is_array() && merged["d"]["channels"]["11"].is_array());
+        // One bulk subscription, channels merged per server; the newest
+        // presence and voice state only.
+        assert_eq!(pending.len(), 3, "{pending:?}");
+        let subscriptions = &pending.iter().find(|p| p["op"] == 37).unwrap()["d"]["subscriptions"];
+        assert!(subscriptions["1"]["channels"]["10"].is_array() && subscriptions["1"]["channels"]["11"].is_array());
+        assert_eq!(subscriptions["1"]["typing"], false);
+        assert!(subscriptions["2"]["channels"]["20"].is_array());
         assert_eq!(pending.iter().find(|p| p["op"] == 3).unwrap()["d"]["status"], "online");
         assert!(pending.iter().find(|p| p["op"] == 4).unwrap()["d"]["channel_id"].is_null());
     }
 
+    fn session() -> Session {
+        Session {
+            id: None,
+            resume_url: None,
+            seq: None,
+            qos_token: None,
+            identifies: 0,
+            presence: None,
+        }
+    }
+
     #[test]
-    fn identify_has_user_client_shape() {
+    fn identify_matches_the_web_client() {
         let token = Token::new("abc");
-        let payload = identify_payload(&token, &SuperProperties::new());
-        assert_eq!(payload["op"], 2);
-        assert_eq!(payload["d"]["token"], "abc");
-        assert_eq!(payload["d"]["compress"], false);
-        assert_eq!(payload["d"]["properties"]["browser"], "Chrome");
-        assert!(payload["d"].get("intents").is_none());
-        assert_eq!(payload["d"]["capabilities"], 4605);
-        assert_eq!(payload["d"]["client_state"]["guild_hashes"], json!({}));
-        assert_eq!(payload["d"]["client_state"]["highest_last_message_id"], "0");
-        assert_eq!(payload["d"]["client_state"]["user_settings_version"], -1);
+        let activity = Activity::default();
+        activity.focused.store(true, Ordering::Relaxed);
+        let text = identify_payload(&token, &SuperProperties::new(), &activity, &session());
+        // Field order follows the web client's.
+        let order: Vec<_> = ["\"token\"", "\"capabilities\"", "\"properties\"", "\"presence\"", "\"compress\"", "\"client_state\"", "\"qos_token\""]
+            .iter()
+            .map(|key| text.find(key).unwrap())
+            .collect();
+        assert!(order.is_sorted(), "{text}");
+        assert!(text.starts_with(r#"{"op":2,"d":{"token":"abc""#), "{text}");
+        let payload: Value = serde_json::from_str(&text).unwrap();
+        let d = &payload["d"];
+        assert_eq!(d["capabilities"], 1_767_421);
+        assert_eq!(d["compress"], false);
+        assert!(d.get("intents").is_none());
+        assert_eq!(d["properties"]["browser"], "Chrome");
+        assert_eq!(d["properties"]["client_app_state"], "focused");
+        assert_eq!(d["properties"]["is_fast_connect"], false);
+        assert_eq!(d["properties"]["gateway_connect_reasons"], "COLD_START");
+        assert_eq!(d["client_state"], json!({"guild_versions": {}}));
+        assert_eq!(d["qos_token"], "CgIIAQ==");
+        assert_eq!(d["presence"]["status"], "unknown");
+
+        let mut later = session();
+        later.identifies = 1;
+        later.qos_token = Some("AQID".into());
+        later.presence = Some(json!({"status": "dnd", "since": 0, "activities": [], "afk": false}));
+        let payload: Value =
+            serde_json::from_str(&identify_payload(&token, &SuperProperties::new(), &Activity::default(), &later)).unwrap();
+        assert_eq!(payload["d"]["properties"]["client_app_state"], "unfocused");
+        assert_eq!(payload["d"]["properties"]["gateway_connect_reasons"], "NO_REASONS");
+        assert_eq!(payload["d"]["presence"]["status"], "dnd");
+        use base64::Engine;
+        let token = base64::engine::general_purpose::STANDARD
+            .decode(payload["d"]["qos_token"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(token, [0x0a, 0x00, 0x12, 0x03, 1, 2, 3]);
+    }
+
+    #[test]
+    fn heartbeats_carry_whether_the_user_is_there() {
+        let activity = Activity::default();
+        assert_eq!(
+            heartbeat_payload(Some(7), &activity),
+            json!({"op": 40, "d": {"seq": 7, "qos": {"active": false, "ver": 31, "reasons": []}}})
+        );
+        activity.focused.store(true, Ordering::Relaxed);
+        activity.rtc_connected.store(true, Ordering::Relaxed);
+        assert_eq!(
+            heartbeat_payload(None, &activity)["d"]["qos"]["reasons"],
+            json!(["foregrounded", "rtc_connected"])
+        );
+        assert_eq!(
+            gateway_url("wss://gateway.discord.gg/"),
+            "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream"
+        );
+    }
+
+    #[test]
+    fn coming_back_sends_a_heartbeat_at_once() {
+        let (handle, mut sent) = GatewayHandle::detached();
+        handle.set_focused(true);
+        assert_eq!(sent.try_recv().unwrap()["op"], 40);
+        handle.set_rtc_connected(true);
+        handle.set_focused(false);
+        assert!(sent.try_recv().is_err(), "still active: nothing to say");
     }
 
     #[test]

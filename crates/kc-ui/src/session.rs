@@ -818,6 +818,7 @@ fn spawn_account(
 
     tokio::spawn(async move {
         let (handle, mut gateway_rx, gateway_task) = Gateway::new(token).start();
+        handle.set_focused(crate::animation::window_focused());
         if let Ok(mut registry) = GATEWAYS.lock() {
             registry.insert(account, handle.clone());
         }
@@ -898,6 +899,26 @@ fn spawn_account(
                                     }
                                     voice.self_user_id =
                                         serde_json::from_value(data["user"]["id"].clone()).ok();
+                                    // The identify said "unknown", as the web
+                                    // client's does; once connected it sets
+                                    // the status and custom status saved in
+                                    // the account's settings.
+                                    let (status, custom) = store.read(|state| {
+                                        (state.status.clone(), state.custom_status.clone())
+                                    });
+                                    if let Some(status) = status {
+                                        voice.handle.update_presence(
+                                            &status,
+                                            custom.as_ref().map(|custom| {
+                                                (
+                                                    custom.text.as_deref().unwrap_or(""),
+                                                    custom.emoji_name.as_deref(),
+                                                    custom.emoji_id,
+                                                )
+                                            }),
+                                            false,
+                                        );
+                                    }
                                     if voice.connection.is_some() {
                                         rejoin_after_new_session(
                                             &mut voice,

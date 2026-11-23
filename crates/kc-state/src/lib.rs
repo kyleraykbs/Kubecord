@@ -13,6 +13,7 @@ pub mod permissions;
 mod queries;
 mod serde_util;
 pub mod settings;
+pub mod settings_proto;
 pub mod state;
 pub mod time;
 pub mod user;

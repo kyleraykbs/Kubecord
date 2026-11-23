@@ -14,8 +14,11 @@ use serde::Serialize;
 /// read from discord.com at startup ([`set_build_number`]), and the last one
 /// read is kept for the next start.
 pub const CLIENT_BUILD_NUMBER: u64 = 679_055;
-/// Abaddon sends 4605; bit 12 is needed for CALL_CREATE.
-pub const CAPABILITIES: u64 = 4_605;
+/// The gateway capabilities the web client identifies with (from its
+/// bundle). They change READY's shape: settings come as a protobuf, guild
+/// fields under `properties`, reactions in batches, and passive updates
+/// for servers the client is not subscribed to.
+pub const CAPABILITIES: u64 = 1_767_421;
 /// The Chrome release the identity claims to be. Keep near Chrome's current
 /// stable: an old browser stands out. The user agent, `browser_version` and
 /// `sec-ch-ua` all follow from it.

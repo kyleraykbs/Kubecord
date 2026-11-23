@@ -422,6 +422,48 @@ impl State {
             "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
                 self.reaction(data, name.ends_with("REMOVE"), &mut events)
             }
+            // DEBOUNCE_MESSAGE_REACTIONS: several adds in one event, each
+            // emoji with the users who added it.
+            "MESSAGE_REACTION_ADD_MANY" => {
+                for reaction in data["reactions"].as_array().into_iter().flatten() {
+                    for user in reaction["users"].as_array().into_iter().flatten() {
+                        let single = serde_json::json!({
+                            "channel_id": data["channel_id"],
+                            "message_id": data["message_id"],
+                            "guild_id": data["guild_id"],
+                            "user_id": user,
+                            "emoji": reaction["emoji"],
+                            "type": reaction.get("type").or_else(|| reaction.get("reactionType")).cloned().unwrap_or(Value::from(0)),
+                        });
+                        self.reaction(&single, false, &mut events);
+                    }
+                }
+            }
+            // PASSIVE_GUILD_UPDATE_V2: for servers without a subscription,
+            // channel activity and voice changes arrive batched here instead
+            // of as CHANNEL_UNREAD_UPDATE and VOICE_STATE_UPDATE.
+            "PASSIVE_UPDATE_V2" => {
+                let guild_id = data["guild_id"].clone();
+                let updates = serde_json::json!({ "channel_unread_updates": data["updated_channels"] });
+                events.extend(self.apply("CHANNEL_UNREAD_UPDATE", &updates));
+                for member in data["updated_members"].as_array().into_iter().flatten() {
+                    if let Some(guild) = snowflake(data, "guild_id") {
+                        if let Some(user) = member.get("user") {
+                            self.upsert_user_from_value(user);
+                        }
+                        self.upsert_member(guild, member);
+                    }
+                }
+                for state in data["updated_voice_states"].as_array().into_iter().flatten() {
+                    let mut state = state.clone();
+                    state["guild_id"] = guild_id.clone();
+                    events.extend(self.apply("VOICE_STATE_UPDATE", &state));
+                }
+                for user in data["removed_voice_states"].as_array().into_iter().flatten() {
+                    let left = serde_json::json!({ "guild_id": guild_id, "user_id": user, "channel_id": null });
+                    events.extend(self.apply("VOICE_STATE_UPDATE", &left));
+                }
+            }
             "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" => {
                 self.reaction_clear(data, &mut events)
             }
@@ -547,6 +589,17 @@ impl State {
                 self.user_settings(data);
                 events.push(StoreEvent::SettingsUpdated);
             }
+            // With USER_SETTINGS_PROTO, settings changes come as protobuf;
+            // type 1 is `PreloadedUserSettings`.
+            "USER_SETTINGS_PROTO_UPDATE" => {
+                if data.pointer("/settings/type").and_then(Value::as_u64) == Some(1)
+                    && let Some(proto) = data.pointer("/settings/proto").and_then(Value::as_str)
+                {
+                    let partial = data["partial"].as_bool().unwrap_or(false);
+                    self.user_settings_proto(proto, partial);
+                    events.push(StoreEvent::SettingsUpdated);
+                }
+            }
             "USER_GUILD_SETTINGS_UPDATE" => {
                 let (guild_id, settings) = GuildSettings::parse(data);
                 self.guild_settings.insert(guild_id, settings);
@@ -668,7 +721,7 @@ impl State {
                     continue;
                 }
 
-                let Ok(mut parsed) = serde_json::from_value::<Guild>(guild.clone()) else {
+                let Ok(mut parsed) = serde_json::from_value::<Guild>(with_properties(guild)) else {
                     self.guilds.entry(id).or_insert_with(|| Guild {
                         id,
                         name: String::new(),
@@ -748,6 +801,9 @@ impl State {
         if let Some(settings) = data.get("user_settings") {
             self.user_settings(settings);
         }
+        if let Some(proto) = data["user_settings_proto"].as_str() {
+            self.user_settings_proto(proto, false);
+        }
         if let Some(sessions) = data.get("sessions") {
             self.sessions(sessions);
         }
@@ -809,6 +865,24 @@ impl State {
         }
     }
 
+    fn user_settings_proto(&mut self, proto: &str, partial: bool) {
+        let Some(settings) =
+            crate::settings_proto::decode(proto, partial, crate::time::unix_millis_now())
+        else {
+            warn!("could not decode the settings proto");
+            return;
+        };
+        if let Some(folders) = settings.guild_folders {
+            self.guild_folders = folders;
+        }
+        if let Some(status) = settings.status.filter(|status| !status.is_empty()) {
+            self.status = Some(status);
+        }
+        if let Some(custom) = settings.custom_status {
+            self.custom_status = custom;
+        }
+    }
+
     /// The account's effective status is the `all` session when present,
     /// otherwise the first listed session. Returns whether it changed.
     fn sessions(&mut self, sessions: &Value) -> bool {
@@ -828,7 +902,7 @@ impl State {
     }
 
     fn guild_create(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
-        let Ok(mut guild) = serde_json::from_value::<Guild>(data.clone()) else {
+        let Ok(mut guild) = serde_json::from_value::<Guild>(with_properties(data)) else {
             warn!("could not parse GUILD_CREATE");
             return;
         };
@@ -896,6 +970,7 @@ impl State {
     }
 
     fn guild_update(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        let data = &with_properties(data);
         let Some(id) = snowflake(data, "id") else {
             return;
         };
@@ -1670,6 +1745,21 @@ impl Store {
     }
 }
 
+/// A gateway guild as one object. With CLIENT_STATE_V2 (which the web client
+/// sends) its own fields -- name, icon, owner, features -- are under
+/// `properties`, apart from its channels, roles and other lists.
+fn with_properties(guild: &Value) -> Value {
+    let mut guild = guild.clone();
+    if let Some(Value::Object(properties)) = guild.as_object_mut().and_then(|guild| guild.remove("properties"))
+        && let Some(object) = guild.as_object_mut()
+    {
+        for (key, value) in properties {
+            object.entry(key).or_insert(value);
+        }
+    }
+    guild
+}
+
 fn snowflake(value: &Value, key: &str) -> Option<Snowflake> {
     match value.get(key)? {
         Value::String(text) => text.parse().ok(),
@@ -1898,6 +1988,121 @@ mod tests {
         store.read(|state| {
             let messages = state.messages(Snowflake(10));
             assert!(messages[0].reactions.is_empty());
+        });
+    }
+
+    #[test]
+    fn batched_reactions_count_each_user() {
+        let store = Store::new();
+        store.apply("MESSAGE_CREATE", &message(100, 10, "hello"));
+        store.apply(
+            "MESSAGE_REACTION_ADD_MANY",
+            &json!({"channel_id": "10", "message_id": "100", "reactions": [
+                {"emoji": {"name": "👍"}, "users": ["1", "2", "3"]},
+                {"emoji": {"id": "55", "name": "blob"}, "users": ["2"]}
+            ]}),
+        );
+        store.read(|state| {
+            let reactions = &state.messages(Snowflake(10))[0].reactions;
+            assert_eq!(reactions.len(), 2);
+            assert_eq!(reactions[0].count, 3);
+            assert_eq!(reactions[1].count, 1);
+        });
+    }
+
+    #[test]
+    fn ready_reads_the_web_clients_shapes() {
+        // CLIENT_STATE_V2 puts a guild's fields under `properties`, and
+        // USER_SETTINGS_PROTO replaces `user_settings` with a protobuf.
+        let store = Store::new();
+        store.apply(
+            "READY",
+            &json!({
+                "session_id": "s",
+                "user": {"id": "1", "username": "me"},
+                "users": [],
+                "guilds": [{
+                    "id": "10",
+                    "properties": {"id": "10", "name": "Lambda Ignition", "icon": "abc", "owner_id": "1"},
+                    "channels": [{"id": "20", "type": 0, "name": "general"}],
+                    "roles": [],
+                    "data_mode": "full",
+                    "version": 1
+                }],
+                "merged_members": [[]],
+                "private_channels": [],
+                "relationships": [],
+                "read_state": {"entries": []},
+                "user_guild_settings": {"entries": []},
+                "user_settings_proto": crate::settings_proto::tests::sample()
+            }),
+        );
+        store.read(|state| {
+            let guild = &state.guilds[&Snowflake(10)];
+            assert_eq!(guild.name, "Lambda Ignition");
+            assert_eq!(guild.icon.as_deref(), Some("abc"));
+            assert!(state.channels.contains_key(&Snowflake(20)));
+            assert_eq!(state.status.as_deref(), Some("dnd"));
+            assert_eq!(state.custom_status.as_ref().and_then(|c| c.text.as_deref()), Some("coding"));
+            assert_eq!(state.guild_folders.len(), 2);
+            assert_eq!(state.guild_folders[0].name.as_deref(), Some("Games"));
+        });
+        // A later change to the status alone keeps the custom status.
+        use base64::Engine;
+        let mut status = Vec::new();
+        let mut wrapper = Vec::new();
+        crate::settings_proto::tests::message(&mut wrapper, 1, b"idle");
+        crate::settings_proto::tests::message(&mut status, 1, &wrapper);
+        let mut settings = Vec::new();
+        crate::settings_proto::tests::message(&mut settings, 11, &status);
+        store.apply(
+            "USER_SETTINGS_PROTO_UPDATE",
+            &json!({"settings": {"type": 1, "proto": base64::engine::general_purpose::STANDARD.encode(settings)}, "partial": true}),
+        );
+        store.read(|state| {
+            assert_eq!(state.status.as_deref(), Some("idle"));
+            assert!(state.custom_status.is_some());
+            assert_eq!(state.guild_folders.len(), 2);
+        });
+    }
+
+    #[test]
+    fn passive_updates_move_unreads_and_voice() {
+        let store = Store::new();
+        store.apply(
+            "GUILD_CREATE",
+            &json!({"id": "5", "properties": {"name": "Quiet"}, "channels": [
+                {"id": "50", "type": 0, "name": "general"},
+                {"id": "51", "type": 2, "name": "Voice"}
+            ]}),
+        );
+        store.apply(
+            "PASSIVE_UPDATE_V2",
+            &json!({
+                "guild_id": "5",
+                "updated_channels": [{"id": "50", "last_message_id": "900", "last_pin_timestamp": null}],
+                "updated_voice_states": [{"user_id": "7", "channel_id": "51", "session_id": "x"}],
+                "updated_members": [{"user": {"id": "7", "username": "seven"}, "roles": []}],
+                "removed_voice_states": []
+            }),
+        );
+        store.read(|state| {
+            assert_eq!(state.guilds[&Snowflake(5)].name, "Quiet");
+            assert_eq!(state.channels[&Snowflake(50)].last_message_id, Some(Snowflake(900)));
+            let voice = &state.voice_states[&(Some(Snowflake(5)), Snowflake(7))];
+            assert_eq!(voice.channel_id, Some(Snowflake(51)));
+        });
+        store.apply(
+            "PASSIVE_UPDATE_V2",
+            &json!({"guild_id": "5", "updated_channels": [], "updated_voice_states": [],
+                    "updated_members": [], "removed_voice_states": ["7"]}),
+        );
+        store.read(|state| {
+            let left = state
+                .voice_states
+                .get(&(Some(Snowflake(5)), Snowflake(7)))
+                .and_then(|voice| voice.channel_id);
+            assert_eq!(left, None);
         });
     }
 
