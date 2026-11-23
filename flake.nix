@@ -74,6 +74,10 @@
             clang
             pkg-config
             wrapGAppsHook4
+            # BoringSSL (wreq's TLS, Chrome's library) is built from source
+            # by btls-sys: CMake, and git to apply its patches.
+            cmake
+            git
           ];
 
           buildInputs = with pkgs; [
@@ -94,6 +98,8 @@
             GIT_HASH = inputs.self.shortRev or "dirty";
             GST_PLUGIN_SYSTEM_PATH_1_0 = lib.makeSearchPath "lib/gstreamer-1.0" gstPlugins;
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            # CMake is only for the BoringSSL build script, not this package.
+            dontUseCmakeConfigure = true;
           };
 
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;

@@ -28,7 +28,7 @@ depends=(
 optdepends=(
   'gst-plugin-va: hardware video encoding for screen share and camera'
 )
-makedepends=('cargo' 'clang' 'git')
+makedepends=('cargo' 'clang' 'cmake' 'git')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 source=("$_pkgname::git+$url.git")

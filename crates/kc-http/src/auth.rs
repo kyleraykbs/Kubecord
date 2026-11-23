@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use kc_core::Token;
 use parking_lot::Mutex;
-use reqwest::StatusCode;
+use wreq::StatusCode;
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -351,7 +351,7 @@ pub fn parse_sms_sent(body: &[u8]) -> Option<String> {
 /// which is kept for the whole sign-in (the code check uses the same one).
 #[derive(Clone)]
 pub struct AuthClient {
-    http: reqwest::Client,
+    http: wreq::Client,
     base: String,
     locale: String,
     timezone: String,
@@ -374,8 +374,7 @@ impl AuthClient {
     pub fn with_base(base: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_owned();
         let loopback = base.starts_with("http://127.0.0.1:");
-        let http = reqwest::Client::builder()
-            .user_agent(kc_core::super_properties::user_agent())
+        let http = crate::browser::client_builder()
             .https_only(!loopback)
             // Keep the device cookies Discord sets on the first request
             // (`__dcfduid` / `__sdcfduid`, tied to the fingerprint) and send
@@ -384,7 +383,7 @@ impl AuthClient {
             // a browser with cookies blocked.
             .cookie_store(true)
             .build()
-            .expect("reqwest client");
+            .expect("wreq client");
         Self {
             http,
             base,
@@ -394,7 +393,7 @@ impl AuthClient {
         }
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: wreq::Method, path: &str) -> wreq::RequestBuilder {
         browser_headers(
             self.http.request(method, format!("{}{}", self.base, path)),
             LOGIN_REFERER,
@@ -410,7 +409,7 @@ impl AuthClient {
             return Some(fingerprint);
         }
         let response = self
-            .request(reqwest::Method::GET, "/experiments")
+            .request(wreq::Method::GET, "/experiments")
             .send()
             .await
             .ok()?;
@@ -532,7 +531,7 @@ impl AuthClient {
         captcha: Option<&CaptchaAnswer>,
     ) -> Result<(StatusCode, Option<f64>, Zeroizing<Vec<u8>>)> {
         let mut request = self
-            .request(reqwest::Method::POST, path)
+            .request(wreq::Method::POST, path)
             .header("content-type", "application/json");
         if let Some(fingerprint) = self.fingerprint().await {
             request = request.header("x-fingerprint", fingerprint);
@@ -543,7 +542,7 @@ impl AuthClient {
                 request = request.header("x-captcha-rqtoken", rqtoken);
             }
         }
-        // reqwest takes its own copy; ours is wiped when `body` drops.
+        // wreq takes its own copy; ours is wiped when `body` drops.
         let response = request.body(body.to_vec()).send().await?;
         drop(body);
         let status = response.status();

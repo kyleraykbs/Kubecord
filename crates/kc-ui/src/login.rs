@@ -66,7 +66,7 @@ impl Failure {
     pub(crate) fn of(error: &kc_http::Error) -> Self {
         match error {
             kc_http::Error::Captcha { .. } => Self::Captcha,
-            // reqwest's message names the URL, never the body.
+            // wreq's message names the URL, never the body.
             other => Self::Network(other.to_string()),
         }
     }

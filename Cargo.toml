@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.98"
 license = "GPL-3.0-only"
 repository = "https://github.com/kyleraykbs/Kubecord"
 
@@ -47,12 +47,15 @@ libadwaita = "0.9"
 webkit6 = "0.6"
 opus2 = "0.4"
 parking_lot = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-webpki-roots", "gzip", "brotli", "cookies", "http2"] }
+# Connections to Discord go through wreq on BoringSSL, the TLS library
+# Chrome uses, with wreq-util's Chrome profile: what Discord sees of the
+# connection (TLS hello, HTTP/2 settings) is Chrome's, not Rust's.
+wreq = { version = "0.16.1", default-features = false, features = ["tokio-rt", "chromium-roots", "cookies", "gzip", "deflate", "brotli", "zstd", "json", "multipart", "stream", "ws"] }
+wreq-util = { git = "https://github.com/0x676e67/wreq-util", rev = "917d2581d6761a94db66466caa6c2eb4d4cdbd43", default-features = false, features = ["emulation", "emulation-chromium-pki"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -60,3 +63,10 @@ zeroize = "1"
 
 [profile.release]
 lto = "thin"
+
+# wreq-util's Chrome 152+ profiles need wreq and BoringSSL changes not yet
+# released; these are the commits wreq-util itself is built and tested on.
+[patch.crates-io]
+wreq = { git = "https://github.com/0x676e67/wreq", rev = "cd76bcdf1307153de289d34e072528bdf0510a3b" }
+btls = { git = "https://github.com/0x676e67/btls", rev = "129887582a538b8f4dcf371d15c953335312ca37" }
+btls-sys = { git = "https://github.com/0x676e67/btls", rev = "129887582a538b8f4dcf371d15c953335312ca37" }

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use kc_core::{Snowflake, Token};
 use kc_state::{Channel, Guild, Message, User};
-use reqwest::header::HeaderMap;
-use reqwest::{Method, StatusCode};
+use wreq::header::HeaderMap;
+use wreq::{Method, StatusCode};
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -96,7 +96,7 @@ pub struct GifCategory {
 /// A REST client authenticated as one user account.
 #[derive(Clone)]
 pub struct HttpClient {
-    http: reqwest::Client,
+    http: wreq::Client,
     token: Token,
     base: String,
     locale: String,
@@ -120,14 +120,13 @@ impl HttpClient {
     }
 
     pub fn with_base(token: Token, base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent(kc_core::super_properties::user_agent())
+        let http = crate::browser::client_builder()
             .https_only(true)
             // A browser keeps the cookies discord.com sets (`__dcfduid`,
             // `__sdcfduid`, `__cfruid`) and sends them back.
             .cookie_store(true)
             .build()
-            .expect("reqwest client");
+            .expect("wreq client");
 
         Self {
             http,
@@ -140,7 +139,7 @@ impl HttpClient {
         }
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> wreq::RequestBuilder {
         // A change to the account's own profile (name, bio, avatar, a
         // server profile) makes the kept copy of it stale.
         if method != Method::GET
@@ -1632,7 +1631,7 @@ impl HttpClient {
     }
 
     #[cfg(test)]
-    fn build_request(&self, method: Method, path: &str) -> reqwest::Request {
+    fn build_request(&self, method: Method, path: &str) -> wreq::Request {
         self.request(method, path).build().expect("request builds")
     }
 }
@@ -1640,11 +1639,11 @@ impl HttpClient {
 /// The headers the web client's browser sends with every API request (all
 /// but `authorization`). `referer` is the page the request comes from.
 pub(crate) fn browser_headers(
-    request: reqwest::RequestBuilder,
+    request: wreq::RequestBuilder,
     referer: &str,
     locale: &str,
     timezone: &str,
-) -> reqwest::RequestBuilder {
+) -> wreq::RequestBuilder {
     use kc_core::super_properties as identity;
     // Built for each request: the build number and the window's focus change.
     let super_properties = identity::SuperProperties::new().as_header();
@@ -1693,7 +1692,7 @@ impl HttpClient {
 /// code 20016, for instance).
 async fn parse_retry_after(
     headers: &HeaderMap,
-    response: reqwest::Response,
+    response: wreq::Response,
 ) -> (f64, Option<ApiErrorBody>) {
     let from_header = headers
         .get("retry-after")
@@ -2434,8 +2433,7 @@ mod tests {
 /// website. On failure the last one known stays.
 pub async fn refresh_build_number() {
     use kc_core::super_properties as identity;
-    let client = match reqwest::Client::builder()
-        .user_agent(kc_core::super_properties::user_agent())
+    let client = match crate::browser::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
@@ -2483,8 +2481,7 @@ pub async fn refresh_build_number() {
 /// keeps it for the next start, so the user agent follows Chrome's releases.
 pub async fn refresh_chrome_version() {
     use kc_core::super_properties as identity;
-    let client = match reqwest::Client::builder()
-        .user_agent(identity::user_agent())
+    let client = match crate::browser::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {

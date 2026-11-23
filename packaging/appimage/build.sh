@@ -28,7 +28,7 @@ OUT=${OUT:-target/appimage}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  rustc cargo clang libclang-dev pkg-config file curl ca-certificates squashfs-tools \
+  clang libclang-dev cmake git pkg-config file curl ca-certificates squashfs-tools \
   libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   libpipewire-0.3-dev libopus-dev \
@@ -36,6 +36,13 @@ apt-get install -y -qq --no-install-recommends \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gtk4 gstreamer1.0-pipewire \
   pipewire-bin libgdk-pixbuf2.0-bin librsvg2-common \
   adwaita-icon-theme >/dev/null
+
+# wreq needs a newer Rust than Ubuntu packages: the current stable, via rustup.
+if ! command -v cargo >/dev/null; then
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
 
 cargo build --release --locked -p kubecord --no-default-features
 

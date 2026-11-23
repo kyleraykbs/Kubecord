@@ -19,6 +19,38 @@ async fn main() -> Result<()> {
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
+    // The connection fingerprint Kubecord presents, as a fingerprinting
+    // service sees it (no account involved).
+    // Whether the gateway's WebSocket handshake gets through Cloudflare.
+    if args.first().map(String::as_str) == Some("ws-check") {
+        let url = std::env::var("WS_URL")
+            .unwrap_or_else(|_| "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream".into());
+        match kc_http::browser::websocket(&url).await {
+            Ok(_) => println!("upgraded"),
+            Err(error) => println!("failed: {error}"),
+        }
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("tls-check") {
+        let client = kc_http::browser::client_builder().build()?;
+        let body = client
+            .get("https://tls.peet.ws/api/all")
+            .send()
+            .await?
+            .text()
+            .await?;
+        println!("{body}");
+        // A compressed response still decodes.
+        let app = client.get("https://discord.com/app").send().await?;
+        let encoding = app.headers().get("content-encoding").cloned();
+        let html = app.text().await?;
+        eprintln!(
+            "discord.com/app: content-encoding {encoding:?}, build number {:?}",
+            kc_core::super_properties::parse_build_number(&html)
+        );
+        return Ok(());
+    }
+
     let token = match std::env::var("KUBECORD_TOKEN") {
         Ok(token) if !token.trim().is_empty() => Token::new(token),
         _ => {

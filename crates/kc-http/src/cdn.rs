@@ -15,9 +15,8 @@ pub const MEDIA_BASE: &str = "https://media.discordapp.net";
 /// Largest single download the client will buffer (attachments previews, GIFs).
 const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .user_agent(kc_core::super_properties::user_agent())
+static CLIENT: LazyLock<wreq::Client> = LazyLock::new(|| {
+    crate::browser::client_builder()
         .https_only(true)
         .timeout(std::time::Duration::from_secs(30))
         .build()

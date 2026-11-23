@@ -59,7 +59,7 @@ impl RateLimiter {
         }
     }
 
-    pub fn update(&self, route: &str, headers: &reqwest::header::HeaderMap) {
+    pub fn update(&self, route: &str, headers: &wreq::header::HeaderMap) {
         let remaining = headers
             .get("x-ratelimit-remaining")
             .and_then(|value| value.to_str().ok())

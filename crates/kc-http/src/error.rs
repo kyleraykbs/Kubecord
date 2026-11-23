@@ -11,11 +11,11 @@ pub struct ApiErrorBody {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(#[from] wreq::Error),
 
     #[error("discord returned {status}: {message} (code {code:?})")]
     Api {
-        status: reqwest::StatusCode,
+        status: wreq::StatusCode,
         code: Option<i64>,
         message: String,
         retry_after: Option<f64>,
@@ -34,7 +34,7 @@ pub enum Error {
 
     #[error("could not decode discord's response: {source}")]
     Decode {
-        status: reqwest::StatusCode,
+        status: wreq::StatusCode,
         #[source]
         source: serde_json::Error,
     },
@@ -54,10 +54,10 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    pub fn status(&self) -> Option<reqwest::StatusCode> {
+    pub fn status(&self) -> Option<wreq::StatusCode> {
         match self {
             Self::Api { status, .. } | Self::Decode { status, .. } => Some(*status),
-            Self::Captcha { .. } => Some(reqwest::StatusCode::BAD_REQUEST),
+            Self::Captcha { .. } => Some(wreq::StatusCode::BAD_REQUEST),
             _ => None,
         }
     }
@@ -92,7 +92,7 @@ impl Error {
     }
 
     pub fn is_unauthorized(&self) -> bool {
-        self.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+        self.status() == Some(wreq::StatusCode::UNAUTHORIZED)
     }
 
     /// A short explanation for people, naming the usual causes of the
@@ -127,7 +127,7 @@ impl Error {
         };
         match known {
             Some(text) => format!("{text}."),
-            None if *status == reqwest::StatusCode::FORBIDDEN => {
+            None if *status == wreq::StatusCode::FORBIDDEN => {
                 format!("Discord refused: {message}")
             }
             None => message.clone(),
@@ -151,14 +151,14 @@ mod tests {
     #[test]
     fn missing_permissions_reads_as_a_sentence() {
         let error = Error::Api {
-            status: reqwest::StatusCode::FORBIDDEN,
+            status: wreq::StatusCode::FORBIDDEN,
             code: Some(50013),
             message: "Missing Permissions".into(),
             retry_after: None,
         };
         assert!(error.describe().starts_with("You don't have permission"));
         let other = Error::Api {
-            status: reqwest::StatusCode::FORBIDDEN,
+            status: wreq::StatusCode::FORBIDDEN,
             code: Some(1),
             message: "Nope".into(),
             retry_after: None,

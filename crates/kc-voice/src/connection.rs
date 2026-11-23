@@ -11,9 +11,7 @@ use kc_core::Snowflake;
 use serde_json::{Value, json};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use wreq::ws::message::{CloseFrame, Message};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -24,7 +22,7 @@ use crate::rtp::{self, MAX_PAYLOAD, PT_H264, PT_OPUS, RtpHeader};
 use crate::srtp::{Mode, Srtp};
 use crate::video_rx::{Assembled, Packet, VideoStream};
 
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream = wreq::ws::WebSocket;
 type WsWrite = SplitSink<WsStream, Message>;
 type WsRead = SplitStream<WsStream>;
 
@@ -694,9 +692,9 @@ async fn run(
     let url = format!("wss://{endpoint}/?v={VOICE_VERSION}&encoding=json");
     info!(%url, "voice connecting");
 
-    let (stream, _) = tokio::time::timeout(
+    let stream = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(&url),
+        kc_http::browser::websocket(&url),
     )
     .await
     .map_err(|_| Error::Message("voice websocket connect timed out".into()))?

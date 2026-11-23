@@ -8,7 +8,7 @@ use kc_core::super_properties::SuperProperties;
 use kc_core::{Snowflake, Token};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use wreq::ws::message::{CloseFrame, Message};
 use tracing::{debug, error, info, warn};
 
 use crate::compress::ZlibStream;
@@ -462,7 +462,7 @@ impl Gateway {
         };
         debug!(url, "gateway connecting");
 
-        let (stream, _) = match tokio_tungstenite::connect_async(&url).await {
+        let stream = match kc_http::browser::websocket(&url).await {
             Ok(connection) => connection,
             Err(error) => {
                 warn!(%error, "gateway connect failed");
@@ -701,7 +701,7 @@ impl Gateway {
                         Message::Ping(payload) => {
                             let _ = write.send(Message::Pong(payload)).await;
                         }
-                        Message::Pong(_) | Message::Frame(_) => {}
+                        Message::Pong(_) => {}
                     }
                 }
             }
@@ -819,9 +819,7 @@ fn qos_token(active: bool, derived: Option<&str>) -> String {
     engine.encode(bytes)
 }
 
-fn close_parts(
-    frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
-) -> (Option<u16>, String) {
+fn close_parts(frame: Option<CloseFrame>) -> (Option<u16>, String) {
     match frame {
         Some(frame) => (Some(frame.code.into()), frame.reason.to_string()),
         None => (None, String::new()),
