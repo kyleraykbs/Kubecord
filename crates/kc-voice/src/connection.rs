@@ -614,6 +614,8 @@ struct SessionState {
     audio_ssrc_to_user: HashMap<u32, Snowflake>,
     /// Video SSRCs announced by other participants.
     video_ssrcs: HashMap<u32, VideoSsrc>,
+    /// The media-sink wants (op 15) last sent, so a change goes out once.
+    sink_wants: Option<Value>,
     /// Receive state for each participant sending video.
     video_streams: HashMap<Snowflake, VideoStream>,
     /// Who is speaking, by when their last voice packet arrived.
@@ -866,6 +868,7 @@ async fn run(
         users: HashSet::new(),
         audio_ssrc_to_user: HashMap::new(),
         video_ssrcs: HashMap::new(),
+        sink_wants: None,
         video_streams: HashMap::new(),
         voice_activity: HashMap::new(),
         received: ReceiveCounters::default(),
@@ -933,7 +936,7 @@ async fn run(
     // The server sends no video to a client that has not announced its own
     // video state (even "off") and said which streams it wants to see.
     state.send_video_state().await?;
-    send_json(&mut state.write, json!({"op": 15, "d": {"any": 100}})).await?;
+    state.update_sink_wants().await?;
     let _ = state.events.send(ready_event);
 
     // Heartbeats double as the ping measurement, so they go out at least
@@ -1441,6 +1444,16 @@ impl SessionState {
     }
 
     async fn handle_json(&mut self, value: Value) -> Result<bool> {
+        let op = value["op"].as_i64();
+        let keep_going = self.handle_json_op(value).await?;
+        // Someone's SSRC became known, or they left: what to ask for changed.
+        if matches!(op, Some(5 | 12 | 13 | 14)) {
+            self.update_sink_wants().await?;
+        }
+        Ok(keep_going)
+    }
+
+    async fn handle_json_op(&mut self, value: Value) -> Result<bool> {
         let op = value["op"].as_i64().unwrap_or(-1);
         let d = &value["d"];
         if op != 6 {
@@ -1850,6 +1863,42 @@ impl SessionState {
                 );
             }
         }
+    }
+
+    /// The media-sink wants (voice op 15) the web client sends: each other
+    /// participant's audio SSRC at full quality and nothing else by default,
+    /// so the server sends their media (camera included) and no one else's.
+    /// Watching a stream keeps asking for everything: only the streamer
+    /// sends on that connection.
+    fn sink_wants(&self) -> Value {
+        if self.params.receive_only {
+            return json!({"any": 100});
+        }
+        let mut ssrcs: Vec<u32> = self
+            .audio_ssrc_to_user
+            .iter()
+            .filter(|(ssrc, user)| **ssrc != self.audio_ssrc && self.users.contains(&user.get()))
+            .map(|(ssrc, _)| *ssrc)
+            .collect();
+        ssrcs.sort_unstable();
+        let mut wants = serde_json::Map::new();
+        for ssrc in ssrcs {
+            wants.insert(ssrc.to_string(), json!(100));
+        }
+        wants.insert("any".to_owned(), json!(0));
+        Value::Object(wants)
+    }
+
+    /// Sends the media-sink wants when they changed (someone's SSRC became
+    /// known, or they left).
+    async fn update_sink_wants(&mut self) -> Result<()> {
+        let wants = self.sink_wants();
+        if self.sink_wants.as_ref() == Some(&wants) {
+            return Ok(());
+        }
+        send_json(&mut self.write, json!({"op": 15, "d": wants})).await?;
+        self.sink_wants = Some(wants);
+        Ok(())
     }
 
     fn end_video(&mut self, user_id: Snowflake) {
