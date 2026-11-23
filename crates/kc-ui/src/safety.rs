@@ -1,6 +1,7 @@
 //! Safety limits: a check before the actions Discord's anti-spam watches
 //! most closely (opening new DMs, sending friend requests, starting groups,
-//! joining servers, and the same message sent to several channels).
+//! joining servers, fetching many people's profiles, and the same message
+//! sent to several channels).
 //!
 //! Nobody outside Discord knows its thresholds, so the limits sit where a
 //! person using Discord normally rarely reaches them. Past the soft limit
@@ -44,6 +45,10 @@ pub(crate) enum Action {
     FriendRequest,
     GroupDm,
     JoinServer,
+    /// Fetching someone's profile from Discord (one shown again within a few
+    /// minutes is not fetched, so not counted). Going through many profiles
+    /// fast is what scrapers do.
+    ViewProfile,
 }
 
 impl Action {
@@ -52,6 +57,7 @@ impl Action {
         match self {
             Action::NewDm | Action::FriendRequest => Some((3, 10 * MINUTE)),
             Action::JoinServer => Some((2, 10 * MINUTE)),
+            Action::ViewProfile => Some((12, 2 * MINUTE)),
             Action::GroupDm => None,
         }
     }
@@ -63,6 +69,7 @@ impl Action {
             Action::FriendRequest => &[(5, HOUR), (15, DAY)],
             Action::GroupDm => &[(2, HOUR)],
             Action::JoinServer => &[(3, HOUR), (10, DAY)],
+            Action::ViewProfile => &[(25, 10 * MINUTE), (100, HOUR)],
         }
     }
 
@@ -73,6 +80,7 @@ impl Action {
             Action::FriendRequest => ("friend request", "friend requests"),
             Action::GroupDm => ("new group", "new groups"),
             Action::JoinServer => ("server joined", "servers joined"),
+            Action::ViewProfile => ("profile loaded", "profiles loaded"),
         };
         format!("{count} {}", if count == 1 { one } else { many })
     }
@@ -84,6 +92,7 @@ impl Action {
             Action::FriendRequest => "Send Another Friend Request?",
             Action::GroupDm => "Start Another Group?",
             Action::JoinServer => "Join Another Server?",
+            Action::ViewProfile => "Load Another Profile?",
         }
     }
 }
@@ -141,9 +150,15 @@ impl History {
         if let Some((count, window)) = action.warn() {
             let done = within(window);
             if done + 1 >= count {
+                let why = if action == Action::ViewProfile {
+                    "Going through many people's profiles quickly is how scrapers behave, and Discord bans \
+                     accounts for it."
+                } else {
+                    "Discord's spam filter bans accounts that do this quickly, especially with people you \
+                     don't know."
+                };
                 return Verdict::Warn(format!(
-                    "You've had {} in the last {}. Discord's spam filter bans accounts that do this quickly, \
-                     especially with people you don't know.",
+                    "You've had {} in the last {}. {why}",
                     action.noun(done),
                     span(window),
                 ));
@@ -308,6 +323,32 @@ impl AppState {
     /// Does `proceed` if the limits allow `action`: at once, after asking,
     /// or not at all (saying when it will be allowed).
     pub(crate) fn guard(self: &Rc<Self>, action: Action, proceed: impl FnOnce(&Rc<Self>) + 'static) {
+        self.guard_with_cancel(
+            action,
+            proceed,
+            |app, reason| {
+                // Discord's lists of thresholds are not public; these are on
+                // the safe side and can be switched off in Settings.
+                let dialog = adw::AlertDialog::new(Some("Limit Reached"), Some(&reason));
+                dialog.add_response("ok", "OK");
+                dialog.set_default_response(Some("ok"));
+                dialog.set_close_response("ok");
+                dialog.present(Some(&app.window));
+            },
+            |_| {},
+        );
+    }
+
+    /// [`Self::guard`], with `refused` (given the reason) instead of the
+    /// "Limit Reached" alert, and `cancelled` when the user says no at the
+    /// warning.
+    pub(crate) fn guard_with_cancel(
+        self: &Rc<Self>,
+        action: Action,
+        proceed: impl FnOnce(&Rc<Self>) + 'static,
+        refused: impl FnOnce(&Rc<Self>, String) + 'static,
+        cancelled: impl FnOnce(&Rc<Self>) + 'static,
+    ) {
         let Some(user) = self.safety_user() else {
             proceed(self);
             return;
@@ -318,19 +359,16 @@ impl AppState {
                 record(user, action);
                 proceed(self);
             }
-            Verdict::Warn(reason) => self.ask_anyway(action.verb(), &reason, move |app| {
-                record(user, action);
-                proceed(app);
-            }),
-            Verdict::Block(reason) => {
-                // Discord's lists of thresholds are not public; these are on
-                // the safe side and can be switched off in Settings.
-                let dialog = adw::AlertDialog::new(Some("Limit Reached"), Some(&reason));
-                dialog.add_response("ok", "OK");
-                dialog.set_default_response(Some("ok"));
-                dialog.set_close_response("ok");
-                dialog.present(Some(&self.window));
-            }
+            Verdict::Warn(reason) => self.ask_anyway_or(
+                action.verb(),
+                &reason,
+                move |app| {
+                    record(user, action);
+                    proceed(app);
+                },
+                cancelled,
+            ),
+            Verdict::Block(reason) => refused(self, reason),
         }
     }
 
@@ -364,6 +402,17 @@ impl AppState {
 
     /// Asks whether to go ahead despite `reason`; Cancel is the default.
     fn ask_anyway(self: &Rc<Self>, heading: &str, reason: &str, proceed: impl FnOnce(&Rc<Self>) + 'static) {
+        self.ask_anyway_or(heading, reason, proceed, |_| {});
+    }
+
+    /// [`Self::ask_anyway`], calling `cancelled` when the answer is no.
+    fn ask_anyway_or(
+        self: &Rc<Self>,
+        heading: &str,
+        reason: &str,
+        proceed: impl FnOnce(&Rc<Self>) + 'static,
+        cancelled: impl FnOnce(&Rc<Self>) + 'static,
+    ) {
         let dialog = adw::AlertDialog::new(Some(heading), Some(reason));
         dialog.add_responses(&[("cancel", "Cancel"), ("anyway", "Do It Anyway")]);
         dialog.set_response_appearance("anyway", adw::ResponseAppearance::Destructive);
@@ -371,11 +420,14 @@ impl AppState {
         dialog.set_close_response("cancel");
         let app = self.clone();
         let proceed = RefCell::new(Some(proceed));
+        let cancelled = RefCell::new(Some(cancelled));
         dialog.connect_response(None, move |_, response| {
-            if response == "anyway"
-                && let Some(proceed) = proceed.take()
-            {
-                proceed(&app);
+            if response == "anyway" {
+                if let Some(proceed) = proceed.take() {
+                    proceed(&app);
+                }
+            } else if let Some(cancelled) = cancelled.take() {
+                cancelled(&app);
             }
         });
         dialog.present(Some(&self.window));
@@ -419,6 +471,23 @@ mod tests {
         // An hour later they no longer count.
         let old = history(Action::NewDm, &[HOUR + 1, HOUR + 2, HOUR + 3, HOUR + 4, HOUR + 5], NOW);
         assert_eq!(old.verdict(Action::NewDm, NOW, None), Verdict::Allow);
+    }
+
+    #[test]
+    fn profiles_ask_at_a_dozen_in_two_minutes() {
+        let eleven: Vec<u64> = (1..=11).map(|second| second * 5).collect();
+        assert!(matches!(
+            history(Action::ViewProfile, &eleven, NOW).verdict(Action::ViewProfile, NOW, None),
+            Verdict::Warn(reason) if reason.contains("scrapers")
+        ));
+        let ten: Vec<u64> = (1..=10).map(|second| second * 5).collect();
+        assert_eq!(history(Action::ViewProfile, &ten, NOW).verdict(Action::ViewProfile, NOW, None), Verdict::Allow);
+        // 25 spread over ten minutes (never 12 within two) is the cap.
+        let spread: Vec<u64> = (0..25).map(|index| 3 * MINUTE + index * 15).collect();
+        assert!(matches!(
+            history(Action::ViewProfile, &spread, NOW).verdict(Action::ViewProfile, NOW, None),
+            Verdict::Block(_)
+        ));
     }
 
     #[test]

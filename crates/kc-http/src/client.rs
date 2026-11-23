@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use kc_core::{Snowflake, Token};
 use kc_state::{Channel, Guild, Message, User};
 use reqwest::header::HeaderMap;
@@ -100,7 +102,17 @@ pub struct HttpClient {
     locale: String,
     timezone: String,
     limiter: RateLimiter,
+    profiles: ProfileCache,
 }
+
+/// Profiles fetched lately, by user and server, with when they were
+/// fetched. The web client keeps profiles for a while too: fetching the same
+/// one again and again is what scrapers do.
+type ProfileCache =
+    std::sync::Arc<std::sync::Mutex<HashMap<(Snowflake, Option<Snowflake>), (std::time::Instant, Value)>>>;
+
+/// How long a fetched profile is shown again without asking Discord.
+pub const PROFILE_KEEP: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 impl HttpClient {
     pub fn new(token: Token) -> Self {
@@ -124,10 +136,22 @@ impl HttpClient {
             locale: "en-US".to_owned(),
             timezone: std::env::var("TZ").unwrap_or_else(|_| "UTC".to_owned()),
             limiter: RateLimiter::default(),
+            profiles: ProfileCache::default(),
         }
     }
 
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        // A change to the account's own profile (name, bio, avatar, a
+        // server profile) makes the kept copy of it stale.
+        if method != Method::GET
+            && (path == "/users/@me"
+                || path.starts_with("/users/@me/profile")
+                || path.contains("/members/@me")
+                || path.contains("/profile/@me"))
+            && let Ok(mut cache) = self.profiles.lock()
+        {
+            cache.clear();
+        }
         browser_headers(
             self.http.request(method, format!("{}{}", self.base, path)),
             "https://discord.com/channels/@me",
@@ -963,7 +987,27 @@ impl HttpClient {
         if let Some(guild_id) = guild_id {
             path.push_str(&format!("&guild_id={guild_id}"));
         }
-        self.get(&path).await
+        let profile = self.get(&path).await?;
+        if let Ok(mut cache) = self.profiles.lock() {
+            cache.retain(|_, (fetched, _)| fetched.elapsed() < PROFILE_KEEP);
+            cache.insert((user_id, guild_id), (std::time::Instant::now(), profile.clone()));
+        }
+        Ok(profile)
+    }
+
+    /// The profile fetched for `user_id` (in `guild_id`) in the last few
+    /// minutes, if any.
+    pub fn cached_profile(&self, user_id: Snowflake, guild_id: Option<Snowflake>) -> Option<Value> {
+        let cache = self.profiles.lock().ok()?;
+        let (fetched, profile) = cache.get(&(user_id, guild_id))?;
+        (fetched.elapsed() < PROFILE_KEEP).then(|| profile.clone())
+    }
+
+    /// Forgets the kept profiles of `user_id` (after it changed).
+    pub fn forget_profile(&self, user_id: Snowflake) {
+        if let Ok(mut cache) = self.profiles.lock() {
+            cache.retain(|(user, _), _| *user != user_id);
+        }
     }
 
     pub async fn set_note(&self, user_id: Snowflake, note: &str) -> Result<()> {

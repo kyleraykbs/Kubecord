@@ -225,24 +225,52 @@ impl AppState {
             return;
         };
         let weak = Rc::downgrade(&profile);
-        spawn_local(
-            self,
-            async move { http.user_profile(user_id, guild).await },
-            move |_, result| {
+        let show = {
+            let (friends, servers) = (friends.clone(), servers.clone());
+            move |data: &Value| {
                 let Some(profile) = weak.upgrade() else {
                     return;
                 };
-                let Ok(data) = result else {
-                    clear_box(&friends);
-                    clear_box(&servers);
-                    friends.append(&placeholder("Could not load the profile"));
-                    return;
-                };
-                profile.apply_profile(&data);
+                profile.apply_profile(data);
                 if !is_me {
-                    profile.fill_mutuals(&data, &stack, &friends, &servers);
+                    profile.fill_mutuals(data, &stack, &friends, &servers);
                 }
-            },
+            }
+        };
+        let not_loaded: Rc<dyn Fn(&str)> = Rc::new(move |message: &str| {
+            clear_box(&friends);
+            clear_box(&servers);
+            friends.append(&placeholder(message));
+        });
+        // Shown in the last few minutes: no need to ask Discord again.
+        if let Some(data) = http.cached_profile(user_id, guild) {
+            show(&data);
+            return;
+        }
+        let fetch = {
+            let not_loaded = not_loaded.clone();
+            move |app: &Rc<Self>| {
+                spawn_local(
+                    app,
+                    async move { http.user_profile(user_id, guild).await },
+                    move |_, result| match result {
+                        Ok(data) => show(&data),
+                        Err(_) => not_loaded("Could not load the profile"),
+                    },
+                );
+            }
+        };
+        if is_me {
+            fetch(self);
+            return;
+        }
+        // Fetching many people's profiles fast is what scrapers do.
+        let refused = not_loaded.clone();
+        self.guard_with_cancel(
+            crate::safety::Action::ViewProfile,
+            fetch,
+            move |_, reason| refused(&reason),
+            move |_| not_loaded("Not loaded"),
         );
     }
 
