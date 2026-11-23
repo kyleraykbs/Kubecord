@@ -75,6 +75,11 @@ pub fn run() -> glib::ExitCode {
             .build()
             .expect("tokio runtime"),
     );
+    // Send the web client's current build number: the last one read now,
+    // the live one as soon as discord.com answers (before accounts connect,
+    // usually).
+    kc_core::super_properties::load_cached_build_number();
+    runtime.spawn(kc_http::client::refresh_build_number());
     let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
     session::spawn_dispatcher(&runtime, cmd_rx, ui_tx.clone());

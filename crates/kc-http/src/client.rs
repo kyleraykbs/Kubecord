@@ -1576,10 +1576,7 @@ pub(crate) fn browser_headers(
         .header("accept-language", "en-US")
         .header("priority", "u=1, i")
         .header("referer", referer)
-        .header(
-            "sec-ch-ua",
-            "\"Not:A-Brand\";v=\"24\", \"Chromium\";v=\"134\"",
-        )
+        .header("sec-ch-ua", kc_core::super_properties::sec_ch_ua())
         .header("sec-ch-ua-mobile", "?0")
         .header("sec-ch-ua-platform", "\"Windows\"")
         .header("sec-fetch-dest", "empty")
@@ -2323,5 +2320,56 @@ mod tests {
             error.to_string().contains("name: This field is required"),
             "{error}"
         );
+    }
+}
+
+/// Reads the web client's current build number from discord.com's app page
+/// (as a browser opening Discord loads it) and sends it from now on, keeping
+/// it for the next start. A stale build number marks a client as not the
+/// website. On failure the last one known stays.
+pub async fn refresh_build_number() {
+    use kc_core::super_properties as identity;
+    let client = match reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "no client to read the build number");
+            return;
+        }
+    };
+    let response = client
+        .get("https://discord.com/app")
+        .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("accept-language", "en-US,en;q=0.9")
+        .header("sec-ch-ua", identity::sec_ch_ua())
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", "\"Windows\"")
+        .header("sec-fetch-dest", "document")
+        .header("sec-fetch-mode", "navigate")
+        .header("sec-fetch-site", "none")
+        .header("sec-fetch-user", "?1")
+        .header("upgrade-insecure-requests", "1")
+        .send()
+        .await;
+    let html = match response {
+        Ok(response) => {
+            tracing::info!(version = ?response.version(), status = %response.status(), "read the app page");
+            response.text().await.unwrap_or_default()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not read the build number");
+            return;
+        }
+    };
+    match identity::parse_build_number(&html) {
+        Some(number) => {
+            tracing::info!(number, "web client build number");
+            identity::set_build_number(number);
+            identity::save_build_number(number);
+        }
+        None => tracing::warn!("no build number in the app page"),
     }
 }
