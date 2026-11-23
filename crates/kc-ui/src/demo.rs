@@ -250,6 +250,11 @@ thread_local! {
     static FAKE_REST: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Whether the demo answers REST calls itself.
+pub(crate) fn fake_rest() -> bool {
+    FAKE_REST.get()
+}
+
 fn fake<T>(make: impl FnOnce() -> Value) -> Option<T>
 where
     T: serde::de::DeserializeOwned,
@@ -624,6 +629,33 @@ impl AppState {
                                 eprintln!("demo: could not save the inbox: {error}");
                             }
                         });
+                    }
+                });
+            }
+            "requests" | "request-dm" => {
+                // Two message requests (one Discord took for spam); with
+                // `request-dm`, the first one open.
+                FAKE_REST.set(true);
+                for (channel, user, name, spam) in [("880", "88", "newperson", false), ("881", "89", "freenitro", true)] {
+                    store.apply("CHANNEL_CREATE", &json!({"id": channel, "type": 1, "is_message_request": true, "is_spam": spam,
+                        "recipients": [{"id": user, "username": name, "global_name": name}]}));
+                    let mut first = message(id_at(30_000, 9), user.parse().unwrap_or(88), if spam {
+                        "free nitro!! click here discord-gift.example"
+                    } else {
+                        "Hey! We met at the meetup last week, wanted to share those slides."
+                    });
+                    first["channel_id"] = json!(channel);
+                    first["guild_id"] = json!(null);
+                    store.apply("MESSAGE_CREATE", &first);
+                }
+                self.open_home();
+                let app = self.clone();
+                let open_dm = mode == "request-dm";
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    if open_dm {
+                        app.open_request_demo(Snowflake::new(880));
+                    } else {
+                        app.show_message_requests();
                     }
                 });
             }

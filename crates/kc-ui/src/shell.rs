@@ -166,6 +166,8 @@ pub(crate) struct AppState {
     /// how many messages it will be split).
     pub length_label: gtk::Label,
     pub blocked_label: gtk::Label,
+    /// In a message request's DM: Accept and Ignore, in place of the box.
+    pub request_bar: gtk::Box,
     pub completion: gtk::Popover,
     pub completion_list: gtk::ListBox,
 
@@ -735,6 +737,11 @@ impl AppState {
         composer_area.append(&upload_tray);
         composer_area.append(&composer_box);
         composer_area.append(&blocked_label);
+        let request_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        request_bar.add_css_class("card");
+        request_bar.add_css_class("kc-request-bar");
+        request_bar.set_visible(false);
+        composer_area.append(&request_bar);
 
         let chat_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat_box.append(&message_stack);
@@ -943,6 +950,7 @@ impl AppState {
             send_button,
             length_label,
             blocked_label,
+            request_bar,
             completion,
             completion_list,
             friends_box,

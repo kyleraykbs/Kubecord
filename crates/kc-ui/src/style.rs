@@ -427,6 +427,10 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-request-bar {
+    padding: 12px 14px;
+}
+
 .kc-wave {
     padding: 4px 12px 4px 6px;
     border-radius: 8px;

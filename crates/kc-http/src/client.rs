@@ -1326,6 +1326,50 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    // -- message requests ------------------------------------------------
+
+    /// Accepts a message request: it becomes an ordinary DM.
+    pub async fn accept_message_request(&self, channel_id: Snowflake) -> Result<()> {
+        self.request_json(
+            Method::PUT,
+            &format!("/channels/{channel_id}/recipients/@me"),
+            Some(&json!({ "consent_status": 2 })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Ignores (rejects and removes) a message request.
+    pub async fn reject_message_request(&self, channel_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/channels/{channel_id}/recipients/@me"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// The message that started each request (up to 25).
+    pub async fn message_request_previews(&self, channel_ids: &[Snowflake]) -> Result<Vec<(Snowflake, Message)>> {
+        if channel_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query: Vec<String> = channel_ids.iter().take(25).map(|id| format!("channel_ids={id}")).collect();
+        let body = self
+            .get(&format!("/users/@me/message-requests/supplemental-data?{}", query.join("&")))
+            .await?;
+        Ok(body
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let channel = entry["channel_id"].as_str()?.parse::<u64>().ok()?;
+                        let message = serde_json::from_value::<Message>(entry["message_preview"].clone()).ok()?;
+                        Some((Snowflake(channel), message))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     // -- recent mentions -------------------------------------------------
 
     /// Messages that mention this account, newest first: 25 before

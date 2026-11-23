@@ -247,6 +247,10 @@ impl AppState {
                 return;
             };
             session.store.read(|state| {
+                // Message requests wait quietly under Message Requests.
+                if state.channels.get(&channel_id).is_some_and(kc_state::Channel::is_request) {
+                    return None;
+                }
                 let message = state.messages.get(&channel_id)?.get(message_id)?;
                 prepare(state, message, viewing, &prefs)
             })

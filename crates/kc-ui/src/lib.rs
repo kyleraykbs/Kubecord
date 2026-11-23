@@ -12,6 +12,7 @@ mod code;
 mod idle;
 mod forward;
 mod inbox;
+mod message_requests;
 mod polls;
 mod safety;
 mod stickers;

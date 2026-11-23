@@ -193,11 +193,26 @@ impl State {
     }
 
     /// DM and group-DM channels, most recent conversation first.
+    /// DMs, most recent first (pending message requests aside).
     pub fn dm_channels(&self) -> Vec<&Channel> {
         let mut channels: Vec<&Channel> = self
             .channels
             .values()
-            .filter(|channel| channel.is_private())
+            .filter(|channel| channel.is_private() && !channel.is_request())
+            .collect();
+        channels.sort_by_key(|channel| {
+            std::cmp::Reverse(self.last_message_id(channel.id).unwrap_or(channel.id))
+        });
+        channels
+    }
+
+    /// Pending message requests (or, with `spam`, the ones Discord took for
+    /// spam), newest first.
+    pub fn message_requests(&self, spam: bool) -> Vec<&Channel> {
+        let mut channels: Vec<&Channel> = self
+            .channels
+            .values()
+            .filter(|channel| channel.is_request() && channel.is_spam.unwrap_or(false) == spam)
             .collect();
         channels.sort_by_key(|channel| {
             std::cmp::Reverse(self.last_message_id(channel.id).unwrap_or(channel.id))

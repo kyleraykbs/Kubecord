@@ -170,6 +170,14 @@ pub struct Channel {
     /// Group DM icon hash.
     #[serde(default)]
     pub icon: Option<String>,
+    /// A DM from someone you haven't accepted yet.
+    #[serde(default)]
+    pub is_message_request: Option<bool>,
+    #[serde(default)]
+    pub is_message_request_timestamp: Option<String>,
+    /// A message request Discord thinks is spam.
+    #[serde(default)]
+    pub is_spam: Option<bool>,
     /// Group DM owner, or the creator of a thread.
     #[serde(default)]
     pub owner_id: Option<Snowflake>,
@@ -203,6 +211,11 @@ impl Channel {
                 .join(", "),
             (None, None) => self.id.to_string(),
         }
+    }
+
+    /// A pending message request (spam or not).
+    pub fn is_request(&self) -> bool {
+        self.is_private() && self.is_message_request == Some(true)
     }
 
     pub fn is_private(&self) -> bool {

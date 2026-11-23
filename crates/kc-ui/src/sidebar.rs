@@ -221,6 +221,7 @@ impl AppState {
             "dm".hash(&mut hasher);
             selected.hash(&mut hasher);
             pending.hash(&mut hasher);
+            self.message_request_counts().hash(&mut hasher);
             for row in &rows {
                 row.channel.id.hash(&mut hasher);
                 row.channel.kind.hash(&mut hasher);
@@ -271,6 +272,30 @@ impl AppState {
         let app = self.clone();
         friends.connect_clicked(move |_| app.open_home());
         self.channel_box.append(&friends);
+
+        // DMs from people not accepted yet.
+        let (requests, spam) = self.message_request_counts();
+        if requests + spam > 0 {
+            let entry = gtk::Button::new();
+            entry.set_focus_on_click(false);
+            entry.add_css_class("flat");
+            entry.add_css_class("kc-channel");
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let icon = gtk::Image::from_icon_name(first_icon(&["mail-unread-symbolic", "mail-message-new-symbolic"]));
+            icon.set_pixel_size(20);
+            icon.set_margin_start(6);
+            icon.set_margin_end(6);
+            content.append(&icon);
+            let name = label("Message Requests", &["kc-channel-name"]);
+            name.set_hexpand(true);
+            content.append(&name);
+            content.append(&row_badge(requests as u32));
+            entry.set_child(Some(&content));
+            entry.set_height_request(40);
+            let app = self.clone();
+            entry.connect_clicked(move |_| app.show_message_requests());
+            self.channel_box.append(&entry);
+        }
 
         let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         heading_row.set_margin_top(12);

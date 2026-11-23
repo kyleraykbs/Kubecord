@@ -749,6 +749,12 @@ impl AppState {
             return;
         };
         self.composer_area.set_visible(true);
+        if self.render_request_bar() {
+            self.composer_box.set_visible(false);
+            self.blocked_label.set_visible(false);
+            self.context_bar.set_visible(false);
+            return;
+        }
         self.composer_box.set_visible(can_send);
         self.blocked_label.set_visible(!can_send);
         self.composer_hint.set_label(&hint);

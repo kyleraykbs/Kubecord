@@ -2029,6 +2029,30 @@ mod tests {
     }
 
     #[test]
+    fn message_requests_stay_out_of_the_dm_list_until_accepted() {
+        let store = Store::new();
+        store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [], "guilds": [],
+            "private_channels": [
+                {"id": "70", "type": 1, "recipients": [{"id": "2", "username": "friend"}]},
+                {"id": "71", "type": 1, "is_message_request": true, "recipients": [{"id": "3", "username": "stranger"}]},
+                {"id": "72", "type": 1, "is_message_request": true, "is_spam": true, "recipients": [{"id": "4", "username": "spammer"}]}
+            ], "relationships": [], "read_state": {"entries": []}, "user_guild_settings": {"entries": []}}));
+        let ids = |channels: Vec<&Channel>| channels.iter().map(|channel| channel.id.0).collect::<Vec<_>>();
+        store.read(|state| {
+            assert_eq!(ids(state.dm_channels()), vec![70]);
+            assert_eq!(ids(state.message_requests(false)), vec![71]);
+            assert_eq!(ids(state.message_requests(true)), vec![72]);
+        });
+        // Accepted: Discord's CHANNEL_UPDATE clears the flag.
+        store.apply("CHANNEL_UPDATE", &json!({"id": "71", "type": 1, "is_message_request": false,
+            "recipients": [{"id": "3", "username": "stranger"}]}));
+        store.read(|state| {
+            assert_eq!(ids(state.dm_channels()).len(), 2);
+            assert!(state.message_requests(false).is_empty());
+        });
+    }
+
+    #[test]
     fn poll_votes_are_counted_and_ours_once() {
         let store = Store::new();
         store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [], "guilds": [],
