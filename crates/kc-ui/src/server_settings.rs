@@ -1348,9 +1348,8 @@ impl AppState {
             *target.member_query.borrow_mut() = query.clone();
             if !query.is_empty()
                 && let Some((account, _, _)) = app.active()
-                && let Some(gateway) = crate::session::gateway(account)
             {
-                gateway.search_members(target.guild, &query, 100);
+                crate::composer::search_members_soon(account, target.guild, &query, 100);
             }
             app.fill_members(&target);
         });

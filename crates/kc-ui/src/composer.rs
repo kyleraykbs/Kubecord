@@ -2496,9 +2496,8 @@ impl AppState {
                 .with_session(|session| session.selected_guild.filter(|_| !session.dm_mode))
                 .flatten()
             && let Some((account, _, _)) = self.active()
-            && let Some(gateway) = crate::session::gateway(account)
         {
-            gateway.search_members(guild, &query, 10);
+            search_members_soon(account, guild, &query, 10);
         }
 
         self.show_completions(matches, false);
@@ -3194,5 +3193,72 @@ mod tests {
         history.undo();
         history.record(snap("two"), start + Duration::from_secs(2));
         assert_eq!(history.redo(), None);
+    }
+}
+
+/// How long typing must pause before a member search goes to Discord.
+const MEMBER_SEARCH_PAUSE: Duration = Duration::from_millis(400);
+/// A search already sent is not sent again for this long.
+const MEMBER_SEARCH_REMEMBER: Duration = Duration::from_secs(10 * 60);
+
+thread_local! {
+    /// Member searches sent lately: (server, query) and when.
+    static MEMBER_SEARCHES: RefCell<HashMap<(Snowflake, String), Instant>> = RefCell::default();
+    /// The search waiting for typing to pause.
+    static MEMBER_SEARCH_TIMER: RefCell<Option<gtk::glib::SourceId>> = const { RefCell::new(None) };
+}
+
+/// Whether `query` in `guild` is worth asking Discord about: not asked in
+/// the last few minutes. Notes it as asked when it is.
+fn member_search_due(
+    searches: &mut HashMap<(Snowflake, String), Instant>,
+    guild: Snowflake,
+    query: &str,
+    now: Instant,
+) -> bool {
+    searches.retain(|_, sent| now.duration_since(*sent) < MEMBER_SEARCH_REMEMBER);
+    let key = (guild, query.to_lowercase());
+    if searches.contains_key(&key) {
+        return false;
+    }
+    searches.insert(key, now);
+    true
+}
+
+/// Asks Discord for the members of `guild` matching `query` (gateway op 8)
+/// once typing pauses, and not for a query already asked lately. Discord
+/// limits these searches, and the web client does not send one per key
+/// either.
+pub(crate) fn search_members_soon(account: crate::session::AccountId, guild: Snowflake, query: &str, limit: u8) {
+    let query = query.to_owned();
+    MEMBER_SEARCH_TIMER.with_borrow_mut(|timer| {
+        if let Some(waiting) = timer.take() {
+            waiting.remove();
+        }
+        *timer = Some(gtk::glib::timeout_add_local_once(MEMBER_SEARCH_PAUSE, move || {
+            MEMBER_SEARCH_TIMER.with_borrow_mut(|timer| timer.take());
+            let due = MEMBER_SEARCHES
+                .with_borrow_mut(|searches| member_search_due(searches, guild, &query, Instant::now()));
+            if due && let Some(gateway) = crate::session::gateway(account) {
+                gateway.search_members(guild, &query, limit);
+            }
+        }));
+    });
+}
+
+#[cfg(test)]
+mod member_search_tests {
+    use super::*;
+
+    #[test]
+    fn a_search_is_sent_once_until_it_is_old() {
+        let mut searches = HashMap::new();
+        let start = Instant::now();
+        let guild = Snowflake(1);
+        assert!(member_search_due(&mut searches, guild, "jo", start));
+        assert!(!member_search_due(&mut searches, guild, "JO", start + Duration::from_secs(5)));
+        assert!(member_search_due(&mut searches, guild, "joh", start));
+        assert!(member_search_due(&mut searches, Snowflake(2), "jo", start));
+        assert!(member_search_due(&mut searches, guild, "jo", start + MEMBER_SEARCH_REMEMBER));
     }
 }
