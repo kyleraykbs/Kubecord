@@ -89,6 +89,25 @@
   </keywords>
 
   <releases>
+    <release version="0.2.0" date="2026-11-23">
+      <description>
+        <p>New:</p>
+        <ul>
+          <li>Code blocks sit in a block of their own, highlighted for about 200 languages</li>
+          <li>Select text across several messages, and copy it with Ctrl+C</li>
+          <li>A draft per channel, kept across restarts</li>
+          <li>A length counter; long messages are split into several</li>
+          <li>NixOS and Home Manager modules, with declared settings and Stylix matching</li>
+          <li>A volume for each call sound</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Jumping to an old message lands on it exactly and highlights it</li>
+          <li>Copying message text keeps its emoji</li>
+          <li>Files sent with no text are sent</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-21">
       <description>
         <p>The first release.</p>

@@ -103,7 +103,7 @@
             // {
               inherit cargoArtifacts;
               pname = "kubecord";
-              version = "0.1.0";
+              version = "0.2.0";
               # Arguments for the launcher wrapGAppsHook writes. (Set as an
               # attribute they are ignored; the hook's own list is added to.)
               # Go Live sound uses pw-cli, pw-dump and pw-link; the system's
