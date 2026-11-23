@@ -637,6 +637,10 @@ impl AppState {
         let app = self.clone();
         self.inbox_button.connect_clicked(move |_| app.show_inbox());
         let app = self.clone();
+        self.voice_soundboard.connect_clicked(move |button| {
+            let _ = app.show_soundboard(button.upcast_ref());
+        });
+        let app = self.clone();
         self.share_button.connect_clicked(move |_| app.toggle_share_mode());
 
         let app = self.clone();
@@ -2174,6 +2178,9 @@ impl AppState {
                     }
                 }
             }
+            StoreEvent::SoundboardPlayed { channel_id, user_id, sound_id, volume } => {
+                self.soundboard_played(channel_id, user_id, sound_id, volume);
+            }
             StoreEvent::VoiceStateUpdated { .. } => {
                 self.sync_stage_suppression();
                 self.sounds_voice_changed();
@@ -2253,6 +2260,7 @@ fn store_event_label(event: &StoreEvent) -> &'static str {
         StoreEvent::MessageDeleted { .. } => "store:message-deleted",
         StoreEvent::Typing { .. } => "store:typing",
         StoreEvent::PresenceUpdated { .. } => "store:presence",
+        StoreEvent::SoundboardPlayed { .. } => "store:soundboard",
         StoreEvent::VoiceStateUpdated { .. } => "store:voice-state",
         StoreEvent::VoiceServerUpdated { .. } => "store:voice-server",
         StoreEvent::StreamUpdated(_) => "store:stream",

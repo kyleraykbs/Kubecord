@@ -153,6 +153,7 @@ fn ready() -> Value {
                          "bitrate": 64000, "user_limit": 8}));
     channels.push(json!({"id": EMPTY_VOICE.to_string(), "type": 2, "name": "Quiet Room", "position": 11, "parent_id": "650"}));
     let everyone = VIEW_CHANNEL
+        | kc_state::permissions::USE_SOUNDBOARD
         | SEND_MESSAGES
         | SEND_MESSAGES_IN_THREADS
         | READ_MESSAGE_HISTORY
@@ -659,6 +660,59 @@ impl AppState {
                     }
                 });
             }
+            "soundboard" => {
+                // In the lounge, with the soundboard open: Discord's sounds
+                // and the server's own.
+                store.apply("VOICE_STATE_UPDATE", &json!({"user_id": ME.to_string(), "channel_id": LOUNGE.to_string(),
+                    "guild_id": GUILD.to_string(), "session_id": "x"}));
+                store.apply("SOUNDBOARD_SOUNDS", &json!({"guild_id": GUILD.to_string(), "soundboard_sounds": [
+                    {"sound_id": "950", "name": "airhorn", "volume": 1.0, "emoji_name": "📯", "guild_id": GUILD.to_string(), "available": true},
+                    {"sound_id": "951", "name": "sad trombone", "volume": 0.8, "emoji_name": "🎺", "guild_id": GUILD.to_string(), "available": true},
+                    {"sound_id": "952", "name": "bonk", "volume": 1.0, "emoji_name": "🔨", "guild_id": GUILD.to_string(), "available": true}
+                ]}));
+                let defaults = ["quack 🦆", "airhorn 🔊", "cricket 🦗", "golf clap 👏", "sad horn 🎺", "ba dum tss 🥁"]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let (name, emoji) = entry.rsplit_once(' ').unwrap_or((entry, ""));
+                        kc_state::SoundboardSound {
+                            sound_id: Snowflake::new(index as u64 + 1),
+                            name: name.to_owned(),
+                            volume: 1.0,
+                            emoji_name: Some(emoji.to_owned()),
+                            available: true,
+                            ..kc_state::SoundboardSound::default()
+                        }
+                    })
+                    .collect();
+                crate::soundboard::demo_defaults(defaults);
+                self.with_session_mut(|session| {
+                    session.voice = Some(VoiceUiState {
+                        guild_id: Some(Snowflake::new(GUILD)),
+                        channel_id: Snowflake::new(LOUNGE),
+                        muted: false,
+                        deafened: false,
+                        camera: false,
+                        streaming: false,
+                        watching: None,
+                    });
+                });
+                if let Some(lounge) = channel(LOUNGE) {
+                    self.open_channel(lounge);
+                }
+                self.render_voice_panel();
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(2000), move || {
+                    let anchor = app.voice_soundboard.clone().upcast::<gtk::Widget>();
+                    if let (Some(popover), Ok(path)) = (app.show_soundboard(&anchor), std::env::var("KUBECORD_SCREENSHOT")) {
+                        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                            if let Err(error) = crate::app::save_window_png(&popover, std::path::Path::new(&format!("{path}.popover.png"))) {
+                                eprintln!("demo: could not save the soundboard: {error}");
+                            }
+                        });
+                    }
+                });
+            }
             "stage" => {
                 // A live stage: two speakers, a raised hand, an audience.
                 store.apply("CHANNEL_CREATE", &json!({"id": "790", "type": 13, "guild_id": GUILD.to_string(),
@@ -909,6 +963,10 @@ impl AppState {
                     {"id": "900001", "name": "kubecord", "animated": false},
                     {"id": "900002", "name": "party_parrot", "animated": true},
                     {"id": "900003", "name": "thinking_hard", "animated": false}
+                ]}));
+                store.apply("SOUNDBOARD_SOUNDS", &json!({"guild_id": GUILD.to_string(), "soundboard_sounds": [
+                    {"sound_id": "950", "name": "airhorn", "volume": 1.0, "emoji_name": "📯", "guild_id": GUILD.to_string()},
+                    {"sound_id": "951", "name": "sad trombone", "volume": 0.6, "emoji_name": "🎺", "guild_id": GUILD.to_string()}
                 ]}));
                 store.apply("GUILD_STICKERS_UPDATE", &json!({"guild_id": GUILD.to_string(), "stickers": [
                     {"id": "749054660769218631", "name": "Hello", "tags": "👋", "description": "Says hi", "format_type": 3, "guild_id": GUILD.to_string()}

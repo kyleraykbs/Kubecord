@@ -21,6 +21,7 @@ use crate::widgets::clear_box;
 /// Discord's limits.
 const EMOJI_BYTES: usize = 256 * 1024;
 const STICKER_BYTES: usize = 512 * 1024;
+const SOUND_BYTES: usize = 512 * 1024;
 
 /// An emoji name Discord takes from a file name: letters, digits and
 /// underscores, 2 to 32 of them.
@@ -419,6 +420,232 @@ impl AppState {
                         move |_, result| match result {
                             Ok(name) => report.toast(&format!("Added the sticker {name}")),
                             Err(error) => report.toast(&format!("Could not add the sticker: {error}")),
+                        },
+                    );
+                }
+            }
+            target.close();
+        });
+        dialog.present(Some(&parent));
+    }
+}
+
+impl AppState {
+    // -- soundboard ------------------------------------------------------
+
+    pub(super) fn soundboard_page(self: &Rc<Self>, panel: &Rc<Panel>) -> gtk::Box {
+        let page = page_box();
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let title = section_title("Soundboard");
+        title.set_hexpand(true);
+        header.append(&title);
+        let upload = gtk::Button::with_label("Upload Sound");
+        upload.add_css_class("suggested-action");
+        upload.add_css_class("pill");
+        let app = self.clone();
+        let target = panel.clone();
+        upload.connect_clicked(move |_| app.sound_dialog(&target, None));
+        header.append(&upload);
+        page.append(&header);
+        page.append(&wrapped(
+            "MP3 or OGG, up to 512 KB and 5.2 seconds. Members with Use Soundboard can play them in voice channels.",
+            &["dim-label"],
+        ));
+        page.append(&panel.sounds);
+        // The server's sounds come on request.
+        if let Some((account, _, _)) = self.active()
+            && let Some(gateway) = crate::session::gateway(account)
+        {
+            gateway.request_soundboard_sounds(&[panel.guild]);
+        }
+        self.fill_sounds(panel);
+        page
+    }
+
+    pub(super) fn fill_sounds(self: &Rc<Self>, panel: &Rc<Panel>) {
+        let guild = panel.guild;
+        let Some(sounds) = self
+            .with_session(|session| session.store.read(|state| state.guilds.get(&guild).map(|guild| guild.soundboard_sounds.clone())))
+            .flatten()
+        else {
+            return;
+        };
+        clear_box(&panel.sounds);
+        let list = boxed_list();
+        if sounds.is_empty() {
+            placeholder_row(&list, "No sounds yet");
+        }
+        for sound in sounds {
+            let row = adw::ActionRow::new();
+            row.set_title(&glib::markup_escape_text(&format!(
+                "{} {}",
+                sound.emoji_name.clone().unwrap_or_default(),
+                sound.name
+            )));
+            row.set_subtitle(&format!("Volume {}%", (sound.volume * 100.0).round()));
+            let play = gtk::Button::from_icon_name("media-playback-start-symbolic");
+            play.add_css_class("flat");
+            play.set_valign(gtk::Align::Center);
+            play.set_tooltip_text(Some("Hear It"));
+            let (app, id, volume) = (self.clone(), sound.sound_id, sound.volume);
+            play.connect_clicked(move |_| app.play_soundboard_here(id, volume));
+            row.add_prefix(&play);
+
+            let edit = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit.add_css_class("flat");
+            edit.set_valign(gtk::Align::Center);
+            edit.set_tooltip_text(Some("Edit"));
+            let (app, target, editing) = (self.clone(), panel.clone(), sound.clone());
+            edit.connect_clicked(move |_| app.sound_dialog(&target, Some(editing.clone())));
+            row.add_suffix(&edit);
+
+            let delete = gtk::Button::from_icon_name("user-trash-symbolic");
+            delete.add_css_class("flat");
+            delete.set_valign(gtk::Align::Center);
+            delete.set_tooltip_text(Some("Delete"));
+            let (app, target, id, name) = (self.clone(), panel.clone(), sound.sound_id, sound.name.clone());
+            delete.connect_clicked(move |_| app.delete_sound(&target, id, &name));
+            row.add_suffix(&delete);
+            list.append(&row);
+        }
+        panel.sounds.append(&list);
+    }
+
+    fn delete_sound(self: &Rc<Self>, panel: &Rc<Panel>, id: Snowflake, name: &str) {
+        let dialog = adw::AlertDialog::new(Some("Delete Sound?"), Some(&format!("{name} will be gone from the soundboard.")));
+        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let parent = panel.dialog.clone();
+        let (app, panel) = (self.clone(), panel.clone());
+        dialog.connect_response(Some("delete"), move |_, _| {
+            let Some((_, http, _)) = app.active() else {
+                return;
+            };
+            let (guild, panel) = (panel.guild, panel.clone());
+            spawn_local(&app, async move { http.delete_soundboard_sound(guild, id).await }, move |_, result| {
+                if let Err(error) = result {
+                    panel.fail("Could not delete the sound", &error);
+                }
+            });
+        });
+        dialog.present(Some(&parent));
+    }
+
+    /// Uploads a sound, or edits `editing`'s name, emoji and volume.
+    fn sound_dialog(self: &Rc<Self>, panel: &Rc<Panel>, editing: Option<kc_state::SoundboardSound>) {
+        let dialog = adw::Dialog::new();
+        dialog.set_title(if editing.is_some() { "Edit Sound" } else { "Upload Sound" });
+        dialog.set_content_width(420);
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::new();
+        let chosen: Rc<std::cell::RefCell<Option<PathBuf>>> = Rc::default();
+        if editing.is_none() {
+            let file_row = adw::ActionRow::new();
+            file_row.set_title("File");
+            file_row.set_subtitle("None chosen");
+            let browse = gtk::Button::with_label("Browse…");
+            browse.set_valign(gtk::Align::Center);
+            file_row.add_suffix(&browse);
+            let (window, chosen, row) = (self.window.clone(), chosen.clone(), file_row.clone());
+            browse.connect_clicked(move |_| {
+                let (chosen, row) = (chosen.clone(), row.clone());
+                let types = [("audio/mpeg", "*.mp3"), ("audio/ogg", "*.ogg")];
+                pick_file(&window, "Sound File", &types, move |path| {
+                    row.set_subtitle(&glib::markup_escape_text(&file_name(&path)));
+                    chosen.replace(Some(path));
+                });
+            });
+            group.add(&file_row);
+        }
+        let name = adw::EntryRow::new();
+        name.set_title("Name");
+        name.set_max_length(32);
+        let emoji = adw::EntryRow::new();
+        emoji.set_title("Emoji (optional)");
+        emoji.set_max_length(8);
+        let volume = adw::SpinRow::with_range(1.0, 100.0, 1.0);
+        volume.set_title("Volume (%)");
+        volume.set_value(100.0);
+        if let Some(sound) = &editing {
+            name.set_text(&sound.name);
+            emoji.set_text(sound.emoji_name.as_deref().unwrap_or(""));
+            volume.set_value((sound.volume * 100.0).round());
+        }
+        group.add(&name);
+        group.add(&emoji);
+        group.add(&volume);
+        page.add(&group);
+
+        let save = gtk::Button::with_label(if editing.is_some() { "Save" } else { "Upload" });
+        save.add_css_class("suggested-action");
+        let cancel = gtk::Button::with_label("Cancel");
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::End);
+        buttons.set_margin_top(8);
+        buttons.set_margin_bottom(12);
+        buttons.set_margin_end(12);
+        buttons.append(&cancel);
+        buttons.append(&save);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&page));
+        view.add_bottom_bar(&buttons);
+        dialog.set_child(Some(&view));
+
+        let target = dialog.clone();
+        cancel.connect_clicked(move |_| {
+            target.close();
+        });
+        let parent = panel.dialog.clone();
+        let (app, panel, target) = (self.clone(), panel.clone(), dialog.clone());
+        save.connect_clicked(move |_| {
+            let name = name.text().trim().to_owned();
+            let emoji = emoji.text().trim().to_owned();
+            let emoji = (!emoji.is_empty()).then_some(emoji);
+            let level = volume.value() / 100.0;
+            if name.chars().count() < 2 {
+                panel.toast("A sound needs a name of 2 or more characters");
+                return;
+            }
+            let Some((_, http, _)) = app.active() else {
+                return;
+            };
+            let (guild, report) = (panel.guild, panel.clone());
+            match &editing {
+                Some(sound) => {
+                    let id = sound.sound_id;
+                    spawn_local(
+                        &app,
+                        async move { http.edit_soundboard_sound(guild, id, &name, level, emoji.as_deref()).await },
+                        move |_, result| {
+                            if let Err(error) = result {
+                                report.fail("Could not save the sound", &error);
+                            }
+                        },
+                    );
+                }
+                None => {
+                    let Some(path) = chosen.borrow().clone() else {
+                        panel.toast("Choose the sound's file first");
+                        return;
+                    };
+                    spawn_local(
+                        &app,
+                        async move {
+                            let bytes = tokio::fs::read(&path).await.map_err(|error| error.to_string())?;
+                            if bytes.len() > SOUND_BYTES {
+                                return Err("the file is larger than 512 KB".to_owned());
+                            }
+                            http.create_soundboard_sound(guild, &name, &bytes, &file_name(&path), level, emoji.as_deref())
+                                .await
+                                .map_err(|error| error.describe())?;
+                            Ok(name)
+                        },
+                        move |_, result| match result {
+                            Ok(name) => report.toast(&format!("Added the sound {name}")),
+                            Err(error) => report.toast(&format!("Could not add the sound: {error}")),
                         },
                     );
                 }

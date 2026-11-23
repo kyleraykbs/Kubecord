@@ -207,6 +207,13 @@ impl MessageBuffer {
 #[derive(Clone, Debug)]
 pub enum StoreEvent {
     Ready,
+    /// Someone played a soundboard sound in a voice channel (we are in it).
+    SoundboardPlayed {
+        channel_id: Snowflake,
+        user_id: Snowflake,
+        sound_id: Snowflake,
+        volume: f64,
+    },
     GuildAdded(Snowflake),
     GuildUpdated(Snowflake),
     GuildRemoved(Snowflake),
@@ -571,6 +578,47 @@ impl State {
                 {
                     guild.emojis = emojis;
                     events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
+            // A server's soundboard: all of it, or one sound.
+            "SOUNDBOARD_SOUNDS" | "GUILD_SOUNDBOARD_SOUNDS_UPDATE" => {
+                if let (Some(guild_id), Ok(sounds)) = (
+                    snowflake(data, "guild_id"),
+                    serde_json::from_value::<Vec<crate::guild::SoundboardSound>>(data["soundboard_sounds"].clone()),
+                ) && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    guild.soundboard_sounds = sounds;
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
+            "GUILD_SOUNDBOARD_SOUND_CREATE" | "GUILD_SOUNDBOARD_SOUND_UPDATE" | "GUILD_SOUNDBOARD_SOUND_DELETE" => {
+                if let (Some(guild_id), Some(sound_id)) = (snowflake(data, "guild_id"), snowflake(data, "sound_id"))
+                    && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    let at = guild.soundboard_sounds.iter().position(|sound| sound.sound_id == sound_id);
+                    if name.ends_with("DELETE") {
+                        if let Some(at) = at {
+                            guild.soundboard_sounds.remove(at);
+                        }
+                    } else if let Ok(sound) = serde_json::from_value::<crate::guild::SoundboardSound>(data.clone()) {
+                        match at {
+                            Some(at) => guild.soundboard_sounds[at] = sound,
+                            None => guild.soundboard_sounds.push(sound),
+                        }
+                    }
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
+            "VOICE_CHANNEL_EFFECT_SEND" => {
+                if let (Some(channel_id), Some(user_id), Some(sound_id)) =
+                    (snowflake(data, "channel_id"), snowflake(data, "user_id"), snowflake(data, "sound_id"))
+                {
+                    events.push(StoreEvent::SoundboardPlayed {
+                        channel_id,
+                        user_id,
+                        sound_id,
+                        volume: data["sound_volume"].as_f64().unwrap_or(1.0),
+                    });
                 }
             }
             // A stage went live, changed its topic, or ended.
@@ -967,6 +1015,9 @@ impl State {
             }
             if guild.emojis.is_empty() {
                 guild.emojis = existing.emojis.clone();
+            }
+            if guild.soundboard_sounds.is_empty() {
+                guild.soundboard_sounds = existing.soundboard_sounds.clone();
             }
             if guild.stage_instances.is_empty() && data.get("stage_instances").is_none() {
                 guild.stage_instances = existing.stage_instances.clone();
@@ -2044,6 +2095,33 @@ mod tests {
             let messages = state.messages(Snowflake(10));
             assert!(messages[0].reactions.is_empty());
         });
+    }
+
+    #[test]
+    fn soundboards_load_change_and_play() {
+        let store = Store::new();
+        store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [],
+            "guilds": [{"id": "5", "name": "G"}],
+            "private_channels": [], "relationships": [], "read_state": {"entries": []}, "user_guild_settings": {"entries": []}}));
+        store.apply("SOUNDBOARD_SOUNDS", &json!({"guild_id": "5", "soundboard_sounds": [
+            {"sound_id": "50", "name": "bonk", "volume": 0.5, "emoji_name": "🔨", "guild_id": "5", "available": true}]}));
+        store.apply("GUILD_SOUNDBOARD_SOUND_CREATE", &json!({"sound_id": "51", "name": "honk", "guild_id": "5"}));
+        store.apply("GUILD_SOUNDBOARD_SOUND_UPDATE", &json!({"sound_id": "50", "name": "BONK", "volume": 1.0, "guild_id": "5"}));
+        store.apply("GUILD_SOUNDBOARD_SOUND_DELETE", &json!({"sound_id": "51", "guild_id": "5"}));
+        store.read(|state| {
+            let sounds = &state.guilds[&Snowflake(5)].soundboard_sounds;
+            assert_eq!(sounds.len(), 1);
+            assert_eq!((sounds[0].name.as_str(), sounds[0].volume), ("BONK", 1.0));
+        });
+        let mut events = store.subscribe();
+        store.apply("VOICE_CHANNEL_EFFECT_SEND", &json!({"channel_id": "9", "guild_id": "5", "user_id": "2",
+            "sound_id": "50", "sound_volume": 0.5, "animation_id": 0}));
+        let mut played = false;
+        while let Ok(event) = events.try_recv() {
+            played |= matches!(event,
+                StoreEvent::SoundboardPlayed { sound_id, volume, .. } if sound_id == Snowflake(50) && volume == 0.5);
+        }
+        assert!(played);
     }
 
     #[test]

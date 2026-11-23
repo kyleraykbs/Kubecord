@@ -98,6 +98,12 @@ const PAGES: &[(&str, &str, &str, u64)] = &[
         permissions::MANAGE_GUILD_EXPRESSIONS | permissions::CREATE_GUILD_EXPRESSIONS,
     ),
     (
+        "soundboard",
+        "Soundboard",
+        "audio-volume-high-symbolic",
+        permissions::MANAGE_GUILD_EXPRESSIONS | permissions::CREATE_GUILD_EXPRESSIONS,
+    ),
+    (
         "bans",
         "Bans",
         "action-unavailable-symbolic",
@@ -283,6 +289,7 @@ pub(crate) struct Panel {
     audit: gtk::Box,
     emojis: gtk::Box,
     stickers: gtk::Box,
+    sounds: gtk::Box,
 }
 
 impl Panel {
@@ -406,6 +413,7 @@ impl AppState {
             audit: gtk::Box::new(gtk::Orientation::Vertical, 0),
             emojis: gtk::Box::new(gtk::Orientation::Vertical, 0),
             stickers: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            sounds: gtk::Box::new(gtk::Orientation::Vertical, 0),
         });
 
         let pages = gtk::Stack::new();
@@ -419,6 +427,7 @@ impl AppState {
                 "bans" => self.bans_page(&panel),
                 "emoji" => self.emoji_page(&panel),
                 "stickers" => self.stickers_page(&panel),
+                "soundboard" => self.soundboard_page(&panel),
                 _ => self.audit_page(&panel),
             };
             pages.add_named(&page_scroll(&content), Some(id));
@@ -526,6 +535,7 @@ impl AppState {
                             app.fill_members(&panel);
                             app.fill_emojis(&panel);
                             app.fill_stickers(&panel);
+                            app.fill_sounds(&panel);
                         }
                         StoreEvent::GuildMembersUpdated(id) if id == guild => {
                             app.fill_members(&panel)

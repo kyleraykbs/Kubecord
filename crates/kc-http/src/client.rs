@@ -1326,6 +1326,66 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    // -- soundboard ------------------------------------------------------
+
+    /// Discord's own soundboard sounds.
+    pub async fn default_soundboard_sounds(&self) -> Result<Vec<kc_state::SoundboardSound>> {
+        let body = self.get("/soundboard-default-sounds").await?;
+        Ok(serde_json::from_value(body).unwrap_or_default())
+    }
+
+    /// Plays a sound to the voice channel we are in (its emoji shows as
+    /// the effect), as the web client sends it.
+    pub async fn send_soundboard_sound(&self, channel_id: Snowflake, sound: &kc_state::SoundboardSound) -> Result<()> {
+        let mut body = json!({ "sound_id": sound.sound_id, "emoji_id": sound.emoji_id, "emoji_name": sound.emoji_name });
+        if let Some(guild_id) = sound.guild_id.filter(|guild| guild.0 != 0) {
+            body["source_guild_id"] = json!(guild_id);
+        }
+        self.post(&format!("/channels/{channel_id}/send-soundboard-sound"), body).await?;
+        Ok(())
+    }
+
+    /// Adds a sound to a server's soundboard: an MP3 or OGG up to 512 KiB
+    /// and 5.2 seconds.
+    pub async fn create_soundboard_sound(
+        &self,
+        guild_id: Snowflake,
+        name: &str,
+        bytes: &[u8],
+        filename: &str,
+        volume: f64,
+        emoji_name: Option<&str>,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        let sound = format!(
+            "data:{};base64,{}",
+            content_type(filename),
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        self.post(
+            &format!("/guilds/{guild_id}/soundboard-sounds"),
+            json!({ "name": name, "sound": sound, "volume": volume, "emoji_id": null, "emoji_name": emoji_name }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn edit_soundboard_sound(&self, guild_id: Snowflake, sound_id: Snowflake, name: &str, volume: f64, emoji_name: Option<&str>) -> Result<()> {
+        self.request_json(
+            Method::PATCH,
+            &format!("/guilds/{guild_id}/soundboard-sounds/{sound_id}"),
+            Some(&json!({ "name": name, "volume": volume, "emoji_name": emoji_name })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_soundboard_sound(&self, guild_id: Snowflake, sound_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/guilds/{guild_id}/soundboard-sounds/{sound_id}"), None)
+            .await?;
+        Ok(())
+    }
+
     // -- stages ----------------------------------------------------------
 
     /// Starts a stage in a stage channel, with its topic (server members

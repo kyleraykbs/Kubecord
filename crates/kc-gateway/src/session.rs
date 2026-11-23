@@ -401,6 +401,16 @@ impl GatewayHandle {
         }));
     }
 
+    /// Asks for these servers' soundboards (op 31); each answers with
+    /// SOUNDBOARD_SOUNDS, as the web client does when its soundboard opens.
+    pub fn request_soundboard_sounds(&self, guild_ids: &[Snowflake]) {
+        if guild_ids.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = guild_ids.iter().map(Snowflake::to_string).collect();
+        self.send(json!({"op": 31, "d": {"guild_ids": ids}}));
+    }
+
     /// Searches guild members by name prefix, for @mention autocomplete.
     pub fn search_members(&self, guild_id: Snowflake, query: &str, limit: u8) {
         self.send(json!({

@@ -64,6 +64,29 @@ pub struct Sticker {
     pub pack_id: Option<Snowflake>,
 }
 
+/// A soundboard sound: Discord's own (no guild) or a server's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SoundboardSound {
+    pub sound_id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// 0.0 to 1.0.
+    #[serde(default = "full_volume")]
+    pub volume: f64,
+    #[serde(default)]
+    pub emoji_id: Option<Snowflake>,
+    #[serde(default)]
+    pub emoji_name: Option<String>,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    #[serde(default = "default_true")]
+    pub available: bool,
+}
+
+fn full_volume() -> f64 {
+    1.0
+}
+
 /// A stage that is live: its channel and topic.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageInstance {
@@ -149,6 +172,9 @@ pub struct Guild {
     pub emojis: Vec<Emoji>,
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub stickers: Vec<Sticker>,
+    /// The server's soundboard (arrives on request: gateway op 31).
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub soundboard_sounds: Vec<SoundboardSound>,
     /// Stages live now, one per stage channel at most.
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub stage_instances: Vec<StageInstance>,

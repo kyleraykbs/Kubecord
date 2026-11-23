@@ -15,6 +15,7 @@ mod inbox;
 mod message_requests;
 mod polls;
 mod safety;
+mod soundboard;
 mod stage;
 mod stickers;
 mod voice_message;

@@ -427,6 +427,11 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-sound {
+    padding: 6px 10px;
+    border-radius: 8px;
+}
+
 .kc-stage-header {
     padding: 14px 16px;
 }

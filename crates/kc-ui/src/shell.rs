@@ -65,6 +65,7 @@ pub(crate) struct AppState {
     pub voice_deafen: gtk::ToggleButton,
     pub voice_camera: gtk::ToggleButton,
     pub voice_screen: gtk::ToggleButton,
+    pub voice_soundboard: gtk::Button,
     /// The settings gear in the user bar, always visible.
     pub capture_button: gtk::Button,
     /// Splits the channel sidebar from the content; dragging resizes it.
@@ -314,8 +315,13 @@ impl AppState {
 
         let voice_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         voice_buttons.set_homogeneous(true);
+        let voice_soundboard = icon_button(
+            first_icon(&["soundboard-symbolic", "audio-x-generic-symbolic", "audio-volume-high-symbolic"]),
+            "Soundboard",
+        );
         voice_buttons.append(&voice_camera);
         voice_buttons.append(&voice_screen);
+        voice_buttons.append(&voice_soundboard);
 
         let voice_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
         voice_content.set_margin_top(8);
@@ -889,6 +895,7 @@ impl AppState {
             voice_deafen,
             voice_camera,
             voice_screen,
+            voice_soundboard,
             capture_button,
             sidebar_paned,
             banner,
