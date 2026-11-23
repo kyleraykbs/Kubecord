@@ -507,13 +507,49 @@ impl AppState {
                 if hidden && !is_selected && !row.unread && row.voice.is_empty() {
                     continue;
                 }
-                self.channel_box
-                    .append(&self.channel_button(&row, is_selected));
+                let button = self.channel_button(&row, is_selected);
+                if is_voice_only(&row.channel) {
+                    self.channel_box.append(&self.with_chat_button(&button, &row.channel));
+                } else {
+                    self.channel_box.append(&button);
+                }
                 for user in &row.voice {
                     self.channel_box.append(&self.voice_user_row(user));
                 }
             }
         }
+    }
+
+    /// A voice channel's row with a chat button over its right end, shown
+    /// while the pointer is on the row: its chat beside the call, without
+    /// joining. Over the row rather than in it, so the button takes no room
+    /// from the name and gets its own clicks.
+    fn with_chat_button(self: &Rc<Self>, button: &gtk::Button, channel: &Channel) -> gtk::Overlay {
+        let overlay = gtk::Overlay::new();
+        overlay.add_css_class("kc-channel-row");
+        overlay.set_child(Some(button));
+        let chat = crate::widgets::icon_button(
+            crate::widgets::first_icon(&["chat-bubbles-text-symbolic", "chat-symbolic", "mail-message-new-symbolic"]),
+            "Open Chat",
+        );
+        chat.add_css_class("flat");
+        chat.add_css_class("kc-channel-chat");
+        chat.set_halign(gtk::Align::End);
+        chat.set_valign(gtk::Align::Center);
+        chat.set_margin_end(6);
+        chat.set_focus_on_click(false);
+        let app = self.clone();
+        let target = channel.clone();
+        chat.connect_clicked(move |_| {
+            app.open_channel(target.clone());
+            if app.side_chat_toggle.is_active() {
+                app.render_all();
+            } else {
+                app.side_chat_toggle.set_active(true);
+            }
+        });
+        overlay.add_overlay(&chat);
+        overlay
     }
 
     fn channel_button(self: &Rc<Self>, row: &ChannelRow, selected: bool) -> gtk::Button {
@@ -547,29 +583,6 @@ impl AppState {
         button.set_child(Some(&content));
 
         let voice = is_voice_only(channel);
-        // A voice channel's chat, from the sidebar without joining: a button
-        // at the row's end, shown while the pointer is over the row.
-        if voice {
-            let chat = crate::widgets::icon_button(
-                crate::widgets::first_icon(&["chat-bubbles-text-symbolic", "chat-symbolic", "mail-message-new-symbolic"]),
-                "Open Chat",
-            );
-            chat.add_css_class("flat");
-            chat.add_css_class("kc-channel-chat");
-            chat.set_valign(gtk::Align::Center);
-            let app = self.clone();
-            let target = channel.clone();
-            chat.connect_clicked(move |_| {
-                app.open_channel(target.clone());
-                if app.side_chat_toggle.is_active() {
-                    // Already showing chats: this channel's opened above.
-                    app.render_all();
-                } else {
-                    app.side_chat_toggle.set_active(true);
-                }
-            });
-            content.append(&chat);
-        }
         let app = self.clone();
         let target = channel.clone();
         button.connect_clicked(move |_| {

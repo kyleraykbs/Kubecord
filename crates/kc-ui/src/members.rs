@@ -77,6 +77,7 @@ impl AppState {
                 self.side_chat_toggle.set_visible(voice_channel);
                 let text_channel = kind.is_text() || (voice_channel && self.side_chat.get());
                 self.search_entry.set_visible(text_channel);
+                self.search_button.set_visible(text_channel);
                 self.pins_button.set_visible(text_channel);
                 self.share_button.set_visible(text_channel);
                 // A call button for DMs and group DMs; reflects whether a

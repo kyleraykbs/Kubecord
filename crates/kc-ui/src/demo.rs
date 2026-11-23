@@ -577,6 +577,26 @@ impl AppState {
                     }
                 });
             }
+            "sidebar-chat" => {
+                // The chat button on a voice channel's sidebar row, clicked.
+                self.open_channel(general.clone());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    let mut child = app.channel_box.first_child();
+                    while let Some(widget) = child {
+                        if widget.has_css_class("kc-channel-row")
+                            && widget.first_child().is_some_and(|row| row.widget_name() == format!("channel-{LOUNGE}"))
+                            && let Some(chat) = widget.last_child().and_downcast::<gtk::Button>()
+                        {
+                            eprintln!("demo: clicking the Lounge chat button");
+                            chat.emit_clicked();
+                            return;
+                        }
+                        child = widget.next_sibling();
+                    }
+                    eprintln!("demo: no chat button on the Lounge row");
+                });
+            }
             "voice-side-chat" => {
                 // A voice channel with its text chat beside the call.
                 for (index, text) in ["anyone joining?", "in a sec", "my mic is muted, typing here instead", "👍"]

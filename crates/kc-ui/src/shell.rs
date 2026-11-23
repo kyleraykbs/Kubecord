@@ -76,6 +76,8 @@ pub(crate) struct AppState {
     pub channel_title_label: gtk::Label,
     pub channel_topic_label: gtk::Label,
     pub search_entry: gtk::SearchEntry,
+    /// Runs the search in the box.
+    pub search_button: gtk::Button,
     pub pins_button: gtk::Button,
     /// Share mode: choose messages to export as a picture or text.
     pub share_button: gtk::Button,
@@ -470,7 +472,15 @@ impl AppState {
         content_header.set_show_end_title_buttons(false);
         content_header.set_show_start_title_buttons(false);
         content_header.pack_start(&title_box);
-        content_header.pack_end(&search_entry);
+        // The box and a button to run it, joined.
+        let search_button = icon_button("edit-find-symbolic", "Search");
+        search_button.set_valign(gtk::Align::Center);
+        let search_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        search_bar.add_css_class("linked");
+        search_bar.set_valign(gtk::Align::Center);
+        search_bar.append(&search_entry);
+        search_bar.append(&search_button);
+        content_header.pack_end(&search_bar);
         content_header.pack_end(&members_toggle);
         content_header.pack_end(&share_button);
         content_header.pack_end(&pins_button);
@@ -849,6 +859,7 @@ impl AppState {
             channel_title_label,
             channel_topic_label,
             search_entry,
+            search_button,
             pins_button,
             share_button,
             members_toggle,

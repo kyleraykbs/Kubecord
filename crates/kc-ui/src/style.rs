@@ -419,11 +419,10 @@ button.kc-link-button:hover {
     min-height: 20px;
     min-width: 20px;
     padding: 0;
-    margin: -4px 0;
     opacity: 0;
 }
 
-button:hover .kc-channel-chat,
+.kc-channel-row:hover .kc-channel-chat,
 .kc-channel-chat:focus-visible {
     opacity: 1;
 }

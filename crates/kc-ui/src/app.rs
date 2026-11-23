@@ -616,6 +616,8 @@ impl AppState {
         // the box closes the results.
         let app = self.clone();
         self.search_entry.connect_activate(move |_| app.search_from_entry());
+        let app = self.clone();
+        self.search_button.connect_clicked(move |_| app.search_from_entry());
         // Clicking into the box opens the results side straight away.
         let focus = gtk::EventControllerFocus::new();
         let app = self.clone();
