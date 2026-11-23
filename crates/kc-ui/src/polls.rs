@@ -323,7 +323,9 @@ impl AppState {
         add.add_css_class("flat");
         add.set_tooltip_text(Some("Add Another Answer"));
         answers_group.set_header_suffix(Some(&add));
-        let answers: Rc<RefCell<Vec<(adw::EntryRow, gtk::Entry)>>> = Rc::new(RefCell::new(Vec::new()));
+        // Each answer's text, and the emoji picked for it (if any).
+        type Answer = (adw::EntryRow, Rc<RefCell<Option<String>>>);
+        let answers: Rc<RefCell<Vec<Answer>>> = Rc::new(RefCell::new(Vec::new()));
         let add_answer = {
             let answers = answers.clone();
             let group = answers_group.clone();
@@ -336,15 +338,38 @@ impl AppState {
                 let row = adw::EntryRow::new();
                 row.set_title(&format!("Answer {}", count + 1));
                 row.set_max_length(MAX_ANSWER as i32);
-                let emoji = gtk::Entry::new();
-                emoji.set_placeholder_text(Some("🙂"));
-                emoji.set_max_width_chars(3);
-                emoji.set_width_chars(3);
-                emoji.set_valign(gtk::Align::Center);
-                emoji.set_tooltip_text(Some("An emoji for this answer (optional)"));
-                row.add_suffix(&emoji);
+                // A button that opens the emoji chooser and then shows the
+                // pick; right-click takes it off.
+                let picked: Rc<RefCell<Option<String>>> = Rc::default();
+                let button = gtk::MenuButton::new();
+                button.add_css_class("flat");
+                button.set_valign(gtk::Align::Center);
+                button.set_icon_name("face-smile-symbolic");
+                button.set_tooltip_text(Some("Add an Emoji (optional)"));
+                let chooser = gtk::EmojiChooser::new();
+                button.set_popover(Some(&chooser));
+                {
+                    let (button, picked) = (button.clone(), picked.clone());
+                    chooser.connect_emoji_picked(move |_, emoji| {
+                        picked.replace(Some(emoji.to_owned()));
+                        button.set_label(emoji);
+                        button.set_tooltip_text(Some("Change the Emoji (right-click to remove)"));
+                    });
+                }
+                let clear = gtk::GestureClick::new();
+                clear.set_button(3);
+                {
+                    let (button, picked) = (button.clone(), picked.clone());
+                    clear.connect_pressed(move |_, _, _, _| {
+                        picked.replace(None);
+                        button.set_icon_name("face-smile-symbolic");
+                        button.set_tooltip_text(Some("Add an Emoji (optional)"));
+                    });
+                }
+                button.add_controller(clear);
+                row.add_suffix(&button);
                 group.add(&row);
-                answers.borrow_mut().push((row, emoji));
+                answers.borrow_mut().push((row, picked));
                 add.set_sensitive(answers.borrow().len() < MAX_ANSWERS);
             }
         };
@@ -422,10 +447,7 @@ impl AppState {
                 answers: answers
                     .borrow()
                     .iter()
-                    .map(|(row, emoji)| {
-                        let emoji = emoji.text().trim().to_owned();
-                        (row.text().to_string(), (!emoji.is_empty()).then_some(emoji))
-                    })
+                    .map(|(row, emoji)| (row.text().to_string(), emoji.borrow().clone()))
                     .collect(),
                 hours: DURATIONS[(duration.selected() as usize).min(DURATIONS.len() - 1)].1,
                 allow_multiselect: multi.is_active(),

@@ -729,7 +729,7 @@ impl AppState {
                     self.voice_channel_clicked(stage);
                 }
             }
-            "polls" | "poll-create" => {
+            "polls" | "poll-create" | "poll-click" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.
                 let answers = json!([
@@ -753,6 +753,43 @@ impl AppState {
                     store.apply("MESSAGE_CREATE", &posted);
                 }
                 self.open_channel(general.clone());
+                if mode == "poll-click" {
+                    // Scrolled up a little, click an answer of the first
+                    // poll; the view must not move.
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        let adjustment = app.messages_scroll.vadjustment();
+                        adjustment.set_value(adjustment.upper() - adjustment.page_size() - 150.0);
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                            fn find(widget: &gtk::Widget) -> Option<gtk::ToggleButton> {
+                                if widget.has_css_class("kc-poll-answer") && widget.is_sensitive() {
+                                    return widget.clone().downcast().ok();
+                                }
+                                let mut child = widget.first_child();
+                                while let Some(current) = child {
+                                    if let Some(found) = find(&current) {
+                                        return Some(found);
+                                    }
+                                    child = current.next_sibling();
+                                }
+                                None
+                            }
+                            let before = app.messages_scroll.vadjustment().value();
+                            if let Some(answer) = find(app.messages_list.upcast_ref()) {
+                                answer.grab_focus();
+                                answer.set_active(true);
+                            } else {
+                                eprintln!("poll-click: no answer found");
+                            }
+                            let app = app.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                                let after = app.messages_scroll.vadjustment().value();
+                                eprintln!("poll-click: before={before:.0} after={after:.0}");
+                            });
+                        });
+                    });
+                }
                 if mode == "poll-create" {
                     let app = self.clone();
                     glib::timeout_add_local_once(Duration::from_millis(600), move || app.show_create_poll());

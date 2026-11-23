@@ -835,10 +835,32 @@ impl AppState {
         let Some(entry) = entry else {
             return;
         };
+        // Where the view is, and whether the row being replaced holds the
+        // focus (a poll answer just clicked, say): removing a focused row
+        // sends the focus elsewhere in the list, which scrolls to it.
+        let value = self.messages_scroll.vadjustment().value();
+        let at_bottom = self.chat.borrow().at_bottom;
         let old = std::mem::replace(&mut self.chat.borrow_mut().rows[position], entry);
+        let had_focus = gtk::prelude::GtkWindowExt::focus(&self.window)
+            .is_some_and(|focus| focus == old.row || focus.is_ancestor(&old.row));
         self.messages_list.remove(&old.row);
         let row = self.chat.borrow().rows[position].row.clone();
         self.messages_list.insert(&row, position as i32);
+        if had_focus {
+            row.set_focusable(true);
+            row.grab_focus();
+        }
+        // Hold the view still while the new row lays out.
+        let left = std::cell::Cell::new(10u32);
+        self.messages_scroll.add_tick_callback(move |scroll, _| {
+            let adjustment = scroll.vadjustment();
+            let wanted = if at_bottom { adjustment.upper() - adjustment.page_size() } else { value };
+            if (adjustment.value() - wanted).abs() > 0.5 {
+                adjustment.set_value(wanted);
+            }
+            left.set(left.get() - 1);
+            if left.get() == 0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
     }
 
     /// History for the open channel arrived: build what is not shown yet.
