@@ -318,6 +318,22 @@ ban is unlikely; friending people is the most likely place to get one.
 
 ## Not supported yet
 
+- Starting threads, and the list of archived threads (existing ones show in
+  the sidebar)
+- Forum and media channels: their post list, and making posts
+- Polls: showing them, voting and creating them
+- An inbox of recent mentions
+- Forwarding messages (forwards you receive do show)
+- Sending stickers (stickers you receive do show)
+- Push-to-talk and voice keybinds
+- Voice messages: recording them, and their waveform
+- Server events
+- Stage channels: asking to speak, and moving between speakers and audience
+- Soundboard
+- Message requests from people who aren't your friends
+- Sending super reactions
+- Uploading server emoji and stickers
+- AutoMod and onboarding settings
 - Discord's web activities (its golf game, chess, wordle, …)
 - Animated profile overlays
 - Lottie stickers (Discord's stock stickers)
