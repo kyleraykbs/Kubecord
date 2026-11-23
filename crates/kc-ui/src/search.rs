@@ -728,6 +728,10 @@ impl AppState {
         for (text, index) in chips {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             chip.add_css_class("kc-search-chip");
+            // As wide as its text: the flow box gives each child a whole
+            // column otherwise.
+            chip.set_halign(gtk::Align::Start);
+            chip.set_hexpand(false);
             let text_label = label(&text, &["caption"]);
             text_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             text_label.set_max_width_chars(28);
@@ -1126,6 +1130,7 @@ fn build_panel() -> SearchPanel {
     let chips = gtk::FlowBox::new();
     chips.set_selection_mode(gtk::SelectionMode::None);
     chips.set_max_children_per_line(6);
+    chips.set_homogeneous(false);
     chips.set_column_spacing(4);
     chips.set_row_spacing(4);
     chips.set_margin_start(10);
