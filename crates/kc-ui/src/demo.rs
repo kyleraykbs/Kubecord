@@ -660,6 +660,15 @@ impl AppState {
                     }
                 });
             }
+            "embed" => {
+                // Your own message with a link preview (hover it for the ×).
+                let mut posted = message(id_at(30_000, 31), ME, "https://example.com/kubecord");
+                posted["embeds"] = json!([{"type": "rich", "url": "https://example.com/kubecord", "title": "Kubecord",
+                    "description": "A native Discord client in GTK4 and libadwaita.", "color": 0x5865f2,
+                    "provider": {"name": "example.com"}}]);
+                store.apply("MESSAGE_CREATE", &posted);
+                self.open_channel(general.clone());
+            }
             "soundboard" => {
                 // In the lounge, with the soundboard open: Discord's sounds
                 // and the server's own.

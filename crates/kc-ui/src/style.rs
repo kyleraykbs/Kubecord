@@ -427,6 +427,17 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-embed-removable .kc-embed-remove {
+    opacity: 0;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px;
+}
+
+.kc-embed-removable:hover .kc-embed-remove {
+    opacity: 1;
+}
+
 .kc-sound {
     padding: 6px 10px;
     border-radius: 8px;

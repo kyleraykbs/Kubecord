@@ -1925,6 +1925,17 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    /// Removes a message's embeds (link previews) for everyone: sets its
+    /// suppress-embeds flag, keeping the rest of `flags`.
+    pub async fn suppress_embeds(&self, channel_id: Snowflake, message_id: Snowflake, flags: u64) -> Result<()> {
+        self.patch(
+            &format!("/channels/{channel_id}/messages/{message_id}"),
+            json!({ "flags": flags | (1 << 2) }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
         self.delete(&format!("/channels/{channel_id}/messages/{message_id}"))
             .await?;

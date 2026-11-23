@@ -1251,6 +1251,56 @@ impl AppState {
         }
     }
 
+    /// An embed with an × in its corner (shown on hover) that removes the
+    /// message's embeds.
+    fn with_remove_embeds(self: &Rc<Self>, widget: &gtk::Widget, message: &Message) -> gtk::Widget {
+        let overlay = gtk::Overlay::new();
+        overlay.add_css_class("kc-embed-removable");
+        overlay.set_halign(widget.halign());
+        overlay.set_margin_top(widget.margin_top());
+        widget.set_margin_top(0);
+        overlay.set_child(Some(widget));
+        let remove = gtk::Button::from_icon_name("window-close-symbolic");
+        remove.add_css_class("circular");
+        remove.add_css_class("osd");
+        remove.add_css_class("kc-embed-remove");
+        remove.set_tooltip_text(Some("Remove Embeds"));
+        remove.set_halign(gtk::Align::End);
+        remove.set_valign(gtk::Align::Start);
+        remove.set_margin_top(4);
+        remove.set_margin_end(4);
+        let (app, channel_id, message_id, flags) = (self.clone(), message.channel_id, message.id, message.flags);
+        remove.connect_clicked(move |_| app.confirm_remove_embeds(channel_id, message_id, flags));
+        overlay.add_overlay(&remove);
+        overlay.upcast()
+    }
+
+    pub(crate) fn confirm_remove_embeds(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake, flags: u64) {
+        let dialog = adw::AlertDialog::new(
+            Some("Remove All Embeds?"),
+            Some("The link previews on this message go away for everyone. The links stay."),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove Embeds")]);
+        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("remove"));
+        dialog.set_close_response("cancel");
+        let app = self.clone();
+        dialog.connect_response(Some("remove"), move |_, _| {
+            let Some((_, http, _)) = app.active() else {
+                return;
+            };
+            app.spawn(
+                async move { http.suppress_embeds(channel_id, message_id, flags).await },
+                |app, result| {
+                    if let Err(error) = result {
+                        app.set_status(&format!("Could not remove the embeds: {error}"));
+                    }
+                },
+            );
+        });
+        dialog.present(Some(&self.window));
+    }
+
     /// Joins, pins, calls and the other messages Discord writes itself.
     fn system_body(
         self: &Rc<Self>,
@@ -1473,10 +1523,19 @@ impl AppState {
             column.append(&widget);
         }
         if message.flags & Message::FLAG_SUPPRESS_EMBEDS == 0 {
+            // The author (or someone who manages messages) can take the
+            // previews off, for everyone.
+            let removable = !message.embeds.is_empty()
+                && (state.my_id() == Some(message.author.id)
+                    || state.permissions_in(message.channel_id) & permissions::MANAGE_MESSAGES != 0);
             for embed in &message.embeds {
                 if let Some(widget) = self.embed_widget(embed, guild, state) {
                     widget.set_margin_top(2);
-                    column.append(&widget);
+                    if removable {
+                        column.append(&self.with_remove_embeds(&widget, message));
+                    } else {
+                        column.append(&widget);
+                    }
                 }
             }
             // Invite links resolve into their own card (Discord does not embed
