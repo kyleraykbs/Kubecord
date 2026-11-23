@@ -1866,8 +1866,8 @@ impl SessionState {
     }
 
     /// The media-sink wants (voice op 15) the web client sends: each other
-    /// participant's audio SSRC at full quality and nothing else by default,
-    /// so the server sends their media (camera included) and no one else's.
+    /// participant's audio SSRC, and each camera's video SSRC, at full
+    /// quality, and nothing else by default.
     /// Watching a stream keeps asking for everything: only the streamer
     /// sends on that connection.
     fn sink_wants(&self) -> Value {
@@ -1880,7 +1880,16 @@ impl SessionState {
             .filter(|(ssrc, user)| **ssrc != self.audio_ssrc && self.users.contains(&user.get()))
             .map(|(ssrc, _)| *ssrc)
             .collect();
+        // Cameras are asked for by their own SSRC (the server's wants name
+        // video SSRCs); without them no one's camera arrives.
+        ssrcs.extend(
+            self.video_ssrcs
+                .values()
+                .filter(|video| !video.retransmission)
+                .map(|video| video.primary),
+        );
         ssrcs.sort_unstable();
+        ssrcs.dedup();
         let mut wants = serde_json::Map::new();
         for ssrc in ssrcs {
             wants.insert(ssrc.to_string(), json!(100));
