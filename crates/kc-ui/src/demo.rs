@@ -1264,9 +1264,15 @@ impl AppState {
                     if typed.get() < text.len() {
                         let view = app.composer.upcast_ref::<gtk::Widget>();
                         let (needed, ..) = view.measure(gtk::Orientation::Vertical, view.width());
-                        if needed != view.height() {
-                            eprintln!("demo: after {} chars the composer is {} tall, its text needs {needed}", typed.get(), view.height());
-                        }
+                        let buffer = app.composer.buffer();
+                        let end = app.composer.iter_location(&buffer.end_iter());
+                        eprintln!(
+                            "demo: after {} chars the composer is {} tall, measures {needed}, last char at y {} h {}",
+                            typed.get(),
+                            view.height(),
+                            end.y(),
+                            end.height()
+                        );
                         app.composer.emit_insert_at_cursor(&text[typed.get()].to_string());
                         typed.set(typed.get() + 1);
                         return glib::ControlFlow::Continue;

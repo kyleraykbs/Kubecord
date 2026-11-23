@@ -553,7 +553,6 @@ impl AppState {
         composer.set_bottom_margin(16);
         composer.set_left_margin(4);
         composer.set_right_margin(4);
-        settle_composer_height(&composer);
 
         let composer_hint = gtk::Label::new(None);
         composer_hint.set_xalign(0.0);
@@ -564,9 +563,10 @@ impl AppState {
 
         let composer_scroll = gtk::ScrolledWindow::new();
         composer_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        composer_scroll.set_max_content_height(220);
+        composer_scroll.set_max_content_height(COMPOSER_MAX_HEIGHT);
         composer_scroll.set_propagate_natural_height(true);
         composer_scroll.set_child(Some(&composer));
+        fit_composer_height(&composer, &composer_scroll);
 
         let composer_overlay = gtk::Overlay::new();
         composer_overlay.set_hexpand(true);
@@ -1105,36 +1105,83 @@ mod title_tests {
     }
 }
 
-/// The composer's text view does not always ask to be measured again when
-/// its text changes how it wraps, so the box kept an old height: a line too
-/// tall (the text sat at its top) or too short. For a few frames after each
-/// change its height is checked against its text and put right.
-fn settle_composer_height(composer: &gtk::TextView) {
+/// The tallest the composer grows before its text scrolls.
+const COMPOSER_MAX_HEIGHT: i32 = 220;
+
+/// Keeps the composer exactly as tall as its text.
+///
+/// GTK's text view does not always measure itself again when its text
+/// changes how it wraps or gains a line (Shift+Enter), so the box kept an
+/// old height: a line too tall, with the text at its top, until enough more
+/// typing made it measure again. Its height is instead worked out from where
+/// its last character is drawn, which is always current, and the scrolled
+/// window around it is held to that (up to [`COMPOSER_MAX_HEIGHT`]), for a
+/// few frames after each change of text or width.
+fn fit_composer_height(composer: &gtk::TextView, scroll: &gtk::ScrolledWindow) {
     use std::cell::Cell;
     use std::rc::Rc;
     /// Frames to check for after a change.
     const FRAMES: u32 = 10;
-    let left = Rc::new(Cell::new(0u32));
-    let view = composer.downgrade();
-    composer.buffer().connect_changed(move |_| {
-        let Some(view) = view.upgrade() else { return };
-        // One check running at a time, kept going while typing continues.
-        let running = left.get() > 0;
-        left.set(FRAMES);
-        if running {
-            return;
-        }
-        let left = left.clone();
-        view.add_tick_callback(move |view, _| {
-            let width = view.width();
-            if width > 0 {
-                let (height, ..) = view.measure(gtk::Orientation::Vertical, width);
-                if height != view.height() {
-                    view.queue_resize();
-                }
+
+    // Set on a resize: the text view scrolled to the cursor for its old
+    // height, so it is shown again once the new one is laid out.
+    let reveal = Rc::new(Cell::new(false));
+    let fit = {
+        let scroll = scroll.downgrade();
+        let reveal = reveal.clone();
+        move |view: &gtk::TextView| {
+            let Some(scroll) = scroll.upgrade() else { return };
+            if reveal.replace(false) {
+                view.scroll_mark_onscreen(&view.buffer().get_insert());
             }
-            left.set(left.get().saturating_sub(1));
-            if left.get() > 0 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
-        });
+            let end = view.iter_location(&view.buffer().end_iter());
+            let needed = end.y() + end.height() + view.top_margin() + view.bottom_margin();
+            // Taller than the box: it scrolls, and keeps the cursor in view.
+            if needed > COMPOSER_MAX_HEIGHT {
+                reveal.set(true);
+            }
+            let height = needed.clamp(1, COMPOSER_MAX_HEIGHT);
+            if scroll.min_content_height() == height && scroll.max_content_height() == height {
+                return;
+            }
+            reveal.set(true);
+            // GTK refuses a minimum above the maximum: move the one on the
+            // side it is going first.
+            if height > scroll.min_content_height() {
+                scroll.set_max_content_height(height);
+                scroll.set_min_content_height(height);
+            } else {
+                scroll.set_min_content_height(height);
+                scroll.set_max_content_height(height);
+            }
+        }
+    };
+    fit(composer);
+
+    let left = Rc::new(Cell::new(0u32));
+    let start = {
+        let view = composer.downgrade();
+        move || {
+            let Some(view) = view.upgrade() else { return };
+            // One check running at a time, kept going while typing continues.
+            let running = left.get() > 0;
+            left.set(FRAMES);
+            if running {
+                return;
+            }
+            let left = left.clone();
+            let fit = fit.clone();
+            view.add_tick_callback(move |view, _| {
+                fit(view);
+                left.set(left.get().saturating_sub(1));
+                if left.get() > 0 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+            });
+        }
+    };
+    let on_text = start.clone();
+    composer.buffer().connect_changed(move |_| on_text());
+    // A new width rewraps the text: the horizontal adjustment changes with it.
+    composer.hadjustment().inspect(|adjustment| {
+        adjustment.connect_changed(move |_| start());
     });
 }
