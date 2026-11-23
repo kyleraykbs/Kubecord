@@ -660,6 +660,32 @@ impl AppState {
                     }
                 });
             }
+            "history-top" => {
+                // Scroll to the top once: one page of older messages should
+                // load and the view stay where it was, not keep loading.
+                let older: Vec<kc_state::Message> = (0..200u64)
+                    .filter_map(|n| {
+                        let value = message(id_at((300 + n) * 3_600_000, n), 2 + n % 3, &format!("Older message {n}"));
+                        serde_json::from_value(value).ok()
+                    })
+                    .collect();
+                store.load_history(general.id, older);
+                self.open_channel(general.clone());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let rows = app.chat.borrow().rows.len();
+                    eprintln!("history-top: rows before={rows}");
+                    app.messages_scroll.vadjustment().set_value(0.0);
+                    for ms in [400u64, 1200, 2500] {
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(ms), move || {
+                            let rows = app.chat.borrow().rows.len();
+                            let value = app.messages_scroll.vadjustment().value();
+                            eprintln!("history-top: +{ms}ms rows={rows} value={value:.0}");
+                        });
+                    }
+                });
+            }
             "embed" => {
                 // Your own message with a link preview (hover it for the ×).
                 let mut posted = message(id_at(30_000, 31), ME, "https://example.com/kubecord");

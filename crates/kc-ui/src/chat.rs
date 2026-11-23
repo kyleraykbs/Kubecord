@@ -835,14 +835,23 @@ impl AppState {
         let Some(entry) = entry else {
             return;
         };
-        // Where the view is, and whether the row being replaced holds the
-        // focus (a poll answer just clicked, say): removing a focused row
-        // sends the focus elsewhere in the list, which scrolls to it.
+        // Whether the row being replaced holds the focus (a poll answer just
+        // clicked, say): removing a focused row sends the focus elsewhere in
+        // the list, which scrolls to it. And where the row sits on screen,
+        // to keep it there while the new one lays out.
         let value = self.messages_scroll.vadjustment().value();
         let at_bottom = self.chat.borrow().at_bottom;
+        // Loading older history restores the view itself (by the height
+        // added above); holding it here too would undo that and keep the
+        // view at the top, loading page after page.
+        let restoring = self.chat.borrow().restore.is_some();
         let old = std::mem::replace(&mut self.chat.borrow_mut().rows[position], entry);
         let had_focus = gtk::prelude::GtkWindowExt::focus(&self.window)
             .is_some_and(|focus| focus == old.row || focus.is_ancestor(&old.row));
+        let offset = old
+            .row
+            .compute_bounds(&self.messages_list)
+            .map(|bounds| f64::from(bounds.y()) - value);
         self.messages_list.remove(&old.row);
         let row = self.chat.borrow().rows[position].row.clone();
         self.messages_list.insert(&row, position as i32);
@@ -850,12 +859,25 @@ impl AppState {
             row.set_focusable(true);
             row.grab_focus();
         }
-        // Hold the view still while the new row lays out.
+        if restoring {
+            return;
+        }
         let left = std::cell::Cell::new(10u32);
+        let (list, anchor) = (self.messages_list.clone(), row.downgrade());
         self.messages_scroll.add_tick_callback(move |scroll, _| {
             let adjustment = scroll.vadjustment();
-            let wanted = if at_bottom { adjustment.upper() - adjustment.page_size() } else { value };
-            if (adjustment.value() - wanted).abs() > 0.5 {
+            let wanted = if at_bottom {
+                Some(adjustment.upper() - adjustment.page_size())
+            } else {
+                anchor
+                    .upgrade()
+                    .and_then(|row| row.compute_bounds(&list))
+                    .zip(offset)
+                    .map(|(bounds, offset)| f64::from(bounds.y()) - offset)
+            };
+            if let Some(wanted) = wanted
+                && (adjustment.value() - wanted).abs() > 0.5
+            {
                 adjustment.set_value(wanted);
             }
             left.set(left.get() - 1);
