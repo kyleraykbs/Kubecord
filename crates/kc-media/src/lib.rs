@@ -5,6 +5,7 @@ pub mod decode;
 pub mod delay;
 pub mod devices;
 pub mod error;
+pub mod lottie;
 pub mod h264;
 pub mod mjpeg;
 pub mod portal;

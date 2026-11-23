@@ -14,7 +14,7 @@ use regex::Regex;
 use kc_core::Snowflake;
 use kc_http::cdn;
 use kc_state::message::{Embed, EmbedMedia};
-use kc_state::{Attachment, State, StickerItem};
+use kc_state::{Attachment, State};
 
 use crate::discord_emoji::Segment;
 use crate::markdown::format_size;
@@ -1517,22 +1517,6 @@ impl AppState {
                 None => tracing::debug!("gif playback unavailable; showing the still"),
             }
         });
-    }
-
-    pub(crate) fn sticker_widget(self: &Rc<Self>, sticker: &StickerItem) -> gtk::Widget {
-        match cdn::sticker(sticker.id, sticker.format_type) {
-            Some(url) => {
-                let picture = gtk::Picture::new();
-                picture.set_can_shrink(true);
-                picture.set_size_request(160, 160);
-                picture.set_halign(gtk::Align::Start);
-                picture.set_tooltip_text(Some(&sticker.name));
-                self.images.set_picture(&picture, &url);
-                max_width(&picture, 160).upcast()
-            }
-            // Lottie stickers are vector animations with no image form.
-            None => label(&format!("Sticker: {}", sticker.name), &["dim-label"]).upcast(),
-        }
     }
 
     /// A link preview or rich embed.

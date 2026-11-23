@@ -42,6 +42,38 @@ pub struct Emoji {
     pub roles: Vec<Snowflake>,
 }
 
+/// A sticker: a server's own, or one of Discord's packs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sticker {
+    pub id: Snowflake,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub description: String,
+    /// Words it is found by (for a server's own, an emoji's name).
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub tags: String,
+    /// 1 PNG, 2 APNG, 3 Lottie, 4 GIF.
+    #[serde(default)]
+    pub format_type: u8,
+    #[serde(default = "default_true")]
+    pub available: bool,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    #[serde(default)]
+    pub pack_id: Option<Snowflake>,
+}
+
+/// One of Discord's sticker packs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StickerPack {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub stickers: Vec<Sticker>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -101,6 +133,8 @@ pub struct Guild {
     pub roles: Vec<Role>,
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub emojis: Vec<Emoji>,
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub stickers: Vec<Sticker>,
     #[serde(default)]
     pub banner: Option<String>,
     #[serde(default)]

@@ -682,6 +682,20 @@ impl AppState {
             Box::new(|app| app.show_create_poll()),
         );
         add(
+            crate::widgets::first_icon(&["sticker-symbolic", "face-smile-big-symbolic", "emoji-symbols-symbolic", "face-smile-symbolic"]),
+            "Stickers",
+            self.with_session(|session| {
+                let channel = session.selected_channel?;
+                Some(session.store.read(|state| state.can_send(channel)))
+            })
+            .flatten()
+            .unwrap_or(false),
+            Box::new(|app| {
+                let anchor = app.attach_button.clone().upcast::<gtk::Widget>();
+                let _ = app.show_sticker_picker(&anchor);
+            }),
+        );
+        add(
             "audio-input-microphone-symbolic",
             "Record Voice Message",
             self.can_send_voice_messages(),

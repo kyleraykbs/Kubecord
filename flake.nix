@@ -89,6 +89,8 @@
             # glib-networking for TLS.
             webkitgtk_6_0
             glib-networking
+            # Discord's own (Lottie) stickers.
+            rlottie
           ] ++ gstPlugins;
 
           commonArgs = {

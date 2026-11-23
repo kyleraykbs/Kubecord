@@ -31,7 +31,7 @@ apt-get install -y -qq --no-install-recommends \
   clang libclang-dev cmake make git pkg-config file curl ca-certificates squashfs-tools \
   libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-  libpipewire-0.3-dev libopus-dev \
+  libpipewire-0.3-dev libopus-dev librlottie-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-gtk4 gstreamer1.0-pipewire \
   pipewire-bin libgdk-pixbuf2.0-bin librsvg2-common \

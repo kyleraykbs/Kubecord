@@ -16,6 +16,7 @@ pkgbase = kubecord-git
 	depends = glib-networking
 	depends = opus
 	depends = pipewire
+	depends = rlottie
 	depends = gstreamer
 	depends = gst-plugins-base
 	depends = gst-plugins-good

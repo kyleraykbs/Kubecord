@@ -166,6 +166,7 @@ fn ready() -> Value {
         | STREAM
         | USE_VAD;
     let moderator = KICK_MEMBERS
+        | kc_state::permissions::MANAGE_GUILD_EXPRESSIONS
         | BAN_MEMBERS
         | MODERATE_MEMBERS
         | MANAGE_NICKNAMES
@@ -557,6 +558,39 @@ impl AppState {
                 let app = self.clone();
                 glib::timeout_add_local_once(Duration::from_millis(600), move || app.record_voice_message());
             }
+            "stickers" | "sticker-picker" => {
+                // A Lottie sticker, a join to wave at; with `sticker-picker`,
+                // the picker (packs from KUBECORD_DEMO_PACKS).
+                let mut posted = message(id_at(120_000, 30), 3, "");
+                posted["sticker_items"] = json!([{"id": "749054660769218631", "name": "Wave", "format_type": 3}]);
+                store.apply("MESSAGE_CREATE", &posted);
+                let mut joined = message(id_at(60_000, 30), 4, "");
+                joined["type"] = json!(7);
+                store.apply("MESSAGE_CREATE", &joined);
+                self.open_channel(general.clone());
+                if mode == "sticker-picker" {
+                    if let Some(json) = std::env::var("KUBECORD_DEMO_PACKS").ok().and_then(|path| std::fs::read_to_string(path).ok()) {
+                        crate::stickers::demo_packs(&json);
+                    }
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(2000), move || {
+                        let anchor = app.attach_button.clone().upcast::<gtk::Widget>();
+                        let Some(popover) = app.show_sticker_picker(&anchor) else {
+                            eprintln!("demo: no sticker picker");
+                            return;
+                        };
+                        popover.set_autohide(false);
+                        // A popover is its own surface: saved beside the window.
+                        if let Ok(path) = std::env::var("KUBECORD_SCREENSHOT") {
+                            glib::timeout_add_local_once(Duration::from_millis(2000), move || {
+                                if let Err(error) = crate::app::save_window_png(&popover, std::path::Path::new(&format!("{path}.popover.png"))) {
+                                    eprintln!("demo: could not save the sticker picker: {error}");
+                                }
+                            });
+                        }
+                    });
+                }
+            }
             "polls" | "poll-create" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.
@@ -786,6 +820,15 @@ impl AppState {
             }
             mode if mode.starts_with("settings-") || mode == "invite" => {
                 FAKE_REST.set(mode != "settings-error");
+                // Some of the server's own emoji and stickers.
+                store.apply("GUILD_EMOJIS_UPDATE", &json!({"guild_id": GUILD.to_string(), "emojis": [
+                    {"id": "900001", "name": "kubecord", "animated": false},
+                    {"id": "900002", "name": "party_parrot", "animated": true},
+                    {"id": "900003", "name": "thinking_hard", "animated": false}
+                ]}));
+                store.apply("GUILD_STICKERS_UPDATE", &json!({"guild_id": GUILD.to_string(), "stickers": [
+                    {"id": "749054660769218631", "name": "Hello", "tags": "👋", "description": "Says hi", "format_type": 3, "guild_id": GUILD.to_string()}
+                ]}));
                 self.open_channel(general);
                 let app = self.clone();
                 let mode = mode.to_owned();

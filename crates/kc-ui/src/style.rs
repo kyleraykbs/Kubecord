@@ -427,6 +427,16 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-wave {
+    padding: 4px 12px 4px 6px;
+    border-radius: 8px;
+}
+
+.kc-sticker-choice {
+    padding: 4px;
+    border-radius: 8px;
+}
+
 .kc-voice-message {
     padding: 8px 12px 8px 8px;
     border-radius: 24px;

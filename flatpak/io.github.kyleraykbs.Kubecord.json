@@ -28,6 +28,23 @@
   ],
   "modules": [
     {
+      "name": "rlottie",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DLOTTIE_MODULE=OFF",
+        "-DLIB_INSTALL_DIR=/app/lib",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/Samsung/rlottie/archive/f487eff2f8086b84ae1c7faa0418abec909e874b.tar.gz",
+          "sha256": "eeaae62ee2b15e51c81b57ef21d01b9e98c2219674cf8c360deeb418af03b77d"
+        }
+      ]
+    },
+    {
       "name": "kubecord",
       "buildsystem": "simple",
       "build-options": {

@@ -20,7 +20,7 @@ pub mod user;
 
 pub use channel::{Channel, ChannelType, Overwrite};
 pub use guild::{
-    Emoji, Guild, Member, Presence, Relationship, Role, StatusEmoji, StatusLine, VoiceState,
+    Emoji, Guild, Member, Sticker, StickerPack, Presence, Relationship, Role, StatusEmoji, StatusLine, VoiceState,
 };
 pub use member_list::{MemberList, MemberListItem};
 pub use message::{

@@ -613,7 +613,30 @@ impl AppState {
         composer_overlay.add_overlay(&length_label);
         composer_hint.set_valign(gtk::Align::Center);
 
-        let attach_button = icon_button("list-add-symbolic", "Attach Files");
+        // Files, polls, stickers and voice messages, behind a hamburger
+        // (drawn: the icon theme's menu icon is three dots).
+        let attach_button = icon_button("open-menu-symbolic", "More");
+        let hamburger = gtk::DrawingArea::new();
+        hamburger.set_content_width(16);
+        hamburger.set_content_height(16);
+        hamburger.set_halign(gtk::Align::Center);
+        hamburger.set_valign(gtk::Align::Center);
+        hamburger.set_draw_func(|area, cr, width, height| {
+            let colour = area.color();
+            cr.set_source_rgba(
+                f64::from(colour.red()),
+                f64::from(colour.green()),
+                f64::from(colour.blue()),
+                f64::from(colour.alpha()),
+            );
+            let (width, height) = (f64::from(width), f64::from(height));
+            for line in 0..3 {
+                let y = height / 2.0 + (f64::from(line) - 1.0) * 5.0 - 1.0;
+                cr.rectangle(1.0, y.round(), width - 2.0, 2.0);
+            }
+            let _ = cr.fill();
+        });
+        attach_button.set_child(Some(&hamburger));
         attach_button.set_valign(gtk::Align::Center);
         attach_button.add_css_class("circular");
 

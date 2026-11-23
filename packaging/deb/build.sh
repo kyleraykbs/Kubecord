@@ -14,7 +14,7 @@ apt-get install -y -qq --no-install-recommends \
   clang libclang-dev pkg-config dpkg-dev cmake git \
   libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
-  libpipewire-0.3-dev libopus-dev >/dev/null
+  libpipewire-0.3-dev libopus-dev librlottie-dev >/dev/null
 
 command -v cargo-deb >/dev/null || cargo install --locked cargo-deb
 

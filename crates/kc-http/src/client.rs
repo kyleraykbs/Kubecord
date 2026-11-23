@@ -1326,6 +1326,121 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    // -- stickers and server emoji ---------------------------------------
+
+    /// Discord's own sticker packs (the free ones everyone may send).
+    pub async fn sticker_packs(&self) -> Result<Vec<kc_state::StickerPack>> {
+        let body = self.get("/sticker-packs?locale=en-US").await?;
+        Ok(serde_json::from_value(body["sticker_packs"].clone()).unwrap_or_default())
+    }
+
+    /// Greets someone with a sticker (the "Wave to say hi" on a join
+    /// message), replying to `reply_to` (its channel, id and server).
+    pub async fn greet(
+        &self,
+        channel_id: Snowflake,
+        sticker_id: Snowflake,
+        reply_to: Option<(Option<Snowflake>, Snowflake)>,
+    ) -> Result<Message> {
+        let mut body = json!({ "sticker_ids": [sticker_id] });
+        if let Some((guild_id, message_id)) = reply_to {
+            let mut reference = json!({ "channel_id": channel_id, "message_id": message_id });
+            if let Some(guild_id) = guild_id {
+                reference["guild_id"] = json!(guild_id);
+            }
+            body["message_reference"] = reference;
+        }
+        let value = self
+            .request_json_in(
+                Method::POST,
+                &format!("/channels/{channel_id}/greet"),
+                Some(&body),
+                Some(&json!({ "location": "Greet" })),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|source| Error::Decode { status: StatusCode::OK, source })
+    }
+
+    /// Adds a server emoji from an image (PNG, JPEG, GIF or WebP; Discord
+    /// takes up to 256 KiB).
+    pub async fn create_emoji(&self, guild_id: Snowflake, name: &str, bytes: &[u8], filename: &str) -> Result<Value> {
+        use base64::Engine as _;
+        let image = format!(
+            "data:{};base64,{}",
+            content_type(filename),
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        self.post(&format!("/guilds/{guild_id}/emojis"), json!({ "image": image, "name": name, "roles": [] }))
+            .await
+    }
+
+    pub async fn rename_emoji(&self, guild_id: Snowflake, emoji_id: Snowflake, name: &str) -> Result<()> {
+        self.request_json(Method::PATCH, &format!("/guilds/{guild_id}/emojis/{emoji_id}"), Some(&json!({ "name": name })))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_emoji(&self, guild_id: Snowflake, emoji_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/guilds/{guild_id}/emojis/{emoji_id}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Adds a server sticker (PNG, APNG, GIF or Lottie JSON, up to 512 KiB),
+    /// sent as a form as the web client does. `tags` is the emoji it stands
+    /// for.
+    pub async fn create_sticker(
+        &self,
+        guild_id: Snowflake,
+        name: &str,
+        description: &str,
+        tags: &str,
+        bytes: Vec<u8>,
+        filename: &str,
+    ) -> Result<Value> {
+        let path = format!("/guilds/{guild_id}/stickers");
+        let route = normalise_route("POST", &path);
+        self.limiter.acquire(&route).await;
+        let file = wreq::multipart::Part::bytes(bytes)
+            .file_name(filename.to_owned())
+            .mime_str(content_type(filename))
+            .map_err(|error| Error::Api {
+                status: StatusCode::BAD_REQUEST,
+                code: None,
+                message: error.to_string(),
+                retry_after: None,
+            })?;
+        let form = wreq::multipart::Form::new()
+            .text("name", name.to_owned())
+            .text("tags", tags.to_owned())
+            .text("description", description.to_owned())
+            .part("file", file);
+        let response = self.request(Method::POST, &path).multipart(form).send().await?;
+        let status = response.status();
+        self.limiter.update(&route, response.headers());
+        let bytes = response.bytes().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(error_from_body(status, &bytes));
+        }
+        serde_json::from_slice(&bytes).map_err(|source| Error::Decode { status, source })
+    }
+
+    pub async fn edit_sticker(&self, guild_id: Snowflake, sticker_id: Snowflake, name: &str, description: &str, tags: &str) -> Result<()> {
+        self.request_json(
+            Method::PATCH,
+            &format!("/guilds/{guild_id}/stickers/{sticker_id}"),
+            Some(&json!({ "name": name, "description": description, "tags": tags })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_sticker(&self, guild_id: Snowflake, sticker_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/guilds/{guild_id}/stickers/{sticker_id}"), None)
+            .await?;
+        Ok(())
+    }
+
     // -- polls -----------------------------------------------------------
 
     /// Votes in a poll: these answers replace any earlier vote, and none

@@ -573,6 +573,16 @@ impl State {
                     events.push(StoreEvent::GuildUpdated(guild_id));
                 }
             }
+            "GUILD_STICKERS_UPDATE" => {
+                if let (Some(guild_id), Ok(stickers)) = (
+                    snowflake(data, "guild_id"),
+                    serde_json::from_value::<Vec<crate::guild::Sticker>>(data["stickers"].clone()),
+                ) && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    guild.stickers = stickers;
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                }
+            }
             "PRESENCE_UPDATE" => {
                 if let Some(user) = data.get("user")
                     && user.get("username").is_some()
@@ -1035,6 +1045,11 @@ impl State {
             && let Ok(emojis) = serde_json::from_value::<Vec<Emoji>>(emojis.clone())
         {
             guild.emojis = emojis;
+        }
+        if let Some(stickers) = data.get("stickers")
+            && let Ok(stickers) = serde_json::from_value::<Vec<crate::guild::Sticker>>(stickers.clone())
+        {
+            guild.stickers = stickers;
         }
         events.push(StoreEvent::GuildUpdated(id));
     }

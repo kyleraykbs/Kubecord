@@ -13,6 +13,7 @@ mod idle;
 mod forward;
 mod polls;
 mod safety;
+mod stickers;
 mod voice_message;
 mod search;
 mod components;

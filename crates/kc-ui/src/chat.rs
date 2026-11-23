@@ -1255,6 +1255,18 @@ impl AppState {
         text_label.set_xalign(0.0);
         text_label.set_wrap(true);
         text_label.set_hexpand(true);
+        // Someone else joined: a button to greet them with a wave.
+        if message.kind == 7
+            && state.my_id() != Some(message.author.id)
+            && state.can_send(message.channel_id)
+        {
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            column.set_hexpand(true);
+            column.append(&text_label);
+            column.append(&self.wave_button(message));
+            row.append(&column);
+            return row;
+        }
         row.append(&text_label);
         row
     }

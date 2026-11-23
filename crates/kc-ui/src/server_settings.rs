@@ -17,6 +17,8 @@ use kc_state::permissions::{self, GROUPS};
 use kc_state::time::{iso_to_unix_millis, unix_millis_now};
 use kc_state::{ChannelType, Role, StoreEvent};
 
+mod expressions;
+
 use crate::moderation::color_dot;
 use crate::shell::AppState;
 use crate::video_setup::spawn_local;
@@ -82,6 +84,18 @@ const PAGES: &[(&str, &str, &str, u64)] = &[
         "Invites",
         "mail-send-symbolic",
         permissions::MANAGE_GUILD,
+    ),
+    (
+        "emoji",
+        "Emoji",
+        "face-smile-symbolic",
+        permissions::MANAGE_GUILD_EXPRESSIONS | permissions::CREATE_GUILD_EXPRESSIONS,
+    ),
+    (
+        "stickers",
+        "Stickers",
+        "image-x-generic-symbolic",
+        permissions::MANAGE_GUILD_EXPRESSIONS | permissions::CREATE_GUILD_EXPRESSIONS,
     ),
     (
         "bans",
@@ -267,6 +281,8 @@ pub(crate) struct Panel {
     bans_loaded: RefCell<Vec<kc_http::Ban>>,
     invites: gtk::Box,
     audit: gtk::Box,
+    emojis: gtk::Box,
+    stickers: gtk::Box,
 }
 
 impl Panel {
@@ -388,6 +404,8 @@ impl AppState {
             bans_loaded: RefCell::new(Vec::new()),
             invites: gtk::Box::new(gtk::Orientation::Vertical, 0),
             audit: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            emojis: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            stickers: gtk::Box::new(gtk::Orientation::Vertical, 0),
         });
 
         let pages = gtk::Stack::new();
@@ -399,6 +417,8 @@ impl AppState {
                 "members" => self.members_page(&panel),
                 "invites" => self.invites_page(&panel),
                 "bans" => self.bans_page(&panel),
+                "emoji" => self.emoji_page(&panel),
+                "stickers" => self.stickers_page(&panel),
                 _ => self.audit_page(&panel),
             };
             pages.add_named(&page_scroll(&content), Some(id));
@@ -504,6 +524,8 @@ impl AppState {
                         StoreEvent::GuildUpdated(id) if id == guild => {
                             app.fill_roles(&panel);
                             app.fill_members(&panel);
+                            app.fill_emojis(&panel);
+                            app.fill_stickers(&panel);
                         }
                         StoreEvent::GuildMembersUpdated(id) if id == guild => {
                             app.fill_members(&panel)
