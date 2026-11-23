@@ -1384,6 +1384,18 @@ impl AppState {
                     // Animate from the original GIF, exactly like the picker tiles
                     // (which do animate). A single-frame GIF shows as a still.
                     app.images.set_animated_picture(&picture, &animate_url);
+                } else if gif_video.is_some() {
+                    // The still is only a placeholder: when the video (often
+                    // cached) is quicker, the still must not cover it, which
+                    // left the GIF frozen until clicked.
+                    let weak = picture.downgrade();
+                    app.images.load(&still, move |texture| {
+                        if let Some(picture) = weak.upgrade()
+                            && picture.paintable().is_none()
+                        {
+                            picture.set_paintable(Some(texture));
+                        }
+                    });
                 } else {
                     app.images.set_picture(&picture, &still);
                 }
