@@ -92,6 +92,9 @@
 //!   requests, and one opened.
 //! - `stage`: a live stage; `soundboard`: in a call with the soundboard open.
 //! - `embed`: your own message with a link preview (hover for its ×).
+//! - `gif-rebuild`: two GIFs, their rows redrawn while a re-check waits,
+//!   then a third; with `RUST_LOG=kc_ui::animation=debug` every player
+//!   should log "gif player started".
 //! - `history-top`: scrolled to the top once; one page should load and the
 //!   view stay put (rows and scroll position printed).
 //!
@@ -2097,6 +2100,34 @@ impl AppState {
                     let adjustment = app.messages_scroll.vadjustment();
                     eprintln!("demo: scrolling up from {}", adjustment.value());
                     adjustment.set_value(adjustment.value() - 1200.0);
+                });
+            }
+            "gif-rebuild" => {
+                // Two GIFs; once playing, a re-check is asked for and the row
+                // it would wait on is redrawn at once; then a third GIF
+                // arrives and the view scrolls. All must keep playing.
+                store.apply("MESSAGE_CREATE", &gif_message(id_at(120_000, 41), ADA));
+                store.apply("MESSAGE_CREATE", &gif_message(id_at(60_000, 42), GRACE));
+                self.open_channel(general.clone());
+                let (app, store) = (self.clone(), store.clone());
+                let channel = general.id;
+                glib::timeout_add_local_once(Duration::from_millis(4000), move || {
+                    eprintln!("gif-rebuild: redraw while a re-check waits");
+                    let adjustment = app.messages_scroll.vadjustment();
+                    adjustment.set_value(adjustment.value() - 1.0);
+                    app.message_updated(channel, Snowflake::new(id_at(60_000, 42)));
+                    app.message_updated(channel, Snowflake::new(id_at(120_000, 41)));
+                    let (app, store) = (app.clone(), store.clone());
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                        eprintln!("gif-rebuild: third gif");
+                        store.apply("MESSAGE_CREATE", &gif_message(id_at(0, 43), 4));
+                        let app = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                            eprintln!("gif-rebuild: scroll");
+                            let adjustment = app.messages_scroll.vadjustment();
+                            adjustment.set_value(adjustment.upper() - adjustment.page_size());
+                        });
+                    });
                 });
             }
             "gif" | "gif-viewer" => {

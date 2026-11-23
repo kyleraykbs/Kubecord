@@ -212,12 +212,23 @@ fn queue_update(app: &Weak<AppState>) {
     };
     if app.window.is_mapped() {
         let weak = Rc::downgrade(&app);
+        let on_frame = run.clone();
         app.window.add_tick_callback(move |_, _| {
             if let Some(app) = weak.upgrade() {
                 app.players_update_queued.set(false);
             }
-            glib::idle_add_local_once(run.clone());
+            glib::idle_add_local_once(on_frame.clone());
             glib::ControlFlow::Break
+        });
+        // A window that draws no frame (minimised, hidden) would otherwise
+        // leave this queued for good, and no GIF would start again.
+        let weak = Rc::downgrade(&app);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+            if let Some(app) = weak.upgrade()
+                && app.players_update_queued.replace(false)
+            {
+                run();
+            }
         });
     } else {
         let weak = Rc::downgrade(&app);

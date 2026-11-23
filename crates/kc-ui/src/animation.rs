@@ -105,29 +105,35 @@ fn queue_refresh() {
     if QUEUED.replace(true) {
         return;
     }
+    // Measures once, by whichever of the frame or the fallback timer comes
+    // first.
     let measure = || {
         glib::idle_add_local_once(|| {
-            QUEUED.set(false);
-            refresh_all();
+            if QUEUED.replace(false) {
+                refresh_all();
+            }
         });
     };
-    // Any shown GIF's frame clock will do: they share the window's.
-    let shown = PLAYERS.with_borrow(|players| {
+    // The frame of the window a shown GIF is in (a window always draws its
+    // frames; a picture may not -- one not laid out yet, or gone before its
+    // frame, never ticked, which left this queued for good and every GIF
+    // after it frozen until clicked).
+    let window = PLAYERS.with_borrow(|players| {
         players
             .iter()
             .filter_map(Weak::upgrade)
             .filter_map(|player| player.picture.upgrade())
-            .find(|picture| picture.is_mapped())
+            .filter(|picture| picture.is_mapped())
+            .find_map(|picture| picture.root().and_downcast::<gtk::Window>())
     });
-    match shown {
-        Some(picture) => {
-            picture.add_tick_callback(move |_, _| {
-                measure();
-                glib::ControlFlow::Break
-            });
-        }
-        None => measure(),
+    if let Some(window) = window.filter(|window| window.is_mapped()) {
+        window.add_tick_callback(move |_, _| {
+            measure();
+            glib::ControlFlow::Break
+        });
     }
+    // And in case no frame comes (a hidden or minimised window draws none).
+    glib::timeout_add_local_once(std::time::Duration::from_millis(200), measure);
 }
 
 /// Called when one of the app's windows gains or loses focus; pauses or
