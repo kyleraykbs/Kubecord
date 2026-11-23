@@ -524,6 +524,26 @@ impl AppState {
                     self.open_channel(lounge);
                 }
             }
+            "search" | "search-filters" => {
+                // Search results for typed filters, answered locally; with
+                // `search-filters`, the Filters dialog over them.
+                self.open_channel(general.clone());
+                let results: Vec<kc_state::Message> = ["the cat photo from yesterday", "cats are great", "look at this cat"]
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, text)| {
+                        serde_json::from_value(message(id_at((index as u64 + 1) * 3_600_000, 20), 2 + index as u64 % 2, text)).ok()
+                    })
+                    .collect();
+                let app = self.clone();
+                let filters = mode == "search-filters";
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    app.demo_search("from:ada has:image in:general before:2026-12-01 cats", results);
+                    if filters {
+                        app.show_search_filters();
+                    }
+                });
+            }
             "voice-side-chat" => {
                 // A voice channel with its text chat beside the call.
                 for (index, text) in ["anyone joining?", "in a sec", "my mic is muted, typing here instead", "👍"]

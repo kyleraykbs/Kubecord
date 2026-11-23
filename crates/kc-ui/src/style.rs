@@ -414,6 +414,37 @@ button.kc-link-button:hover {
     opacity: 0.55;
 }
 
+.kc-search-chip {
+    border-radius: 999px;
+    padding: 0 0 0 10px;
+    background-color: alpha(@accent_bg_color, 0.18);
+}
+
+.kc-search-chip button {
+    min-height: 22px;
+    min-width: 22px;
+    padding: 0;
+}
+
+.kc-search-panel .linked button {
+    padding: 4px 6px;
+    min-width: 0;
+}
+
+.kc-search-result {
+    border-radius: 8px;
+    padding: 8px;
+    background-color: alpha(@window_fg_color, 0.04);
+}
+
+.kc-search-result:hover {
+    background-color: alpha(@window_fg_color, 0.08);
+}
+
+.kc-search-channel {
+    font-weight: bold;
+}
+
 .kc-composer {
     border-radius: 10px;
     background-color: alpha(@window_fg_color, 0.06);

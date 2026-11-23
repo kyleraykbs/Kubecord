@@ -77,6 +77,7 @@ impl AppState {
                 self.side_chat_toggle.set_visible(voice_channel);
                 let text_channel = kind.is_text() || (voice_channel && self.side_chat.get());
                 self.search_entry.set_visible(text_channel);
+                self.search_filters_button.set_visible(text_channel);
                 self.pins_button.set_visible(text_channel);
                 self.share_button.set_visible(text_channel);
                 // A call button for DMs and group DMs; reflects whether a
@@ -105,6 +106,10 @@ impl AppState {
                         "call-start-symbolic"
                     });
                 }
+                self.search_entry.set_placeholder_text(Some(&match &guild {
+                    Some(guild) => format!("Search {guild}"),
+                    None => "Search".to_owned(),
+                }));
                 self.set_window_title(&match guild {
                     Some(guild) => format!("{title} — {guild}"),
                     None => title,
@@ -360,14 +365,14 @@ impl AppState {
 
         let Some((rows, counts)) = data.flatten() else {
             self.members_toggle.set_visible(false);
-            self.split.set_show_sidebar(false);
+            self.show_member_side(false);
             return;
         };
         self.members_toggle.set_visible(true);
         self.members_guard.set(true);
         self.members_toggle.set_active(self.show_members.get());
         self.members_guard.set(false);
-        self.split.set_show_sidebar(self.show_members.get());
+        self.show_member_side(self.show_members.get());
         if !self.show_members.get() {
             return;
         }

@@ -612,14 +612,19 @@ impl AppState {
             glib::ControlFlow::Continue
         });
 
-        // Search runs on the server when the entry is submitted.
+        // Search runs on the server when the entry is submitted; clearing
+        // the box closes the results.
         let app = self.clone();
-        self.search_entry.connect_activate(move |entry| {
-            let query = entry.text().trim().to_owned();
-            if !query.is_empty() {
-                app.run_search(query);
+        self.search_entry.connect_activate(move |_| app.search_from_entry());
+        let app = self.clone();
+        self.search_entry.connect_stop_search(move |entry| {
+            entry.set_text("");
+            if app.search_open() {
+                app.close_search();
             }
         });
+        let app = self.clone();
+        self.search_filters_button.connect_clicked(move |_| app.show_search_filters());
         let app = self.clone();
         self.pins_button.connect_clicked(move |_| app.show_pins());
         let app = self.clone();

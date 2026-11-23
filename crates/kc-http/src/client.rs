@@ -1296,7 +1296,10 @@ impl HttpClient {
         sort: crate::search::Sort,
         offset: u32,
     ) -> Result<SearchPage> {
-        let value = self.get(&params.path(scope, tab, sort, offset, true)).await?;
+        // NSFW channels only for someone who has agreed to see them in that
+        // server, which Kubecord does not track: left out, as the web client
+        // does until then.
+        let value = self.get(&params.path(scope, tab, sort, offset, false)).await?;
         let Some(groups) = value["messages"].as_array() else {
             return Ok(SearchPage {
                 total: 0,

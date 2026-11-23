@@ -310,6 +310,7 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
 - **Stream details**: debug info for streams you share *and* streams you watch.
 - **Fine-tuning**: MANY stream settings, so you're in full control.
 - **DM and group calls**: including showing when the other side is being rung.
+- **Side chat**: a voice channel's own text chat beside its call.
 - **Voice processing**: noise suppression, echo cancellation, automatic gain and
   input sensitivity.
 
@@ -317,6 +318,10 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
 
 ### Chat
 - **Messages**: send, edit, reply, react and pin.
+- **Search**: a results panel beside the chat, across the whole server or a
+  DM, with every filter Discord has (from, mentions, has, dates, channel,
+  pinned, author type, links and files), its tabs and sort orders. Type
+  filters (`from:ada has:image`) or pick them in the Filters dialog.
 - **Long messages**: a counter shows the length limit, and anything longer is
   sent as several messages automatically.
 - **Media**: images, videos and GIFs with a zooming viewer; right-click any of

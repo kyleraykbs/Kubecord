@@ -76,6 +76,8 @@ pub(crate) struct AppState {
     pub channel_title_label: gtk::Label,
     pub channel_topic_label: gtk::Label,
     pub search_entry: gtk::SearchEntry,
+    /// Opens the search filters.
+    pub search_filters_button: gtk::Button,
     pub pins_button: gtk::Button,
     /// Share mode: choose messages to export as a picture or text.
     pub share_button: gtk::Button,
@@ -87,6 +89,10 @@ pub(crate) struct AppState {
     // Content.
     pub content_stack: gtk::Stack,
     pub split: adw::OverlaySplitView,
+    /// The side of the chat: the member list, or search results.
+    pub sidebar_stack: gtk::Stack,
+    /// The search results panel, once a search has run.
+    pub search: RefCell<Option<Rc<crate::search::SearchPanel>>>,
     pub messages_scroll: gtk::ScrolledWindow,
     pub message_stack: gtk::Stack,
     /// The call (tiles) above the chat; the divider resizes it.
@@ -439,6 +445,10 @@ impl AppState {
         search_entry.set_placeholder_text(Some("Search"));
         search_entry.set_width_request(180);
         search_entry.set_valign(gtk::Align::Center);
+        let search_filters_button = icon_button(
+            first_icon(&["funnel-symbolic", "filter-symbolic", "view-more-horizontal-symbolic", "view-more-symbolic"]),
+            "Search Filters",
+        );
 
         let pins_button = icon_button("view-pin-symbolic", "Pinned Messages");
         let share_button = icon_button(
@@ -467,6 +477,7 @@ impl AppState {
         content_header.set_show_start_title_buttons(false);
         content_header.pack_start(&title_box);
         content_header.pack_end(&search_entry);
+        content_header.pack_end(&search_filters_button);
         content_header.pack_end(&members_toggle);
         content_header.pack_end(&share_button);
         content_header.pack_end(&pins_button);
@@ -741,7 +752,10 @@ impl AppState {
         let split = adw::OverlaySplitView::new();
         split.set_sidebar_position(gtk::PackType::End);
         split.set_content(Some(&chat_column));
-        split.set_sidebar(Some(&members_panel));
+        let sidebar_stack = gtk::Stack::new();
+        sidebar_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        sidebar_stack.add_named(&members_panel, Some("members"));
+        split.set_sidebar(Some(&sidebar_stack));
         split.set_min_sidebar_width(220.0);
         split.set_max_sidebar_width(260.0);
         split.set_show_sidebar(false);
@@ -842,6 +856,7 @@ impl AppState {
             channel_title_label,
             channel_topic_label,
             search_entry,
+            search_filters_button,
             pins_button,
             share_button,
             members_toggle,
@@ -849,6 +864,8 @@ impl AppState {
             side_chat_toggle,
             content_stack,
             split,
+            sidebar_stack,
+            search: RefCell::new(None),
             messages_scroll,
             message_stack: message_stack.clone(),
             call_split,

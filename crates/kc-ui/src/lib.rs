@@ -11,6 +11,7 @@ mod chat_select;
 mod code;
 mod idle;
 mod safety;
+mod search;
 mod components;
 mod composer;
 mod content;

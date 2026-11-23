@@ -1215,7 +1215,7 @@ impl AppState {
         row
     }
 
-    fn message_body(
+    pub(crate) fn message_body(
         self: &Rc<Self>,
         message: &Message,
         headed: bool,
@@ -2286,48 +2286,6 @@ impl AppState {
                     messages,
                 ),
                 Err(error) => app.set_status(&format!("Could not load pins: {error}")),
-            },
-        );
-    }
-
-    /// Runs a server-side search for the open channel.
-    pub(crate) fn run_search(self: &Rc<Self>, query: String) {
-        let Some(channel_id) = self.chat.borrow().channel else {
-            return;
-        };
-        let Some((_, http, store)) = self.active() else {
-            return;
-        };
-        let guild = store.read(|state| {
-            state
-                .channels
-                .get(&channel_id)
-                .and_then(|channel| channel.guild_id)
-        });
-        let title = format!("Results for “{query}”");
-        let scope = match guild {
-            Some(guild) => kc_http::search::Scope::Guild(guild),
-            None => kc_http::search::Scope::Channel(channel_id),
-        };
-        let params = kc_http::search::SearchParams {
-            content: query,
-            channels: guild.map(|_| channel_id).into_iter().collect(),
-            ..Default::default()
-        };
-        self.spawn(
-            async move {
-                http.search(scope, &params, kc_http::search::Tab::Messages, kc_http::search::Sort::Newest, 0)
-                    .await
-            },
-            move |app, result| match result {
-                Ok(page) if page.indexing => {
-                    app.set_status("Discord is still indexing this channel; try again shortly")
-                }
-                Ok(page) => {
-                    let title = format!("{title} ({})", page.total);
-                    app.show_message_dialog(&title, "No messages matched.", page.messages)
-                }
-                Err(error) => app.set_status(&format!("Search failed: {error}")),
             },
         );
     }
