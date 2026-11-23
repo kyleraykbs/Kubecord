@@ -524,6 +524,35 @@ impl AppState {
                     self.open_channel(lounge);
                 }
             }
+            "polls" | "poll-create" => {
+                // A poll waiting for a vote, one voted in, one over; with
+                // `poll-create`, the Create Poll dialog.
+                let answers = json!([
+                    {"answer_id": 1, "poll_media": {"text": "Pizza", "emoji": {"name": "🍕"}}},
+                    {"answer_id": 2, "poll_media": {"text": "Sushi", "emoji": {"name": "🍣"}}},
+                    {"answer_id": 3, "poll_media": {"text": "Tacos"}}
+                ]);
+                let later = kc_state::time::millis_to_iso(unix_millis_now() + 5 * 3_600_000);
+                let polls = [
+                    ("Lunch today?", json!(null), later.clone(), false),
+                    ("Which games tonight?", json!({"is_finalized": false, "answer_counts": [
+                        {"id": 1, "count": 4, "me_voted": true}, {"id": 2, "count": 2, "me_voted": false}, {"id": 3, "count": 1, "me_voted": false}]}), later, true),
+                    ("Best pizza topping?", json!({"is_finalized": true, "answer_counts": [
+                        {"id": 1, "count": 2, "me_voted": false}, {"id": 2, "count": 7, "me_voted": false}, {"id": 3, "count": 3, "me_voted": false}]}),
+                        kc_state::time::millis_to_iso(unix_millis_now() - 3_600_000), false),
+                ];
+                for (index, (question, results, expiry, multi)) in polls.into_iter().enumerate() {
+                    let mut posted = message(id_at((3 - index as u64) * 60_000, 30), 2 + index as u64, "");
+                    posted["poll"] = json!({"question": {"text": question}, "answers": answers, "expiry": expiry,
+                        "allow_multiselect": multi, "layout_type": 1, "results": results});
+                    store.apply("MESSAGE_CREATE", &posted);
+                }
+                self.open_channel(general.clone());
+                if mode == "poll-create" {
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(600), move || app.show_create_poll());
+                }
+            }
             "search-complete" => {
                 // Typing KUBECORD_SEARCH_TYPE into the search box: its
                 // autocomplete, saved as <screenshot>.menu.png.

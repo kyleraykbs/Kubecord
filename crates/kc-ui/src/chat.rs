@@ -1473,6 +1473,9 @@ impl AppState {
         if let Some(components) = self.components_widget(message, guild, state) {
             column.append(&components);
         }
+        if let Some(poll) = &message.poll {
+            column.append(&self.poll_widget(message, poll, state));
+        }
         for sticker in &message.sticker_items {
             column.append(&self.sticker_widget(sticker));
         }

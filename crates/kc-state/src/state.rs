@@ -464,6 +464,28 @@ impl State {
                     events.extend(self.apply("VOICE_STATE_UPDATE", &left));
                 }
             }
+            // A vote in a poll, by anyone (ours too, echoed back).
+            "MESSAGE_POLL_VOTE_ADD" | "MESSAGE_POLL_VOTE_REMOVE" => {
+                let added = name.ends_with("ADD");
+                if let (Some(channel_id), Some(message_id), Some(user_id), Some(answer)) = (
+                    snowflake(data, "channel_id"),
+                    snowflake(data, "message_id"),
+                    snowflake(data, "user_id"),
+                    data["answer_id"].as_u64(),
+                ) {
+                    let mine = self.me.as_ref().map(|me| me.id) == Some(user_id);
+                    if let Some(buffer) = self.messages.get_mut(&channel_id) {
+                        let updated = buffer.update_with(message_id, |message| {
+                            if let Some(poll) = &mut message.poll {
+                                poll.apply_vote(answer as u32, added, mine);
+                            }
+                        });
+                        if updated {
+                            events.push(StoreEvent::MessageUpdated { channel_id, message_id });
+                        }
+                    }
+                }
+            }
             "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" => {
                 self.reaction_clear(data, &mut events)
             }
@@ -1988,6 +2010,43 @@ mod tests {
         store.read(|state| {
             let messages = state.messages(Snowflake(10));
             assert!(messages[0].reactions.is_empty());
+        });
+    }
+
+    #[test]
+    fn poll_votes_are_counted_and_ours_once() {
+        let store = Store::new();
+        store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [], "guilds": [],
+            "private_channels": [], "relationships": [], "read_state": {"entries": []}, "user_guild_settings": {"entries": []}}));
+        let mut posted = message(100, 10, "");
+        posted["poll"] = json!({"question": {"text": "Lunch?"}, "answers": [
+            {"answer_id": 1, "poll_media": {"text": "Pizza"}},
+            {"answer_id": 2, "poll_media": {"text": "Sushi", "emoji": {"name": "🍣"}}}
+        ], "expiry": "2099-01-01T00:00:00+00:00", "allow_multiselect": false, "layout_type": 1});
+        store.apply("MESSAGE_CREATE", &posted);
+        let vote = |user: &str, answer: u32, added: bool| {
+            store.apply(
+                if added { "MESSAGE_POLL_VOTE_ADD" } else { "MESSAGE_POLL_VOTE_REMOVE" },
+                &json!({"channel_id": "10", "message_id": "100", "user_id": user, "answer_id": answer}),
+            );
+        };
+        vote("2", 1, true);
+        vote("3", 1, true);
+        vote("1", 2, true);
+        vote("1", 2, true); // echoed twice: counted once
+        store.read(|state| {
+            let poll = state.messages(Snowflake(10))[0].poll.clone().unwrap();
+            assert_eq!((poll.count(1), poll.count(2), poll.total()), (2, 1, 3));
+            assert!(poll.voted(2) && !poll.voted(1) && poll.has_voted());
+            assert_eq!(poll.answers[1].poll_media.emoji.as_ref().and_then(|e| e.name.clone()).as_deref(), Some("🍣"));
+            assert!(!poll.is_closed(0));
+        });
+        vote("1", 2, false);
+        vote("3", 1, false);
+        store.read(|state| {
+            let poll = state.messages(Snowflake(10))[0].poll.clone().unwrap();
+            assert_eq!((poll.count(1), poll.count(2)), (1, 0));
+            assert!(!poll.has_voted());
         });
     }
 

@@ -161,7 +161,7 @@ pub struct Embed {
     pub timestamp: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReactionEmoji {
     #[serde(default)]
     pub id: Option<Snowflake>,
@@ -252,6 +252,9 @@ pub struct Message {
     /// For a call message: who joined, and when it ended.
     #[serde(default)]
     pub call: Option<MessageCall>,
+    /// A poll the message carries.
+    #[serde(default)]
+    pub poll: Option<Poll>,
     /// Deleted on Discord, and shown from the message log.
     #[serde(skip)]
     pub deleted: bool,
@@ -271,6 +274,124 @@ pub struct MessageEdit {
     /// When this version was written (the message's time, or an earlier
     /// edit's).
     pub at: String,
+}
+
+/// A poll's question or one of its answers: text, an emoji, or both.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollMedia {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub emoji: Option<ReactionEmoji>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollAnswer {
+    pub answer_id: u32,
+    #[serde(default)]
+    pub poll_media: PollMedia,
+}
+
+/// One answer's votes, and whether this account is among them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollCount {
+    pub id: u32,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub me_voted: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollResults {
+    /// The poll has ended and these are the final counts.
+    #[serde(default)]
+    pub is_finalized: bool,
+    #[serde(default)]
+    pub answer_counts: Vec<PollCount>,
+}
+
+/// A poll on a message.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Poll {
+    #[serde(default)]
+    pub question: PollMedia,
+    #[serde(default)]
+    pub answers: Vec<PollAnswer>,
+    /// When voting ends (ISO 8601); none for a poll that never ends.
+    #[serde(default)]
+    pub expiry: Option<String>,
+    #[serde(default)]
+    pub allow_multiselect: bool,
+    #[serde(default)]
+    pub layout_type: u8,
+    #[serde(default)]
+    pub results: Option<PollResults>,
+}
+
+impl Poll {
+    /// An answer's votes.
+    pub fn count(&self, answer: u32) -> u32 {
+        self.results
+            .as_ref()
+            .and_then(|results| results.answer_counts.iter().find(|count| count.id == answer))
+            .map_or(0, |count| count.count)
+    }
+
+    /// Whether this account voted for an answer.
+    pub fn voted(&self, answer: u32) -> bool {
+        self.results
+            .as_ref()
+            .and_then(|results| results.answer_counts.iter().find(|count| count.id == answer))
+            .is_some_and(|count| count.me_voted)
+    }
+
+    /// Whether this account has voted at all.
+    pub fn has_voted(&self) -> bool {
+        self.answers.iter().any(|answer| self.voted(answer.answer_id))
+    }
+
+    /// All votes, counting each answer's (a voter of several answers counts
+    /// once for each).
+    pub fn total(&self) -> u32 {
+        self.answers.iter().map(|answer| self.count(answer.answer_id)).sum()
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.results.as_ref().is_some_and(|results| results.is_finalized)
+    }
+
+    /// Ended: finalized, or past its expiry at `now_ms`.
+    pub fn is_closed(&self, now_ms: u64) -> bool {
+        self.is_finalized()
+            || self
+                .expiry
+                .as_deref()
+                .and_then(crate::time::iso_to_unix_millis)
+                .is_some_and(|end| end <= now_ms)
+    }
+
+    /// A vote for `answer` added (or taken back), by this account or not.
+    pub fn apply_vote(&mut self, answer: u32, added: bool, mine: bool) {
+        let results = self.results.get_or_insert_with(PollResults::default);
+        let index = match results.answer_counts.iter().position(|count| count.id == answer) {
+            Some(index) => index,
+            None => {
+                results.answer_counts.push(PollCount { id: answer, ..PollCount::default() });
+                results.answer_counts.len() - 1
+            }
+        };
+        let count = &mut results.answer_counts[index];
+        if mine {
+            // Our own vote may already be counted (shown before Discord's
+            // echo arrives).
+            if count.me_voted == added {
+                return;
+            }
+            count.me_voted = added;
+        }
+        count.count = if added { count.count + 1 } else { count.count.saturating_sub(1) };
+    }
 }
 
 /// A DM call a message records.
@@ -377,6 +498,7 @@ impl Message {
             interaction_metadata: None,
             interaction: None,
             call: None,
+            poll: None,
             deleted: false,
             edits: Vec::new(),
             send_state: SendState::Sending,

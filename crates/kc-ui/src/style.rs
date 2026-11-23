@@ -427,6 +427,31 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-poll {
+    padding: 12px;
+    border-radius: 10px;
+    background-color: alpha(@window_fg_color, 0.05);
+}
+
+.kc-poll .kc-poll-answer {
+    padding: 8px 10px;
+    border-radius: 8px;
+}
+
+.kc-poll .kc-poll-answer:disabled {
+    opacity: 1;
+}
+
+.kc-poll progressbar trough,
+.kc-poll progressbar progress {
+    min-height: 6px;
+    border-radius: 3px;
+}
+
+.kc-poll progressbar.kc-poll-winner progress {
+    background-color: @success_bg_color;
+}
+
 .kc-search-chip {
     border-radius: 999px;
     padding: 0 0 0 10px;

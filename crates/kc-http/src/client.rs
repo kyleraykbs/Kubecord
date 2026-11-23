@@ -27,6 +27,45 @@ pub struct Outgoing {
     pub nonce: Option<String>,
     /// `@silent`: deliver without a notification.
     pub silent: bool,
+    /// A poll to send (see [`NewPoll::body`]).
+    pub poll: Option<Value>,
+}
+
+/// A poll to create: a question, two to ten answers, how long it runs and
+/// whether several answers may be chosen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewPoll {
+    pub question: String,
+    /// Each answer's text and, optionally, a Unicode emoji.
+    pub answers: Vec<(String, Option<String>)>,
+    /// How long voting runs, in hours (Discord allows 1 to 768).
+    pub hours: u32,
+    pub allow_multiselect: bool,
+}
+
+impl NewPoll {
+    /// The message's `poll` field, as the web client sends it.
+    pub fn body(&self) -> Value {
+        let answers: Vec<Value> = self
+            .answers
+            .iter()
+            .filter(|(text, _)| !text.trim().is_empty())
+            .map(|(text, emoji)| {
+                let mut media = json!({ "text": text.trim() });
+                if let Some(emoji) = emoji.as_deref().filter(|emoji| !emoji.is_empty()) {
+                    media["emoji"] = json!({ "name": emoji });
+                }
+                json!({ "poll_media": media })
+            })
+            .collect();
+        json!({
+            "question": { "text": self.question.trim() },
+            "answers": answers,
+            "allow_multiselect": self.allow_multiselect,
+            "duration": self.hours.clamp(1, 768),
+            "layout_type": 1,
+        })
+    }
 }
 
 impl Default for Outgoing {
@@ -39,6 +78,7 @@ impl Default for Outgoing {
             sticker_ids: Vec::new(),
             nonce: None,
             silent: false,
+            poll: None,
         }
     }
 }
@@ -1255,6 +1295,9 @@ impl HttpClient {
         if !message.sticker_ids.is_empty() {
             body["sticker_ids"] = json!(message.sticker_ids);
         }
+        if let Some(poll) = &message.poll {
+            body["poll"] = poll.clone();
+        }
         let value = self
             .request_json_in(
                 Method::POST,
@@ -1264,6 +1307,28 @@ impl HttpClient {
             )
             .await?;
         Self::parse(value, StatusCode::OK)
+    }
+
+    // -- polls -----------------------------------------------------------
+
+    /// Votes in a poll: these answers replace any earlier vote, and none
+    /// takes the vote back.
+    pub async fn vote_poll(&self, channel_id: Snowflake, message_id: Snowflake, answers: &[u32]) -> Result<()> {
+        let ids: Vec<String> = answers.iter().map(u32::to_string).collect();
+        self.request_json(
+            Method::PUT,
+            &format!("/channels/{channel_id}/polls/{message_id}/answers/@me"),
+            Some(&json!({ "answer_ids": ids })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Ends a poll now (its author only).
+    pub async fn end_poll(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
+        self.post(&format!("/channels/{channel_id}/polls/{message_id}/expire"), json!({}))
+            .await?;
+        Ok(())
     }
 
     // -- pins and search -------------------------------------------------

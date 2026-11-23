@@ -341,9 +341,9 @@ impl AppState {
             toggle.set_label(if toggle.is_active() { "@ ON" } else { "@ OFF" });
         });
 
+        // The "+" menu: files, a poll (and more to come).
         let app = self.clone();
-        self.attach_button
-            .connect_clicked(move |_| app.choose_files());
+        self.attach_button.connect_clicked(move |button| app.show_plus_menu(button));
         let app = self.clone();
         self.send_button.connect_clicked(move |_| {
             app.send_current();
@@ -648,6 +648,44 @@ impl AppState {
 
     /// Updates the composer for the selected channel: placeholder text,
     /// whether sending is allowed, and the reply/edit bar.
+    /// The message box's "+" menu.
+    fn show_plus_menu(self: &Rc<Self>, button: &gtk::Button) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(button);
+        popover.set_position(gtk::PositionType::Top);
+        popover.set_has_arrow(false);
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        items.add_css_class("kc-menu");
+        items.set_width_request(200);
+        let add = |icon: &str, text: &str, enabled: bool, action: Box<dyn Fn(&Rc<AppState>)>| {
+            let item = crate::menu::menu_item(text, false);
+            if let Some(label) = item.child() {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                row.append(&gtk::Image::from_icon_name(icon));
+                item.set_child(Some(&row));
+                row.append(&label);
+            }
+            item.set_sensitive(enabled);
+            let app = self.clone();
+            let menu = popover.clone();
+            item.connect_clicked(move |_| {
+                menu.popdown();
+                action(&app);
+            });
+            items.append(&item);
+        };
+        add("document-open-symbolic", "Upload a File", true, Box::new(|app| app.choose_files()));
+        add(
+            crate::widgets::first_icon(&["view-list-bullet-symbolic", "view-list-symbolic"]),
+            "Create Poll",
+            self.can_make_polls(),
+            Box::new(|app| app.show_create_poll()),
+        );
+        popover.set_child(Some(&items));
+        popover.connect_closed(|popover| popover.unparent());
+        popover.popup();
+    }
+
     pub(crate) fn render_composer(self: &Rc<Self>) {
         // The right channel's draft in the box (when the channel changed).
         self.sync_draft();
