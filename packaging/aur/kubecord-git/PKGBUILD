@@ -2,7 +2,7 @@
 pkgname=kubecord-git
 _pkgname=kubecord
 _appid=io.github.kyleraykbs.Kubecord
-pkgver=0.2.1
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='A native Discord client written in Rust with GTK4 and libadwaita'
 arch=('x86_64' 'aarch64')

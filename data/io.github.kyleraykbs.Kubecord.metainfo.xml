@@ -89,6 +89,33 @@
   </keywords>
 
   <releases>
+    <release version="1.0.0" date="2026-11-23">
+      <description>
+        <p>New:</p>
+        <ul>
+          <li>Polls: vote, see results, end your own and create them</li>
+          <li>Forward messages to up to five DMs or channels</li>
+          <li>Voice messages: play them with their waveform, and record your own</li>
+          <li>Discord's animated stickers, a sticker picker, and "Wave to say hi" on join messages</li>
+          <li>An inbox of recent mentions, filtered by server and notifications</li>
+          <li>Message requests: accept or ignore DMs from people you haven't accepted</li>
+          <li>Stage channels: speakers, audience, raising your hand, and moderator controls</li>
+          <li>The soundboard: play Discord's and your servers' sounds in calls</li>
+          <li>Upload a server's emoji, stickers and sounds</li>
+          <li>Community servers: create one, or turn an existing server into one</li>
+          <li>Transfer a server's ownership, or delete it, with Discord's two-factor prompt</li>
+          <li>Remove the link previews from your own messages</li>
+          <li>Search: a results panel with every filter Discord has, and autocomplete</li>
+          <li>A voice channel's own chat beside its call</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Zooming an image glides into the point under the pointer</li>
+          <li>GIFs no longer sit frozen until clicked</li>
+          <li>Voting in a poll, or scrolling to the top of a channel, leaves the chat where it was</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-11-23">
       <description>
         <p>Safer to use:</p>

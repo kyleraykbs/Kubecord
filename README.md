@@ -337,13 +337,14 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
 - **Media**: images, videos and GIFs with a zooming viewer; right-click any of
   them to copy the link, open it in a browser or save it.
 - **Attachments**: embeds and files (with download), and previews of files
-  before you send them.
+  before you send them. Remove the link previews from your own messages.
 - **GIFs**: every kind (MP4, GIF, …), with favorites and search (including
   partial favorites search, matched by link).
 - **Emoji**: server and standard emoji with a picker, `:shortcode:` emoji as
   you type, and optionally Discord's own emoji artwork, even in the message box.
 - **Stickers**: all of them, including Discord's animated stock stickers, sent
-  from a sticker picker; and "Wave to say hi" on join messages.
+  from a sticker picker (your servers' and Discord's on their own tabs); and
+  "Wave to say hi" on join messages.
 - **Spellcheck**: with suggestions on right-click.
 - **Typing indicators**: with an option to hide your own.
 - **Apps and bots**: slash commands with autocomplete and file options;
@@ -355,6 +356,15 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
   export it as a picture or text, to the clipboard or a file.
 - **Admin tools**: everything available, including channel and server settings,
   and uploading a server's emoji, stickers and sounds.
+
+### Servers
+- **Create or join**: make a server (optionally a Community server from the
+  start) or join one by invite.
+- **Community**: turn an existing server into a Community server (or back),
+  with its rules and updates channels made for you if you like.
+- **Owner tools**: transfer ownership to another member, or delete the server.
+- **Two-factor**: when Discord asks for your authenticator code, a backup code
+  or your password before something sensitive, Kubecord asks for it too.
 
 ### Profiles
 - **Your profile**: edit it, including status, notes and bio.

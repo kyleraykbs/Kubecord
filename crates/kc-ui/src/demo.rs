@@ -19,8 +19,9 @@
 //!   list.
 //! - `mod-kick`, `mod-ban`, `mod-timeout`, `mod-roles`: the dialogs.
 //! - `mod-error`: a kick that fails, to see the failure shown.
-//! - `settings-<page>` (`overview`, `roles`, `members`, `invites`, `bans`,
-//!   `audit`), `settings-role` (the role editor), `settings-error` (bans
+//! - `settings-<page>` (`overview`, `roles`, `members`, `invites`, `emoji`,
+//!   `stickers`, `soundboard`, `bans`, `audit`, `community`, `owner`; the
+//!   last two make you the owner), `settings-role` (the role editor), `settings-error` (bans
 //!   page without made-up data: the load fails) and `invite`.
 //! - `viewer`: the image viewer (a default avatar, the only download),
 //!   zoomed in; saved to `<screenshot>.viewer.png`.
@@ -78,6 +79,21 @@
 //!   button, saved to `<screenshot>.popover.png`), `accounts-logout`
 //!   (the Log Out confirmation dialog) and `accounts-done` (the active
 //!   account logged out; prints the resulting session/account/page state).
+//! - `polls` (a poll to vote in, one voted in, one over), `poll-create`
+//!   (the Create Poll dialog), `poll-click` and `poll-vote` (picking an
+//!   answer, then voting and removing the vote, with Discord's echo made up
+//!   here; `KUBECORD_POLL_UP` scrolls that far above the bottom first; the
+//!   scroll positions are printed).
+//! - `forward`: the Forward dialog.
+//! - `voice-messages`: a voice message, and recording one from a test tone.
+//! - `stickers` (a Lottie sticker, a join to wave at), `sticker-picker`
+//!   (packs from `KUBECORD_DEMO_PACKS`, a saved `/sticker-packs` answer).
+//! - `inbox`: the mentions inbox; `requests` and `request-dm`: message
+//!   requests, and one opened.
+//! - `stage`: a live stage; `soundboard`: in a call with the soundboard open.
+//! - `embed`: your own message with a link preview (hover for its ×).
+//! - `history-top`: scrolled to the top once; one page should load and the
+//!   view stay put (rows and scroll position printed).
 //!
 //! You are a Moderator (not the owner): Ada is a Member, Grace an Admin
 //! above you, Linus an Artist and Member. The REST client points at an
