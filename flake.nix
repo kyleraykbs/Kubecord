@@ -80,6 +80,19 @@
             git
           ];
 
+          # rlottie at the commit the Flatpak builds: later snapshots draw
+          # the first half of some of Discord's stickers without their
+          # outlines and faces.
+          rlottie = pkgs.rlottie.overrideAttrs (_: {
+            version = "0.2-unstable-2026-07-03";
+            src = pkgs.fetchFromGitHub {
+              owner = "Samsung";
+              repo = "rlottie";
+              rev = "f487eff2f8086b84ae1c7faa0418abec909e874b";
+              hash = "sha256-/Sv5qX1V6VltJN0+bkKU2utaj8Yw1owb0KjJFWv41Js=";
+            };
+          });
+
           buildInputs = with pkgs; [
             gtk4
             libadwaita
