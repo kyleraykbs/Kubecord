@@ -232,6 +232,16 @@ impl AppState {
         popover.set_position(gtk::PositionType::Top);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         content.set_size_request(400, 440);
+        // Tabs: the servers' own stickers, and Discord's packs.
+        let server_tab = gtk::ToggleButton::with_label("Server");
+        let discord_tab = gtk::ToggleButton::with_label("Discord");
+        discord_tab.set_group(Some(&server_tab));
+        let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        tabs.add_css_class("linked");
+        tabs.set_homogeneous(true);
+        tabs.append(&server_tab);
+        tabs.append(&discord_tab);
+        content.append(&tabs);
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Find stickers"));
         content.append(&search);
@@ -244,11 +254,19 @@ impl AppState {
         popover.set_child(Some(&content));
         popover.connect_closed(|popover| popover.unparent());
 
+        // Opens on the servers' tab when there is anything on it.
+        let has_server = sections.iter().any(|(_, stickers)| stickers.iter().any(|sticker| sticker.available));
+        if has_server {
+            server_tab.set_active(true);
+        } else {
+            discord_tab.set_active(true);
+        }
         let sections = Rc::new(RefCell::new(sections));
         let fill: Rc<dyn Fn()> = {
-            let (app, list, search, sections, popover) =
-                (self.clone(), list.clone(), search.clone(), sections.clone(), popover.clone());
+            let (app, list, search, sections, popover, discord_tab) =
+                (self.clone(), list.clone(), search.clone(), sections.clone(), popover.clone(), discord_tab.clone());
             Rc::new(move || {
+                let discord = discord_tab.is_active();
                 while let Some(child) = list.first_child() {
                     list.remove(&child);
                 }
@@ -260,10 +278,14 @@ impl AppState {
                             || sticker.tags.to_lowercase().contains(&query))
                 };
                 let packs = PACKS.with_borrow(Clone::clone);
-                let mut all: Vec<(String, Vec<Sticker>)> = sections.borrow().clone();
-                if let Some(packs) = &packs {
-                    all.extend(packs.iter().map(|pack| (pack.name.clone(), pack.stickers.clone())));
-                }
+                let all: Vec<(String, Vec<Sticker>)> = if discord {
+                    packs
+                        .iter()
+                        .flat_map(|packs| packs.iter().map(|pack| (pack.name.clone(), pack.stickers.clone())))
+                        .collect()
+                } else {
+                    sections.borrow().clone()
+                };
                 let mut any = false;
                 for (name, stickers) in all {
                     let shown: Vec<&Sticker> = stickers.iter().filter(|sticker| wanted(sticker)).collect();
@@ -296,7 +318,13 @@ impl AppState {
                 }
                 if !any {
                     let empty = label(
-                        if packs.is_none() { "Loading stickers…" } else { "No stickers found" },
+                        if discord && packs.is_none() {
+                            "Loading stickers…"
+                        } else if !discord && query.is_empty() {
+                            "This server has no stickers"
+                        } else {
+                            "No stickers found"
+                        },
                         &["dim-label"],
                     );
                     empty.set_margin_top(24);
@@ -308,6 +336,10 @@ impl AppState {
         {
             let fill = fill.clone();
             search.connect_search_changed(move |_| fill());
+        }
+        {
+            let fill = fill.clone();
+            discord_tab.connect_toggled(move |_| fill());
         }
         if PACKS.with_borrow(Option::is_none)
             && let Some((_, http, _)) = self.active()

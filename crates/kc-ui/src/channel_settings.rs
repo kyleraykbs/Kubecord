@@ -352,8 +352,15 @@ impl AppState {
         dialog.set_default_response(Some("create"));
         dialog.set_close_response("cancel");
         let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        // A stage needs a Community server; Discord says so if not.
-        let kind = gtk::DropDown::from_strings(&["Text", "Voice", "Stage"]);
+        // Stage channels exist only in Community servers.
+        let community = self
+            .with_session(|session| session.store.read(|state| state.guilds.get(&guild).is_some_and(kc_state::Guild::is_community)))
+            .unwrap_or(false);
+        let kind = if community {
+            gtk::DropDown::from_strings(&["Text", "Voice", "Stage"])
+        } else {
+            gtk::DropDown::from_strings(&["Text", "Voice"])
+        };
         let place = {
             let mut names = vec!["No Category".to_owned()];
             names.extend(categories.iter().map(|(_, name)| name.to_uppercase()));
@@ -367,6 +374,15 @@ impl AppState {
         if !category {
             fields.append(&label("Channel Type", &["caption-heading"]));
             fields.append(&kind);
+            if !community {
+                let note = label(
+                    "Stage channels need a Community server (turned on in Discord's server settings).",
+                    &["caption", "dim-label"],
+                );
+                note.set_wrap(true);
+                note.set_xalign(0.0);
+                fields.append(&note);
+            }
             let caption = label("Category", &["caption-heading"]);
             caption.set_margin_top(6);
             fields.append(&caption);

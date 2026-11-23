@@ -1019,6 +1019,9 @@ impl State {
             if guild.soundboard_sounds.is_empty() {
                 guild.soundboard_sounds = existing.soundboard_sounds.clone();
             }
+            if guild.features.is_empty() && data.get("features").is_none() && data.pointer("/properties/features").is_none() {
+                guild.features = existing.features.clone();
+            }
             if guild.stage_instances.is_empty() && data.get("stage_instances").is_none() {
                 guild.stage_instances = existing.stage_instances.clone();
             }
@@ -1080,6 +1083,9 @@ impl State {
         };
         if let Some(name) = data["name"].as_str() {
             guild.name = name.to_owned();
+        }
+        if let Some(features) = data["features"].as_array() {
+            guild.features = features.iter().filter_map(|feature| feature.as_str().map(str::to_owned)).collect();
         }
         if let Some(icon) = data.get("icon") {
             guild.icon = icon.as_str().map(str::to_owned);
@@ -2095,6 +2101,23 @@ mod tests {
             let messages = state.messages(Snowflake(10));
             assert!(messages[0].reactions.is_empty());
         });
+    }
+
+    #[test]
+    fn community_servers_are_known_from_their_features() {
+        let store = Store::new();
+        store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [],
+            "guilds": [
+                {"id": "5", "properties": {"id": "5", "name": "Big", "features": ["COMMUNITY", "NEWS"]}},
+                {"id": "6", "name": "Small", "features": []}
+            ],
+            "private_channels": [], "relationships": [], "read_state": {"entries": []}, "user_guild_settings": {"entries": []}}));
+        store.read(|state| {
+            assert!(state.guilds[&Snowflake(5)].is_community());
+            assert!(!state.guilds[&Snowflake(6)].is_community());
+        });
+        store.apply("GUILD_UPDATE", &json!({"id": "6", "name": "Small", "features": ["COMMUNITY"]}));
+        store.read(|state| assert!(state.guilds[&Snowflake(6)].is_community()));
     }
 
     #[test]

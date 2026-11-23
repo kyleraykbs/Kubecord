@@ -172,6 +172,9 @@ pub struct Guild {
     pub emojis: Vec<Emoji>,
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub stickers: Vec<Sticker>,
+    /// What the server has turned on or been given (`COMMUNITY`, …).
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub features: Vec<String>,
     /// The server's soundboard (arrives on request: gateway op 31).
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub soundboard_sounds: Vec<SoundboardSound>,
@@ -201,6 +204,11 @@ pub struct Guild {
 }
 
 impl Guild {
+    /// A Community server (which stage channels, among others, need).
+    pub fn is_community(&self) -> bool {
+        self.features.iter().any(|feature| feature == "COMMUNITY")
+    }
+
     pub fn icon_url(&self, size: u32) -> Option<String> {
         let hash = self.icon.as_deref()?;
         let ext = if hash.starts_with("a_") { "gif" } else { "png" };
