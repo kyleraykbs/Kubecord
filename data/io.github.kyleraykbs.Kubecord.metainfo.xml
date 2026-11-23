@@ -89,6 +89,25 @@
   </keywords>
 
   <releases>
+    <release version="0.2.1" date="2026-11-23">
+      <description>
+        <p>Safer to use:</p>
+        <ul>
+          <li>Kubecord now connects to Discord the way Chrome and Discord's website do, down to the encryption and the messages it sends</li>
+          <li>Safety limits ask before, then stop, the actions Discord's spam filter bans for: many new DMs, friend requests, server joins or profiles in a short time (they can be turned off in Settings)</li>
+          <li>Profiles are kept for a few minutes instead of fetched again on every click</li>
+        </ul>
+        <p>New:</p>
+        <ul>
+          <li>Go Idle When Away: show as Idle after 10 minutes away (off by default)</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>The message box stays centred with two lines of text</li>
+          <li>Notes show in profiles again</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-23">
       <description>
         <p>New:</p>

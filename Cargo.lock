@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "kc-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "kc-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "kc-http"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "kc-core",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "kc-media"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ashpd",
  "glib",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "kc-probe"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "kc-core",
@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "kc-state"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "kc-core",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "kc-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "kc-voice"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "kubecord"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glib",
  "gtk4",
