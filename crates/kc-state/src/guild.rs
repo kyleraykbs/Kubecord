@@ -64,6 +64,20 @@ pub struct Sticker {
     pub pack_id: Option<Snowflake>,
 }
 
+/// A stage that is live: its channel and topic.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageInstance {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    pub channel_id: Snowflake,
+    #[serde(default)]
+    pub topic: String,
+    /// 1 public, 2 server members only.
+    #[serde(default)]
+    pub privacy_level: u8,
+}
+
 /// One of Discord's sticker packs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StickerPack {
@@ -135,6 +149,9 @@ pub struct Guild {
     pub emojis: Vec<Emoji>,
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub stickers: Vec<Sticker>,
+    /// Stages live now, one per stage channel at most.
+    #[serde(default, deserialize_with = "crate::serde_util::null_default")]
+    pub stage_instances: Vec<StageInstance>,
     #[serde(default)]
     pub banner: Option<String>,
     #[serde(default)]
@@ -199,8 +216,12 @@ pub struct VoiceState {
     pub self_video: bool,
     #[serde(default)]
     pub self_stream: bool,
+    /// In a stage's audience (only speakers are heard).
     #[serde(default)]
     pub suppress: bool,
+    /// In a stage's audience, asking to speak since then.
+    #[serde(default)]
+    pub request_to_speak_timestamp: Option<String>,
 }
 
 impl VoiceState {

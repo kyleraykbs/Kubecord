@@ -1326,6 +1326,65 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    // -- stages ----------------------------------------------------------
+
+    /// Starts a stage in a stage channel, with its topic (server members
+    /// only; `notify` tells the server's members it started).
+    pub async fn start_stage(&self, channel_id: Snowflake, topic: &str, notify: bool) -> Result<()> {
+        self.post(
+            "/stage-instances",
+            json!({ "channel_id": channel_id, "topic": topic, "privacy_level": 2, "send_start_notification": notify }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn edit_stage(&self, channel_id: Snowflake, topic: &str) -> Result<()> {
+        self.request_json(Method::PATCH, &format!("/stage-instances/{channel_id}"), Some(&json!({ "topic": topic })))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn end_stage(&self, channel_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/stage-instances/{channel_id}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// This account on a stage: become a speaker (`suppress: false`) or go
+    /// back to the audience, and raise (`Some(true)`) or lower the hand.
+    pub async fn set_stage_self(
+        &self,
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+        suppress: Option<bool>,
+        hand: Option<bool>,
+    ) -> Result<()> {
+        let mut body = json!({ "channel_id": channel_id });
+        if let Some(suppress) = suppress {
+            body["suppress"] = json!(suppress);
+        }
+        if let Some(hand) = hand {
+            body["request_to_speak_timestamp"] =
+                if hand { json!(kc_state::time::now_iso() + "Z") } else { Value::Null };
+        }
+        self.request_json(Method::PATCH, &format!("/guilds/{guild_id}/voice-states/@me"), Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// A stage moderator inviting someone up to speak (`suppress: false`)
+    /// or moving them to the audience.
+    pub async fn set_stage_speaker(&self, guild_id: Snowflake, user_id: Snowflake, channel_id: Snowflake, suppress: bool) -> Result<()> {
+        self.request_json(
+            Method::PATCH,
+            &format!("/guilds/{guild_id}/voice-states/{user_id}"),
+            Some(&json!({ "channel_id": channel_id, "suppress": suppress })),
+        )
+        .await?;
+        Ok(())
+    }
+
     // -- message requests ------------------------------------------------
 
     /// Accepts a message request: it becomes an ordinary DM.

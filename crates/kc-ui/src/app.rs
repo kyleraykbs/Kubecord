@@ -2175,6 +2175,7 @@ impl AppState {
                 }
             }
             StoreEvent::VoiceStateUpdated { .. } => {
+                self.sync_stage_suppression();
                 self.sounds_voice_changed();
                 self.queue_sidebar();
                 self.render_voice_panel();

@@ -427,6 +427,19 @@ button.kc-link-button:hover {
     opacity: 1;
 }
 
+.kc-stage-header {
+    padding: 14px 16px;
+}
+
+.kc-stage-person {
+    padding: 6px;
+    border-radius: 12px;
+}
+
+.kc-stage-person.kc-speaking avatar {
+    box-shadow: 0 0 0 3px @success_color;
+}
+
 .kc-request-bar {
     padding: 12px 14px;
 }

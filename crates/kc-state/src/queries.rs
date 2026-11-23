@@ -206,6 +206,16 @@ impl State {
         channels
     }
 
+    /// The live stage in a stage channel, if any.
+    pub fn stage_instance(&self, channel_id: Snowflake) -> Option<&crate::guild::StageInstance> {
+        let guild_id = self.channels.get(&channel_id)?.guild_id?;
+        self.guilds
+            .get(&guild_id)?
+            .stage_instances
+            .iter()
+            .find(|stage| stage.channel_id == channel_id)
+    }
+
     /// Pending message requests (or, with `spam`, the ones Discord took for
     /// spam), newest first.
     pub fn message_requests(&self, spam: bool) -> Vec<&Channel> {

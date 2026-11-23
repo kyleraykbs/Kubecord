@@ -352,7 +352,8 @@ impl AppState {
         dialog.set_default_response(Some("create"));
         dialog.set_close_response("cancel");
         let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let kind = gtk::DropDown::from_strings(&["Text", "Voice"]);
+        // A stage needs a Community server; Discord says so if not.
+        let kind = gtk::DropDown::from_strings(&["Text", "Voice", "Stage"]);
         let place = {
             let mut names = vec!["No Category".to_owned()];
             names.extend(categories.iter().map(|(_, name)| name.to_uppercase()));
@@ -397,8 +398,9 @@ impl AppState {
                 return;
             }
             let voice = kind.selected() == 1;
+            let stage = kind.selected() == 2;
             let raw = entry.text().trim().to_owned();
-            let name = if category || voice {
+            let name = if category || voice || stage {
                 raw
             } else {
                 text_channel_name(&raw)
@@ -411,6 +413,8 @@ impl AppState {
             };
             let kind = if category {
                 ChannelType::GuildCategory
+            } else if stage {
+                ChannelType::GuildStageVoice
             } else if voice {
                 ChannelType::GuildVoice
             } else {

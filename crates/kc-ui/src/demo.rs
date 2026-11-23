@@ -659,6 +659,22 @@ impl AppState {
                     }
                 });
             }
+            "stage" => {
+                // A live stage: two speakers, a raised hand, an audience.
+                store.apply("CHANNEL_CREATE", &json!({"id": "790", "type": 13, "guild_id": GUILD.to_string(),
+                    "name": "Town Hall", "position": 40}));
+                store.apply("STAGE_INSTANCE_CREATE", &json!({"id": "791", "guild_id": GUILD.to_string(),
+                    "channel_id": "790", "topic": "Kubecord 1.0 planning", "privacy_level": 2}));
+                for (user, suppress, hand) in [(ADA, false, false), (GRACE, false, false), (4u64, true, true), (ME, true, false)] {
+                    store.apply("VOICE_STATE_UPDATE", &json!({"user_id": user.to_string(), "channel_id": "790",
+                        "guild_id": GUILD.to_string(), "session_id": "x", "suppress": suppress,
+                        "request_to_speak_timestamp": if hand { json!("2026-11-23T04:00:00Z") } else { json!(null) }}));
+                }
+                let stage = store.read(|state| state.channels.get(&Snowflake::new(790)).cloned());
+                if let Some(stage) = stage {
+                    self.voice_channel_clicked(stage);
+                }
+            }
             "polls" | "poll-create" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.

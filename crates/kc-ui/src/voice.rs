@@ -360,6 +360,10 @@ impl AppState {
             _ => CallLayout::WithChat,
         };
         self.set_call_layout(layout);
+        if self.is_stage(channel_id) {
+            self.render_stage_view(channel_id);
+            return;
+        }
         let Some(account) = self.model.borrow().active else {
             return;
         };

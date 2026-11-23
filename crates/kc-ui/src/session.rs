@@ -209,6 +209,8 @@ pub enum VoiceCommand {
     Leave,
     SetMute(bool),
     SetDeafen(bool),
+    /// In a stage's audience (Discord's `suppress`): no microphone.
+    SetSuppressed(bool),
     /// Local playback volume for one participant's voice: `0.0` silences
     /// them, `1.0` is unchanged.
     SetUserVolume {
@@ -337,6 +339,11 @@ pub enum Command {
     SetDeafen {
         account: AccountId,
         deafened: bool,
+    },
+    /// In a stage's audience: keep the microphone off.
+    SetSuppressed {
+        account: AccountId,
+        suppressed: bool,
     },
     SetUserVolume {
         account: AccountId,
@@ -642,6 +649,9 @@ async fn run_command(command: Command, ui: async_channel::Sender<UiEvent>) {
         Command::SetDeafen { account, deafened } => {
             forward_voice(account, VoiceCommand::SetDeafen(deafened), ui).await;
         }
+        Command::SetSuppressed { account, suppressed } => {
+            forward_voice(account, VoiceCommand::SetSuppressed(suppressed), ui).await;
+        }
         Command::SetUserVolume {
             account,
             user_id,
@@ -848,6 +858,7 @@ fn spawn_account(
             connection: None,
             muted: false,
             deafened: false,
+            suppressed: false,
             camera: false,
             generation: 0,
             stream_key: None,
@@ -1144,6 +1155,8 @@ struct VoiceRuntime {
     connection: Option<VoiceConnection>,
     muted: bool,
     deafened: bool,
+    /// In a stage's audience: the microphone stays off.
+    suppressed: bool,
     camera: bool,
     generation: u64,
     stream_key: Option<String>,
@@ -2387,7 +2400,7 @@ async fn maybe_connect(
             };
             if let Some(audio) = &audio {
                 audio.set_deafened(voice.deafened);
-                audio.set_mic_enabled(!voice.muted && !voice.deafened);
+                audio.set_mic_enabled(!voice.muted && !voice.deafened && !voice.suppressed);
                 // Re-apply any per-user volumes chosen before this connect.
                 for (user_id, volume) in &voice.user_volumes {
                     audio.set_volume(user_id.get(), *volume);
@@ -2906,11 +2919,22 @@ async fn apply_voice_command(
                     connection.handle.set_speaking(0);
                 }
                 if let Some(audio) = &connection.audio {
-                    audio.set_mic_enabled(!muted && !voice.deafened);
+                    audio.set_mic_enabled(!muted && !voice.deafened && !voice.suppressed);
                 }
             }
             // Others see the muted icon only from the gateway voice state.
             announce_voice_state(voice);
+        }
+        VoiceCommand::SetSuppressed(suppressed) => {
+            voice.suppressed = suppressed;
+            if let Some(connection) = &voice.connection {
+                if suppressed {
+                    connection.handle.set_speaking(0);
+                }
+                if let Some(audio) = &connection.audio {
+                    audio.set_mic_enabled(!voice.muted && !voice.deafened && !suppressed);
+                }
+            }
         }
         VoiceCommand::SetUserVolume { user_id, volume } => {
             voice.user_volumes.insert(user_id, volume);
@@ -2942,7 +2966,7 @@ async fn apply_voice_command(
             if let Some(connection) = &voice.connection {
                 if let Some(audio) = &connection.audio {
                     audio.set_deafened(deafened);
-                    audio.set_mic_enabled(!voice.muted && !deafened);
+                    audio.set_mic_enabled(!voice.muted && !deafened && !voice.suppressed);
                 }
                 if deafened {
                     connection.handle.set_speaking(0);
@@ -3565,6 +3589,7 @@ mod tests {
             connection: None,
             muted: false,
             deafened: false,
+            suppressed: false,
             camera: false,
             generation: 0,
             stream_key: None,

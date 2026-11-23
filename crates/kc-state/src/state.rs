@@ -573,6 +573,21 @@ impl State {
                     events.push(StoreEvent::GuildUpdated(guild_id));
                 }
             }
+            // A stage went live, changed its topic, or ended.
+            "STAGE_INSTANCE_CREATE" | "STAGE_INSTANCE_UPDATE" | "STAGE_INSTANCE_DELETE" => {
+                if let Ok(stage) = serde_json::from_value::<crate::guild::StageInstance>(data.clone())
+                    && let Some(guild_id) = stage.guild_id
+                    && let Some(guild) = self.guilds.get_mut(&guild_id)
+                {
+                    let channel_id = stage.channel_id;
+                    guild.stage_instances.retain(|live| live.channel_id != channel_id);
+                    if name != "STAGE_INSTANCE_DELETE" {
+                        guild.stage_instances.push(stage);
+                    }
+                    events.push(StoreEvent::GuildUpdated(guild_id));
+                    events.push(StoreEvent::ChannelUpdated(channel_id));
+                }
+            }
             "GUILD_STICKERS_UPDATE" => {
                 if let (Some(guild_id), Ok(stickers)) = (
                     snowflake(data, "guild_id"),
@@ -952,6 +967,9 @@ impl State {
             }
             if guild.emojis.is_empty() {
                 guild.emojis = existing.emojis.clone();
+            }
+            if guild.stage_instances.is_empty() && data.get("stage_instances").is_none() {
+                guild.stage_instances = existing.stage_instances.clone();
             }
             if guild.joined_at.is_none() {
                 guild.joined_at = existing.joined_at.clone();
@@ -2025,6 +2043,27 @@ mod tests {
         store.read(|state| {
             let messages = state.messages(Snowflake(10));
             assert!(messages[0].reactions.is_empty());
+        });
+    }
+
+    #[test]
+    fn stages_go_live_change_topic_and_end() {
+        let store = Store::new();
+        store.apply("READY", &json!({"session_id": "s", "user": {"id": "1", "username": "me"}, "users": [],
+            "guilds": [{"id": "5", "name": "G", "channels": [{"id": "9", "type": 13, "name": "Stage"}],
+                "stage_instances": [{"id": "90", "guild_id": "5", "channel_id": "9", "topic": "Hello"}]}],
+            "private_channels": [], "relationships": [], "read_state": {"entries": []}, "user_guild_settings": {"entries": []}}));
+        let topic = |store: &Store| store.read(|state| state.stage_instance(Snowflake(9)).map(|stage| stage.topic.clone()));
+        assert_eq!(topic(&store).as_deref(), Some("Hello"));
+        store.apply("STAGE_INSTANCE_UPDATE", &json!({"id": "90", "guild_id": "5", "channel_id": "9", "topic": "Q&A"}));
+        assert_eq!(topic(&store).as_deref(), Some("Q&A"));
+        store.apply("STAGE_INSTANCE_DELETE", &json!({"id": "90", "guild_id": "5", "channel_id": "9", "topic": "Q&A"}));
+        assert_eq!(topic(&store), None);
+        store.apply("VOICE_STATE_UPDATE", &json!({"user_id": "2", "guild_id": "5", "channel_id": "9", "session_id": "x",
+            "suppress": true, "request_to_speak_timestamp": "2026-11-23T04:00:00Z"}));
+        store.read(|state| {
+            let voice = &state.voice_states[&(Some(Snowflake(5)), Snowflake(2))];
+            assert!(voice.suppress && voice.request_to_speak_timestamp.is_some());
         });
     }
 
