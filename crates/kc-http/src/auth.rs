@@ -353,7 +353,6 @@ pub fn parse_sms_sent(body: &[u8]) -> Option<String> {
 pub struct AuthClient {
     http: reqwest::Client,
     base: String,
-    super_properties: String,
     locale: String,
     timezone: String,
     fingerprint: Arc<Mutex<Option<String>>>,
@@ -389,7 +388,6 @@ impl AuthClient {
         Self {
             http,
             base,
-            super_properties: kc_core::super_properties::SuperProperties::new().as_header(),
             locale: "en-US".to_owned(),
             timezone: std::env::var("TZ").unwrap_or_else(|_| "UTC".to_owned()),
             fingerprint: Arc::new(Mutex::new(None)),
@@ -402,7 +400,6 @@ impl AuthClient {
             LOGIN_REFERER,
             &self.locale,
             &self.timezone,
-            &self.super_properties,
         )
     }
 

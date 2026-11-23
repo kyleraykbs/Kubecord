@@ -2,8 +2,8 @@
 //! current Chrome on Windows. The build number and the Chrome version are
 //! refreshed at startup, so the identity keeps up without a new release.
 
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, RwLock};
 
 use base64::Engine;
 use serde::Serialize;
@@ -81,6 +81,86 @@ pub fn save_chrome_major(major: u32) {
         }
         let _ = std::fs::write(path, major.to_string());
     }
+}
+
+/// A new id each time the app starts, as the web client makes one per page
+/// load (`client_launch_id`).
+static LAUNCH_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+/// The analytics session the web client names in every request
+/// (`client_heartbeat_session_id`); one per launch here.
+static HEARTBEAT_SESSION_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+/// Whether a window of the app has focus (`client_app_state`).
+static APP_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+/// Tells the identity whether one of the app's windows has focus.
+pub fn set_app_focused(focused: bool) {
+    APP_FOCUSED.store(focused, Ordering::Relaxed);
+}
+
+/// `client_app_state`: `focused` or `unfocused`.
+pub fn app_state() -> &'static str {
+    if APP_FOCUSED.load(Ordering::Relaxed) {
+        "focused"
+    } else {
+        "unfocused"
+    }
+}
+
+/// The installation id Discord gave this install (from `/apex/experiments`),
+/// sent as `X-Installation-ID` and in the gateway identify. Like the web
+/// client's, it is kept for good once given.
+static INSTALLATION_ID: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| {
+    RwLock::new(
+        installation_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|id| id.trim().to_owned())
+            .filter(|id| valid_installation_id(id)),
+    )
+});
+
+fn installation_path() -> Option<std::path::PathBuf> {
+    crate::paths::data_dir().ok().map(|dir| dir.join("installation-id"))
+}
+
+/// An installation id looks like `<snowflake>.<signature>`.
+fn valid_installation_id(id: &str) -> bool {
+    let Some((snowflake, signature)) = id.split_once('.') else {
+        return false;
+    };
+    !snowflake.is_empty()
+        && snowflake.bytes().all(|byte| byte.is_ascii_digit())
+        && !signature.is_empty()
+        && signature
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The installation id, once Discord has given one.
+pub fn installation_id() -> Option<String> {
+    INSTALLATION_ID.read().ok()?.clone()
+}
+
+/// Keeps the installation id Discord gave, unless one is already kept (the
+/// web client keeps its first one too). Returns whether it was taken.
+pub fn set_installation_id(id: &str) -> bool {
+    let id = id.trim();
+    if !valid_installation_id(id) {
+        return false;
+    }
+    let Ok(mut kept) = INSTALLATION_ID.write() else {
+        return false;
+    };
+    if kept.is_some() {
+        return false;
+    }
+    *kept = Some(id.to_owned());
+    if let Some(path) = installation_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, id);
+    }
+    true
 }
 
 static BUILD_NUMBER: AtomicU64 = AtomicU64::new(CLIENT_BUILD_NUMBER);
@@ -182,6 +262,9 @@ pub struct SuperProperties {
     pub release_channel: &'static str,
     pub client_build_number: u64,
     pub client_event_source: Option<()>,
+    pub client_launch_id: &'static str,
+    pub client_heartbeat_session_id: &'static str,
+    pub client_app_state: &'static str,
 }
 
 impl SuperProperties {
@@ -202,6 +285,9 @@ impl SuperProperties {
             release_channel: "stable",
             client_build_number: build_number(),
             client_event_source: None,
+            client_launch_id: &LAUNCH_ID,
+            client_heartbeat_session_id: &HEARTBEAT_SESSION_ID,
+            client_app_state: app_state(),
         }
     }
 
@@ -240,6 +326,22 @@ mod tests {
                 .contains("Chrome/")
         );
         assert!(value.get("client_version").is_none());
+        // The session fields come last, as the web client adds them.
+        let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            &keys[keys.len() - 4..],
+            ["client_event_source", "client_launch_id", "client_heartbeat_session_id", "client_app_state"]
+        );
+        assert_eq!(value["client_launch_id"].as_str().unwrap().len(), 36);
+        assert_eq!(value["client_launch_id"], SuperProperties::new().client_launch_id);
+    }
+
+    #[test]
+    fn installation_ids_look_like_discords() {
+        assert!(valid_installation_id("1441234567890123456.AbCdEfGhIj0KlMn123Op_Q"));
+        assert!(!valid_installation_id("1441234567890123456"));
+        assert!(!valid_installation_id("abc.def"));
+        assert!(!valid_installation_id("123.\"x\""));
     }
 
     #[test]

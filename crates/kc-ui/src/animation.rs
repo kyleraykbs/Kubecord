@@ -135,7 +135,9 @@ fn queue_refresh() {
 pub(crate) fn set_window_focused(focused: bool) {
     if WINDOW_FOCUSED.swap(focused, Ordering::Relaxed) != focused {
         refresh_all();
-        // Discord's heartbeats say whether the user is at the app.
+        // Discord's heartbeats and request headers say whether the user is
+        // at the app.
+        kc_core::super_properties::set_app_focused(focused);
         if let Ok(gateways) = crate::session::GATEWAYS.lock() {
             for gateway in gateways.values() {
                 gateway.set_focused(focused);

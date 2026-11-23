@@ -817,6 +817,20 @@ fn spawn_account(
     }
 
     tokio::spawn(async move {
+        // The web client reads its experiment assignments as it loads, and
+        // Discord hands out the installation id with them; the identify
+        // carries it once known. A slow answer does not hold up the login.
+        if kc_core::super_properties::installation_id().is_none() {
+            let http = kc_http::HttpClient::new(token.clone());
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                http.fetch_installation_id(),
+            )
+            .await;
+        } else {
+            let http = kc_http::HttpClient::new(token.clone());
+            tokio::spawn(async move { http.fetch_installation_id().await });
+        }
         let (handle, mut gateway_rx, gateway_task) = Gateway::new(token).start();
         handle.set_focused(crate::animation::window_focused());
         if let Ok(mut registry) = GATEWAYS.lock() {

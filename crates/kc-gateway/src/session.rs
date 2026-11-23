@@ -116,8 +116,8 @@ fn merge_subscriptions(into: &mut Value, from: &Value) {
     }
 }
 
-/// Whether the user is at the app, for the heartbeat's QoS payload and the
-/// identify's `client_app_state`, as the web client reports them.
+/// Whether the user is at the app, for the heartbeat's QoS payload and
+/// whether to send one at once when the user comes back.
 #[derive(Default)]
 struct Activity {
     focused: AtomicBool,
@@ -173,7 +173,6 @@ pub enum Outcome {
 #[derive(Clone)]
 pub struct Gateway {
     token: Token,
-    properties: SuperProperties,
     activity: Arc<Activity>,
 }
 
@@ -372,7 +371,6 @@ impl Gateway {
     pub fn new(token: Token) -> Self {
         Self {
             token,
-            properties: SuperProperties::new(),
             activity: Arc::default(),
         }
     }
@@ -525,7 +523,8 @@ impl Gateway {
             }
         } else {
             info!("gateway identifying (new session)");
-            let payload = identify_payload(&self.token, &self.properties, &self.activity, session);
+            // Built now, so it carries the current build number and focus.
+            let payload = identify_payload(&self.token, &SuperProperties::new(), &self.activity, session);
             session.identifies += 1;
             if let Err(error) = write.send(Message::Text(payload.into())).await {
                 warn!(%error, "gateway identify send failed");
@@ -752,23 +751,20 @@ fn identify_payload(
     struct Properties<'a> {
         #[serde(flatten)]
         base: &'a SuperProperties,
-        client_app_state: &'static str,
         is_fast_connect: bool,
         gateway_connect_reasons: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        installation_id: Option<String>,
     }
     let properties = Properties {
         base: properties,
-        client_app_state: if activity.focused.load(Ordering::Relaxed) {
-            "focused"
-        } else {
-            "unfocused"
-        },
         is_fast_connect: false,
         gateway_connect_reasons: if session.identifies == 0 {
             "COLD_START"
         } else {
             "NO_REASONS"
         },
+        installation_id: kc_core::super_properties::installation_id(),
     };
     let payload = json!({
         "op": 2,
@@ -929,9 +925,16 @@ mod tests {
         later.identifies = 1;
         later.qos_token = Some("AQID".into());
         later.presence = Some(json!({"status": "dnd", "since": 0, "activities": [], "afk": false}));
+        let mut unfocused = SuperProperties::new();
+        unfocused.client_app_state = "unfocused";
         let payload: Value =
-            serde_json::from_str(&identify_payload(&token, &SuperProperties::new(), &Activity::default(), &later)).unwrap();
+            serde_json::from_str(&identify_payload(&token, &unfocused, &Activity::default(), &later)).unwrap();
         assert_eq!(payload["d"]["properties"]["client_app_state"], "unfocused");
+        // Once only: the properties do not repeat a key.
+        assert_eq!(
+            identify_payload(&token, &unfocused, &Activity::default(), &later).matches("client_app_state").count(),
+            1
+        );
         assert_eq!(payload["d"]["properties"]["gateway_connect_reasons"], "NO_REASONS");
         assert_eq!(payload["d"]["presence"]["status"], "dnd");
         use base64::Engine;

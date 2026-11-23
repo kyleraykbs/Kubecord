@@ -97,7 +97,6 @@ pub struct HttpClient {
     http: reqwest::Client,
     token: Token,
     base: String,
-    super_properties: String,
     locale: String,
     timezone: String,
     limiter: RateLimiter,
@@ -112,6 +111,9 @@ impl HttpClient {
         let http = reqwest::Client::builder()
             .user_agent(kc_core::super_properties::user_agent())
             .https_only(true)
+            // A browser keeps the cookies discord.com sets (`__dcfduid`,
+            // `__sdcfduid`, `__cfruid`) and sends them back.
+            .cookie_store(true)
             .build()
             .expect("reqwest client");
 
@@ -119,7 +121,6 @@ impl HttpClient {
             http,
             token,
             base: base.into().trim_end_matches('/').to_owned(),
-            super_properties: kc_core::super_properties::SuperProperties::new().as_header(),
             locale: "en-US".to_owned(),
             timezone: std::env::var("TZ").unwrap_or_else(|_| "UTC".to_owned()),
             limiter: RateLimiter::default(),
@@ -132,7 +133,6 @@ impl HttpClient {
             "https://discord.com/channels/@me",
             &self.locale,
             &self.timezone,
-            &self.super_properties,
         )
         .header("authorization", self.token.expose())
     }
@@ -383,10 +383,15 @@ impl HttpClient {
         invite: Option<&Invite>,
         captcha: Option<&CaptchaAnswer>,
     ) -> Result<Option<Snowflake>> {
-        let body = match session_id {
+        // The web client's body: its session, and the invite's instance id
+        // when the resolved invite has one (JSON drops it otherwise).
+        let mut body = match session_id {
             Some(session_id) => json!({ "session_id": session_id }),
             None => json!({}),
         };
+        if let Some(instance) = invite.and_then(|invite| invite.invite_instance_id.as_deref()) {
+            body["invite_instance_id"] = json!(instance);
+        }
         let mut context = json!({ "location": "Join Guild" });
         if let Some(invite) = invite {
             if let Some(guild) = &invite.guild {
@@ -1595,9 +1600,11 @@ pub(crate) fn browser_headers(
     referer: &str,
     locale: &str,
     timezone: &str,
-    super_properties: &str,
 ) -> reqwest::RequestBuilder {
-    request
+    use kc_core::super_properties as identity;
+    // Built for each request: the build number and the window's focus change.
+    let super_properties = identity::SuperProperties::new().as_header();
+    let request = request
         .header("user-agent", kc_core::super_properties::user_agent())
         .header("accept", "*/*")
         .header("accept-language", "en-US")
@@ -1613,7 +1620,28 @@ pub(crate) fn browser_headers(
         .header("x-discord-timezone", timezone)
         .header("x-super-properties", super_properties)
         .header("origin", "https://discord.com")
-        .header("x-debug-options", "bugReporterEnabled")
+        .header("x-debug-options", "bugReporterEnabled");
+    match identity::installation_id() {
+        Some(id) => request.header("x-installation-id", id),
+        None => request,
+    }
+}
+
+impl HttpClient {
+    /// Asks for the account's experiment assignments, as the web client does
+    /// on load, and keeps the installation id Discord hands out with them.
+    pub async fn fetch_installation_id(&self) {
+        match self.get("/apex/experiments?surface=2").await {
+            Ok(body) => {
+                if let Some(id) = body["installation"].as_str()
+                    && kc_core::super_properties::set_installation_id(id)
+                {
+                    tracing::info!("Discord gave this install its installation id");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "could not read the experiment assignments"),
+        }
+    }
 }
 
 /// The wait a 429 asks for (the body's precise `retry_after`, else the
@@ -1874,6 +1902,9 @@ pub struct Ban {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct Invite {
     pub code: String,
+    /// Sent back when accepting, as the web client does.
+    #[serde(default)]
+    pub invite_instance_id: Option<String>,
     #[serde(default)]
     pub inviter: Option<User>,
     /// The server the invite leads to (present when resolving an invite).
