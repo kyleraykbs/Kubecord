@@ -191,6 +191,7 @@ Kubecord uses when neither the app nor your configuration sets a value.
 | `kde_transparency_workaround` | `false` | Tell the compositor it decorates the window (KDE's decoration protocol), so niri draws no backdrop behind a transparent window. Leave off on KDE and sway. |
 | `default_account` | `null` | The user ID (as a string) of the account to open on; `null` opens on the first. |
 | `captcha_in_app` | `true` | Show Discord's captchas inside Kubecord instead of the browser. |
+| `safety_limits` | `true` | Ask before, then stop, actions Discord's spam filter watches when done quickly: new DMs, friend requests, new groups, server joins, and the same message in several channels. Turning it off risks a ban. |
 
 ### Notifications
 

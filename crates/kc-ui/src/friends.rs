@@ -252,6 +252,11 @@ impl AppState {
     }
 
     fn send_friend_request(self: &Rc<Self>, username: String) {
+        self.guard(crate::safety::Action::FriendRequest, move |app| app.request_friend(username));
+    }
+
+    /// Sends a friend request by username (after the safety limits allowed it).
+    fn request_friend(self: &Rc<Self>, username: String) {
         let Some((_, http, _)) = self.active() else {
             return;
         };
@@ -312,6 +317,11 @@ impl AppState {
             self.open_channel(channel);
             return;
         }
+        self.guard(crate::safety::Action::NewDm, move |app| app.create_dm_with(http, store, user_id));
+    }
+
+    /// Opens a new DM with a user (after the safety limits allowed it).
+    fn create_dm_with(self: &Rc<Self>, http: kc_http::HttpClient, store: kc_state::Store, user_id: Snowflake) {
         self.spawn(
             async move { http.create_dm(user_id).await },
             move |app, result| match result {

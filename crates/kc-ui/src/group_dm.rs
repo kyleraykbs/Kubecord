@@ -313,7 +313,7 @@ impl AppState {
         match plan {
             Submit::Nothing => {}
             Submit::OpenDm(user) => self.open_dm_with(user),
-            Submit::CreateGroup(users) => self.spawn(
+            Submit::CreateGroup(users) => self.guard(crate::safety::Action::GroupDm, move |app| app.spawn(
                 async move { http.create_group_dm(&users).await },
                 move |app, result| match result {
                     Ok(channel) => {
@@ -329,7 +329,7 @@ impl AppState {
                     }
                     Err(error) => app.report_failure("Could not create the group", &error),
                 },
-            ),
+            )),
             Submit::AddTo(group, users) => {
                 let known: Vec<User> = store.read(|state| {
                     users

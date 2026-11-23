@@ -201,6 +201,12 @@ fn copy_with_emoji(view: &gtk::TextView) -> bool {
 }
 
 thread_local! {
+    /// The next send was confirmed despite repeating a message across
+    /// channels.
+    static REPEAT_CONFIRMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
     /// The composer's undo history.
     static HISTORY: std::cell::RefCell<History> = std::cell::RefCell::new(History::default());
     /// Set while the composer is changed in ways the history must not
@@ -984,6 +990,19 @@ impl AppState {
                 slowmode_text(left)
             ));
             return;
+        }
+
+        // The same text into a third channel within minutes looks like
+        // spam: ask first (sending again once confirmed).
+        if editing.is_none() && !REPEAT_CONFIRMED.replace(false) && self.would_repeat(channel, &content) {
+            self.ask_repeat(|app| {
+                REPEAT_CONFIRMED.set(true);
+                app.send_current();
+            });
+            return;
+        }
+        if editing.is_none() {
+            self.note_sent(channel, &content);
         }
 
         let mention_reply = self.context_ping.is_active();

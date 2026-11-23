@@ -111,19 +111,51 @@ impl AppState {
         );
     }
 
-    /// Accepts an invite and opens the server it points to.
+    /// Accepts an invite and opens the server it points to. As on the
+    /// website, the invite is looked up first, then accepted (within the
+    /// safety limits).
     pub(crate) fn join_server(self: &Rc<Self>, code: &str) {
         let Some((_, http, _)) = self.active() else {
             return;
         };
         let code = code.to_owned();
+        let lookup = code.clone();
         self.spawn(
-            async move { http.accept_invite(&code).await },
+            async move { http.resolve_invite(&lookup).await },
+            move |app, result| match result {
+                Ok(invite) => {
+                    let invite = Rc::new(invite);
+                    app.guard(crate::safety::Action::JoinServer, move |app| app.accept_invite(code, invite));
+                }
+                Err(error) => app.set_status(&format!("Could not join that server: {error}")),
+            },
+        );
+    }
+
+    fn accept_invite(self: &Rc<Self>, code: String, invite: Rc<kc_http::client::Invite>) {
+        let Some((_, http, store)) = self.active() else {
+            return;
+        };
+        let session_id = store.read(|state| state.session_id.clone());
+        let invite = (*invite).clone();
+        self.with_captcha(
+            "Discord wants to make sure you're human before you join this server.",
+            move |captcha| {
+                let http = http.clone();
+                let code = code.clone();
+                let session_id = session_id.clone();
+                let invite = invite.clone();
+                async move { http.accept_invite(&code, session_id.as_deref(), Some(&invite), captcha.as_ref()).await }
+            },
             move |app, result| match result {
                 // The server also arrives over the gateway; selecting it opens
                 // it once its channels are in.
                 Ok(Some(guild_id)) => app.select_guild(guild_id),
                 Ok(None) => app.set_status("Joined the server."),
+                Err(error) if error.is_captcha() => app.captcha_needed(
+                    "Discord wants a captcha solved before you join this server.",
+                    "https://discord.com/channels/@me",
+                ),
                 Err(error) => app.set_status(&format!("Could not join that server: {error}")),
             },
         );

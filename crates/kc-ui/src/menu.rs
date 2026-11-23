@@ -554,6 +554,27 @@ impl AppState {
         user_id: Snowflake,
         done: impl FnOnce(bool) + 'static,
     ) {
+        let Some((_, _, store)) = self.active() else {
+            return;
+        };
+        // Accepting someone's request is not sending one: only a new request
+        // counts towards the safety limits.
+        let accepting = store.read(|state| {
+            state
+                .relationships
+                .get(&user_id)
+                .is_some_and(|relationship| relationship.kind == kc_state::Relationship::INCOMING_REQUEST)
+        });
+        if accepting {
+            self.befriend_now(user_id, done);
+        } else {
+            // Refused or cancelled, `done` is not called: whatever waits on
+            // it stays as it was, as when Discord refuses.
+            self.guard(crate::safety::Action::FriendRequest, move |app| app.befriend_now(user_id, done));
+        }
+    }
+
+    fn befriend_now(self: &Rc<Self>, user_id: Snowflake, done: impl FnOnce(bool) + 'static) {
         let Some((_, http, _)) = self.active() else {
             return;
         };

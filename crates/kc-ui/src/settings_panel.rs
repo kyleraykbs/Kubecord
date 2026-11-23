@@ -1191,9 +1191,96 @@ impl AppState {
     // -- advanced ------------------------------------------------------------
 
     /// Discord's checks for the official app, and what kubecord logs.
+    /// Account safety: the limits on actions Discord's spam filter
+    /// watches. Switching them off asks, behind a warning that must be
+    /// acknowledged.
+    fn safety_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Account Safety");
+        group.set_description(Some(
+            "Discord bans accounts its spam filter catches, and treats third-party apps like Kubecord with less leniency. These limits keep you to a safe pace.",
+        ));
+        let limits = adw::SwitchRow::new();
+        limits.set_title("Safety Limits");
+        mark_declared(&limits, "safety_limits");
+        limits.set_subtitle(
+            "Asks before, and then stops, opening many new DMs (3 in 10 minutes; at most 5 an hour, 10 a day), sending many friend requests (3 in 10 minutes; at most 5 an hour, 15 a day), starting groups (2 an hour), joining servers (2 in 10 minutes; at most 3 an hour, 10 a day, and asks right after logging in), and sending the same message to several channels.",
+        );
+        limits.set_subtitle_lines(0);
+        let on = self.capture.borrow().safety_limits;
+        limits.set_active(on);
+
+        let off_warning = adw::ActionRow::builder()
+            .title("Safety limits are off")
+            .subtitle("Nothing stops actions that can get your account banned.")
+            .build();
+        off_warning.add_css_class("error");
+        off_warning.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        off_warning.set_visible(!on);
+
+        // Set while the switch is put back after a cancelled warning.
+        let reverting = Rc::new(std::cell::Cell::new(false));
+        let app = self.clone();
+        let warning = off_warning.clone();
+        limits.connect_active_notify(move |row| {
+            if reverting.get() {
+                return;
+            }
+            if row.is_active() {
+                app.update_prefs(|prefs| prefs.safety_limits = true);
+                warning.set_visible(false);
+                return;
+            }
+            let dialog = adw::AlertDialog::new(
+                Some("Turn Off Safety Limits?"),
+                Some(
+                    "Your account could be permanently banned.\n\nDiscord bans accounts that open many new DMs, send many friend requests or join many servers quickly, and it gives third-party apps like Kubecord less benefit of the doubt. The Cordless client's developer was banned this way. A banned account cannot be recovered, along with its servers, friends and messages.\n\nWith the limits off, nothing in Kubecord will stop you.",
+                ),
+            );
+            let understood = gtk::CheckButton::with_label("I understand my account may be permanently banned");
+            dialog.set_extra_child(Some(&understood));
+            dialog.add_responses(&[("cancel", "Keep Limits On"), ("off", "Turn Off")]);
+            dialog.set_response_appearance("off", adw::ResponseAppearance::Destructive);
+            dialog.set_response_enabled("off", false);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let weak = dialog.downgrade();
+            understood.connect_toggled(move |check| {
+                if let Some(dialog) = weak.upgrade() {
+                    dialog.set_response_enabled("off", check.is_active());
+                }
+            });
+            let answered = app.clone();
+            let row = row.clone();
+            let reverting = reverting.clone();
+            let warning = warning.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "off" {
+                    answered.update_prefs(|prefs| prefs.safety_limits = false);
+                    warning.set_visible(true);
+                } else {
+                    reverting.set(true);
+                    row.set_active(true);
+                    reverting.set(false);
+                }
+            });
+            dialog.present(Some(&app.window));
+        });
+        group.add(&limits);
+        group.add(&off_warning);
+        // Development aid: KUBECORD_SAFETY_OFF flips the switch, showing the
+        // warning.
+        if std::env::var_os("KUBECORD_SAFETY_OFF").is_some() {
+            let limits = limits.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(800), move || limits.set_active(false));
+        }
+        group
+    }
+
     fn advanced_page(self: &Rc<Self>) -> gtk::Box {
         let page = page_box();
         page.append(&section_title("Advanced"));
+        page.append(&self.safety_group());
 
         // Compatibility: how kubecord handles the checks Discord makes for
         // the official app.

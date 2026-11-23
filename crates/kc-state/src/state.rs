@@ -260,6 +260,9 @@ pub enum StoreEvent {
 #[derive(Default)]
 pub struct State {
     pub me: Option<User>,
+    /// The gateway session's ID from READY (the website sends it when
+    /// joining a server).
+    pub session_id: Option<String>,
     pub users: HashMap<Snowflake, User>,
     pub guilds: HashMap<Snowflake, Guild>,
     /// Guild ids in the order READY/GUILD_CREATE delivered them.
@@ -634,6 +637,7 @@ impl State {
     }
 
     fn ready(&mut self, data: &Value, events: &mut Vec<StoreEvent>) {
+        self.session_id = data["session_id"].as_str().map(str::to_owned);
         if let Ok(user) = serde_json::from_value::<User>(data["user"].clone()) {
             self.users.insert(user.id, user.clone());
             self.me = Some(user);

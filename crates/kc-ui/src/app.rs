@@ -2030,6 +2030,12 @@ impl AppState {
             .flatten();
         match event {
             StoreEvent::Ready => {
+                if let Some(me) = self
+                    .active()
+                    .and_then(|(_, _, store)| store.read(|state| state.me.as_ref().map(|me| me.id)))
+                {
+                    crate::safety::logged_in(me);
+                }
                 self.sync_session_guilds();
                 // Land on the home view until the user picks a server.
                 let first_run = self

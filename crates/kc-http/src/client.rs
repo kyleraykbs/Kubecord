@@ -373,11 +373,39 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
-    /// Joins the guild an invite points to by accepting it. Returns the guild's
-    /// id when the response carries one (so the client can navigate to it).
-    pub async fn accept_invite(&self, code: &str) -> Result<Option<Snowflake>> {
+    /// Joins the guild an invite points to by accepting it, as the website
+    /// does: with the gateway session's ID, and where it was accepted from
+    /// (the invite, looked up first). Returns the guild's id when the
+    /// response carries one (so the client can navigate to it).
+    pub async fn accept_invite(
+        &self,
+        code: &str,
+        session_id: Option<&str>,
+        invite: Option<&Invite>,
+        captcha: Option<&CaptchaAnswer>,
+    ) -> Result<Option<Snowflake>> {
+        let body = match session_id {
+            Some(session_id) => json!({ "session_id": session_id }),
+            None => json!({}),
+        };
+        let mut context = json!({ "location": "Join Guild" });
+        if let Some(invite) = invite {
+            if let Some(guild) = &invite.guild {
+                context["location_guild_id"] = json!(guild.id.to_string());
+            }
+            if let Some(channel) = &invite.channel {
+                context["location_channel_id"] = json!(channel.id.to_string());
+                context["location_channel_type"] = json!(channel.kind);
+            }
+        }
         let value = self
-            .post(&format!("/invites/{}", percent_encode(code)), json!({}))
+            .request_json_full(
+                Method::POST,
+                &format!("/invites/{}", percent_encode(code)),
+                Some(&body),
+                Some(&context),
+                captcha,
+            )
             .await?;
         Ok(value["guild"]["id"].as_str().and_then(|id| id.parse().ok()))
     }
@@ -1878,6 +1906,9 @@ pub struct InviteChannel {
     pub id: Snowflake,
     #[serde(default)]
     pub name: Option<String>,
+    /// The channel's type (0 for a text channel).
+    #[serde(rename = "type", default)]
+    pub kind: u8,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]

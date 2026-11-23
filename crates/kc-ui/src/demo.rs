@@ -1236,6 +1236,28 @@ impl AppState {
                     }
                 });
             }
+            "safety" => {
+                // The safety limits' dialogs: new DMs until it asks
+                // (KUBECORD_SAFETY_COUNT sets how many go first; 5 reaches
+                // the hourly cap).
+                let count: usize = std::env::var("KUBECORD_SAFETY_COUNT")
+                    .ok()
+                    .and_then(|count| count.parse().ok())
+                    .unwrap_or(2);
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                    // Spread out, so only the caps (not the warning) apply
+                    // past the first few.
+                    let age = std::env::var("KUBECORD_SAFETY_AGE")
+                        .ok()
+                        .and_then(|age| age.parse().ok())
+                        .unwrap_or(11 * 60);
+                    for _ in 0..count {
+                        crate::safety::demo_record(&app, crate::safety::Action::NewDm, age);
+                    }
+                    app.guard(crate::safety::Action::NewDm, |_| eprintln!("demo: the new DM went ahead"));
+                });
+            }
             "composer-lines" => {
                 // KUBECORD_NO_OVERLAY_SCROLL: scrollbars that take room, as
                 // some desktops set.

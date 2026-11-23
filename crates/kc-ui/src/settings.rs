@@ -145,6 +145,10 @@ pub struct CapturePreferences {
     /// Show Discord's captchas in kubecord instead of sending the user to
     /// the browser.
     pub captcha_in_app: bool,
+    /// Ask before, and stop, the actions Discord's spam filter watches
+    /// (new DMs, friend requests, server joins) past a safe pace. On by
+    /// default; see `safety.rs`.
+    pub safety_limits: bool,
     /// Tell Discord when you are typing, so others see it.
     pub send_typing: bool,
     /// Height of the call above a DM's chat, in pixels.
@@ -315,6 +319,7 @@ impl Default for CapturePreferences {
             sidebar_width: SIDEBAR_WIDTH,
             always_preview: false,
             captcha_in_app: true,
+            safety_limits: true,
             send_typing: true,
             call_height: CALL_HEIGHT,
             camera_format: 0,
