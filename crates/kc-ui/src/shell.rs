@@ -1118,61 +1118,146 @@ mod title_tests {
 /// The tallest the composer grows before its text scrolls.
 const COMPOSER_MAX_HEIGHT: i32 = 220;
 
-/// Keeps the composer exactly as tall as its text.
+/// Keeps the composer exactly as tall as its text, and its text in place.
 ///
-/// GTK's text view does not always measure itself again when its text
-/// changes how it wraps or gains a line (Shift+Enter), so the box kept an
-/// old height: a line too tall, with the text at its top, until enough more
-/// typing made it measure again. Its height is instead worked out from where
-/// its last character is drawn, which is always current, and the scrolled
-/// window around it is held to that (up to [`COMPOSER_MAX_HEIGHT`]), for a
-/// few frames after each change of text or width.
+/// GTK's text view in a scrolled window does not do this by itself, in
+/// several ways (each found by typing into it key by key and measuring where
+/// the text sat; see the `composer-type` demo):
+///
+/// - The view does not always measure itself again when its text changes how
+///   it wraps or gains a line (Shift+Enter). The height is instead worked out
+///   from where the last character is drawn, which is always current, and
+///   the scrolled window is held to that (up to [`COMPOSER_MAX_HEIGHT`]).
+/// - When a line is added, the view scrolls (animated) to keep the cursor
+///   in sight, because for a moment the box still has its old height. The
+///   box then grows, but an allocation during that animation leaves the
+///   scroll range as it was (`gtk_text_view_size_allocate` skips an
+///   animating adjustment), so the text stayed scrolled up in a box that
+///   fits it: off-centre until the next resize. While the text fits there
+///   is nothing to scroll, so the offset is held at zero the moment
+///   anything moves it, and a stale range is refreshed.
+/// - A scrollbar that takes room (where overlay scrolling is off) narrows
+///   the text, which can wrap it onto one more line, which grows the box,
+///   which hides the scrollbar, and round again. There is no scrollbar at
+///   all while the text fits.
+/// - Past the tallest the box gets, the text scrolls. Typing at its end
+///   keeps the end in view with its margin below, not flush against the
+///   edge as GTK's cursor-following leaves it.
 fn fit_composer_height(composer: &gtk::TextView, scroll: &gtk::ScrolledWindow) {
     use std::cell::Cell;
     use std::rc::Rc;
-    /// Frames to check for after a change.
+    /// Frames to check for after a change, and the most to keep checking
+    /// while the scroll range has not caught up.
     const FRAMES: u32 = 10;
+    const FRAMES_MOST: u32 = 240;
 
-    // Set on a resize: the text view scrolled to the cursor for its old
-    // height, so it is shown again once the new one is laid out.
+    /// The height the box needs for all of its text.
+    fn needed(view: &gtk::TextView) -> i32 {
+        let end = view.iter_location(&view.buffer().end_iter());
+        let needed = end.y() + end.height() + view.top_margin() + view.bottom_margin();
+        // The view rounds a wrapped paragraph's height as a whole, which can
+        // differ from this by a pixel. Its own figure is exact whenever it
+        // is current, which it is when the two are this close.
+        let (_, measured, ..) = view.measure(gtk::Orientation::Vertical, view.width().max(1));
+        if (measured - needed).abs() <= 2 { measured } else { needed }
+    }
+
+    /// Whether the cursor is on the text's last line.
+    fn at_end(view: &gtk::TextView) -> bool {
+        let buffer = view.buffer();
+        let cursor = view.iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
+        let end = view.iter_location(&buffer.end_iter());
+        cursor.y() == end.y()
+    }
+
+    /// With text that fits, the view is never scrolled. Setting the value
+    /// also ends GTK's scroll animation.
+    fn hold_still(view: &gtk::TextView) {
+        if needed(view) > COMPOSER_MAX_HEIGHT {
+            return;
+        }
+        if let Some(adjustment) = view.vadjustment()
+            && adjustment.value() != 0.0
+        {
+            adjustment.set_value(0.0);
+        }
+    }
+
+    // Set on a resize of text that scrolls: the view scrolled to the cursor
+    // for its old height, so the cursor is shown again once the new one is
+    // laid out.
     let reveal = Rc::new(Cell::new(false));
+    // Returns whether everything has settled. `typed`: this follows a change
+    // of text, when the end of the text is kept in view.
     let fit = {
         let scroll = scroll.downgrade();
         let reveal = reveal.clone();
-        move |view: &gtk::TextView| {
-            let Some(scroll) = scroll.upgrade() else { return };
-            if reveal.replace(false) {
-                view.scroll_mark_onscreen(&view.buffer().get_insert());
-            }
-            let end = view.iter_location(&view.buffer().end_iter());
-            let needed = end.y() + end.height() + view.top_margin() + view.bottom_margin();
-            // Taller than the box: it scrolls, and keeps the cursor in view.
-            if needed > COMPOSER_MAX_HEIGHT {
-                reveal.set(true);
+        move |view: &gtk::TextView, typed: bool| -> bool {
+            let Some(scroll) = scroll.upgrade() else { return true };
+            let needed = needed(view);
+            let scrolls = needed > COMPOSER_MAX_HEIGHT;
+            // A scrollbar only for text that scrolls: one that came and went
+            // with the box's height would change the text's width with it.
+            let policy = if scrolls { gtk::PolicyType::Automatic } else { gtk::PolicyType::External };
+            if scroll.vscrollbar_policy() != policy {
+                scroll.set_policy(gtk::PolicyType::Never, policy);
             }
             let height = needed.clamp(1, COMPOSER_MAX_HEIGHT);
-            if scroll.min_content_height() == height && scroll.max_content_height() == height {
-                return;
+            let resized =
+                scroll.min_content_height() != height || scroll.max_content_height() != height;
+            if resized {
+                // GTK refuses a minimum above the maximum: move the one on
+                // the side it is going first.
+                if height > scroll.min_content_height() {
+                    scroll.set_max_content_height(height);
+                    scroll.set_min_content_height(height);
+                } else {
+                    scroll.set_min_content_height(height);
+                    scroll.set_max_content_height(height);
+                }
             }
-            reveal.set(true);
-            // GTK refuses a minimum above the maximum: move the one on the
-            // side it is going first.
-            if height > scroll.min_content_height() {
-                scroll.set_max_content_height(height);
-                scroll.set_min_content_height(height);
-            } else {
-                scroll.set_min_content_height(height);
-                scroll.set_max_content_height(height);
+            let adjustment = view.vadjustment();
+            let stale = adjustment
+                .as_ref()
+                .is_some_and(|adjustment| view.height() > 0 && adjustment.page_size() != f64::from(view.height()));
+            let mut moved = false;
+            if !scrolls {
+                reveal.set(false);
+                hold_still(view);
+            } else if typed && at_end(view) {
+                // Typing at the end: the end stays in view, margin and all.
+                reveal.set(false);
+                if let Some(adjustment) = &adjustment {
+                    let bottom = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                    if adjustment.value() != bottom {
+                        adjustment.set_value(bottom);
+                        moved = true;
+                    }
+                }
+            } else if reveal.replace(resized) || (typed && resized) {
+                view.scroll_mark_onscreen(&view.buffer().get_insert());
             }
+            // The scroll range GTK left behind during an animation: the
+            // next allocation (once nothing animates) brings it up to date.
+            if stale {
+                view.queue_allocate();
+            }
+            !resized && !stale && !moved
         }
     };
-    fit(composer);
+    fit(composer, false);
 
     let left = Rc::new(Cell::new(0u32));
+    // Whether the checks running were started by a change of text.
+    let typed = Rc::new(Cell::new(false));
     let start = {
         let view = composer.downgrade();
-        move || {
+        let typed = typed.clone();
+        move |by_typing: bool| {
             let Some(view) = view.upgrade() else { return };
+            if by_typing {
+                typed.set(true);
+            }
             // One check running at a time, kept going while typing continues.
             let running = left.get() > 0;
             left.set(FRAMES);
@@ -1181,17 +1266,45 @@ fn fit_composer_height(composer: &gtk::TextView, scroll: &gtk::ScrolledWindow) {
             }
             let left = left.clone();
             let fit = fit.clone();
+            let typed = typed.clone();
+            let most = Cell::new(FRAMES_MOST);
             view.add_tick_callback(move |view, _| {
-                fit(view);
+                let settled = fit(view, typed.get());
                 left.set(left.get().saturating_sub(1));
-                if left.get() > 0 { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+                most.set(most.get().saturating_sub(1));
+                // Not settled yet: one more frame (but not for ever).
+                if !settled && left.get() == 0 && most.get() > 0 {
+                    left.set(1);
+                }
+                if left.get() > 0 {
+                    glib::ControlFlow::Continue
+                } else {
+                    typed.set(false);
+                    glib::ControlFlow::Break
+                }
             });
         }
     };
     let on_text = start.clone();
-    composer.buffer().connect_changed(move |_| on_text());
+    composer.buffer().connect_changed(move |_| on_text(true));
     // A new width rewraps the text: the horizontal adjustment changes with it.
+    let on_width = start.clone();
     composer.hadjustment().inspect(|adjustment| {
-        adjustment.connect_changed(move |_| start());
+        adjustment.connect_changed(move |_| on_width(false));
     });
+    // The scroll offset is held at zero the moment anything moves it while
+    // the text fits (the cursor-following animation, a drag, a wheel), and
+    // a change of range starts the checks above.
+    if let Some(adjustment) = composer.vadjustment() {
+        let view = composer.downgrade();
+        let holding = Cell::new(false);
+        adjustment.connect_value_changed(move |_| {
+            let Some(view) = view.upgrade() else { return };
+            if !holding.replace(true) {
+                hold_still(&view);
+                holding.set(false);
+            }
+        });
+        adjustment.connect_changed(move |_| start(false));
+    }
 }

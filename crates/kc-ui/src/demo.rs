@@ -386,6 +386,50 @@ fn file_message(id: u64, author: u64) -> Value {
 }
 
 impl AppState {
+    /// Where the composer's text sits in its box: the gap from the box's
+    /// top to the first line's top, the gap from the last line's bottom to
+    /// the box's bottom, and the sizes behind them.
+    fn composer_gaps(&self) -> (f64, f64, String) {
+        let view = &self.composer;
+        let buffer = view.buffer();
+        let first = view.iter_location(&buffer.start_iter());
+        let last = view.iter_location(&buffer.end_iter());
+        let (_, first_y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, first.y());
+        let (_, last_y) =
+            view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, last.y() + last.height());
+        let mut frame: gtk::Widget = view.clone().upcast();
+        while let Some(parent) = frame.parent() {
+            frame = parent;
+            if frame.has_css_class("kc-composer") {
+                break;
+            }
+        }
+        let origin = view
+            .compute_point(&frame, &gtk::graphene::Point::new(0.0, 0.0))
+            .map_or(0.0, |point| f64::from(point.y()));
+        let top = origin + f64::from(first_y);
+        let bottom = f64::from(frame.height()) - (origin + f64::from(last_y));
+        let scroll = view.parent().and_downcast::<gtk::ScrolledWindow>();
+        let adjustment = scroll.as_ref().map(|scroll| scroll.vadjustment());
+        let (_, natural, ..) = view.measure(gtk::Orientation::Vertical, view.width());
+        let detail = format!(
+            "box {} view {}x{} scroll {} (min {} max {}) adj value {:.1} upper {:.1} page {:.1}; text {} lines, ends y {} h {}, view measures {natural}",
+            frame.height(),
+            view.width(),
+            view.height(),
+            scroll.as_ref().map_or(0, |scroll| scroll.height()),
+            scroll.as_ref().map_or(0, |scroll| scroll.min_content_height()),
+            scroll.as_ref().map_or(0, |scroll| scroll.max_content_height()),
+            adjustment.as_ref().map_or(0.0, |adjustment| adjustment.value()),
+            adjustment.as_ref().map_or(0.0, |adjustment| adjustment.upper()),
+            adjustment.as_ref().map_or(0.0, |adjustment| adjustment.page_size()),
+            buffer.line_count(),
+            last.y(),
+            last.height(),
+        );
+        (top, bottom, detail)
+    }
+
     pub(crate) fn show_demo(self: &Rc<Self>, mode: &str) {
         if let Some(what) = mode.strip_prefix("login") {
             self.show_login_demo(what.trim_start_matches('-'));
@@ -1324,6 +1368,108 @@ impl AppState {
                             break;
                         }
                         widget = parent;
+                    }
+                    glib::ControlFlow::Break
+                });
+            }
+            "composer-type" => {
+                // Types KUBECORD_COMPOSER_SCRIPT a key at a time, the way the
+                // text view's own key handling does (insert at the cursor,
+                // then scroll the cursor on screen; "\n" is Shift+Enter,
+                // "\b" Backspace, "\p" a pasted paragraph of several lines
+                // and "\c" clears the box, as sending does), every
+                // KUBECORD_TYPE_MS milliseconds.
+                // Before each key and for a while after the last, it reports
+                // where the text sits in the box: the gap above its first
+                // line and the gap below its last. They must be equal.
+                if std::env::var_os("KUBECORD_NO_OVERLAY_SCROLL").is_some()
+                    && let Some(settings) = gtk::Settings::default()
+                {
+                    settings.set_gtk_overlay_scrolling(false);
+                }
+                self.open_channel(general);
+                let script: Vec<char> = std::env::var("KUBECORD_COMPOSER_SCRIPT")
+                    .unwrap_or_else(|_| "hello there\nsecond line".to_owned())
+                    .replace("\\n", "\n")
+                    .replace("\\b", "\u{8}")
+                    .replace("\\p", "\u{1}")
+                    .replace("\\c", "\u{2}")
+                    .chars()
+                    .collect();
+                let pause: u64 = std::env::var("KUBECORD_TYPE_MS")
+                    .ok()
+                    .and_then(|ms| ms.parse().ok())
+                    .unwrap_or(60);
+                let app = self.clone();
+                let typed = std::cell::Cell::new(0usize);
+                let after = std::cell::Cell::new(0u32);
+                let worst = std::cell::Cell::new(0.0f64);
+                glib::timeout_add_local(Duration::from_millis(pause), move || {
+                    let (top, bottom, detail) = app.composer_gaps();
+                    let index = typed.get();
+                    // Text taller than the box scrolls: then the cursor must
+                    // be in sight and the scroll range current instead.
+                    let view = &app.composer;
+                    let buffer = view.buffer();
+                    let end = view.iter_location(&buffer.end_iter());
+                    let scrolls = end.y() + end.height() + view.top_margin() + view.bottom_margin() > 220;
+                    let (off, verdict) = if scrolls {
+                        let cursor = view.iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
+                        let visible = view.visible_rect();
+                        let seen = cursor.y() >= visible.y()
+                            && cursor.y() + cursor.height() <= visible.y() + visible.height();
+                        let current = view
+                            .vadjustment()
+                            .is_some_and(|adjustment| adjustment.page_size() == f64::from(view.height()));
+                        let at_end = cursor.y() == end.y();
+                        match (seen, current) {
+                            (true, true) if at_end && (bottom - 16.0).abs() > 1.0 => (97.0, "END-NOT-AT-BOTTOM"),
+                            (true, true) => (0.0, "scrolling"),
+                            (false, _) => (99.0, "CURSOR-HIDDEN"),
+                            (true, false) => (98.0, "STALE-RANGE"),
+                        }
+                    } else {
+                        // This ruler rounds each line's height on its own,
+                        // so it can be a pixel out for wrapped text.
+                        let off = (top - bottom).abs();
+                        (off, if off > 1.0 { "OFF-CENTRE" } else { "centred" })
+                    };
+                    if off > 1.0 || std::env::var_os("KUBECORD_TYPE_VERBOSE").is_some() {
+                        eprintln!("demo: {verdict} after {index} keys: gap above {top:.1}, below {bottom:.1} | {detail}");
+                    }
+                    worst.set(worst.get().max(off));
+                    if index < script.len() {
+                        let view = &app.composer;
+                        let buffer = view.buffer();
+                        match script[index] {
+                            '\u{8}' => view.emit_backspace(),
+                            '\u{1}' => {
+                                buffer.begin_user_action();
+                                buffer.insert_interactive_at_cursor(
+                                    "a pasted paragraph that is long enough to wrap around once or twice in the box\nits second line\n\nand a fourth",
+                                    true,
+                                );
+                                buffer.end_user_action();
+                                view.scroll_mark_onscreen(&buffer.get_insert());
+                            }
+                            '\u{2}' => buffer.set_text(""),
+                            key => {
+                                buffer.begin_user_action();
+                                buffer.insert_interactive_at_cursor(&key.to_string(), true);
+                                buffer.end_user_action();
+                                view.scroll_mark_onscreen(&buffer.get_insert());
+                            }
+                        }
+                        typed.set(index + 1);
+                        return glib::ControlFlow::Continue;
+                    }
+                    after.set(after.get() + 1);
+                    if after.get() < 40 {
+                        return glib::ControlFlow::Continue;
+                    }
+                    eprintln!("demo: typing done; worst gap difference {:.1}; finally above {top:.1}, below {bottom:.1} | {detail}", worst.get());
+                    if let Some(application) = app.window.application() {
+                        application.quit();
                     }
                     glib::ControlFlow::Break
                 });

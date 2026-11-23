@@ -26,9 +26,11 @@ pub(crate) const TYPING_THROTTLE: Duration = Duration::from_secs(8);
 
 /// Builds the libadwaita application. Call [`run`] from the process entry point.
 pub fn build_app() -> adw::Application {
-    // A screenshot run must not hand over to (and quit in favour of) an
-    // instance that is already open.
-    let flags = if std::env::var_os("KUBECORD_SCREENSHOT").is_some() {
+    // A screenshot or demo run must not hand over to (and quit in favour
+    // of) an instance that is already open.
+    let flags = if std::env::var_os("KUBECORD_SCREENSHOT").is_some()
+        || std::env::var_os("KUBECORD_DEMO").is_some()
+    {
         gtk::gio::ApplicationFlags::NON_UNIQUE
     } else {
         gtk::gio::ApplicationFlags::empty()
