@@ -30,6 +30,10 @@ impl AppState {
         let name = adw::EntryRow::new();
         name.set_title("Server Name");
         create_group.add(&name);
+        let community = adw::SwitchRow::new();
+        community.set_title("Community Server");
+        community.set_subtitle("Stage and announcement channels, a welcome screen and more; makes #rules and #moderator-only channels");
+        create_group.add(&community);
         body.append(&create_group);
 
         let create = gtk::Button::with_label("Create");
@@ -78,7 +82,7 @@ impl AppState {
                 return;
             }
             parent.close();
-            app.create_server(&name);
+            app.create_server(&name, community.is_active());
         });
 
         let app = self.clone();
@@ -96,8 +100,9 @@ impl AppState {
         name.grab_focus();
     }
 
-    /// Creates a server and, once Discord returns it, opens it.
-    fn create_server(self: &Rc<Self>, name: &str) {
+    /// Creates a server and, once Discord returns it, opens it (and with
+    /// `community`, turns Community on with Discord's recommendations).
+    fn create_server(self: &Rc<Self>, name: &str, community: bool) {
         let Some((_, http, _)) = self.active() else {
             return;
         };
@@ -105,7 +110,13 @@ impl AppState {
         self.spawn(
             async move { http.create_guild(&name, None).await },
             move |app, result| match result {
-                Ok(guild_id) => app.select_guild(guild_id),
+                Ok(guild_id) => {
+                    app.select_guild(guild_id);
+                    if community {
+                        app.set_status("Setting up Community…");
+                        app.enable_community_when_ready(guild_id, 40);
+                    }
+                }
                 Err(error) => app.set_status(&format!("Could not create the server: {error}")),
             },
         );

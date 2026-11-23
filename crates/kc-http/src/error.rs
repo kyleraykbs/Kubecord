@@ -32,6 +32,17 @@ pub enum Error {
         rqtoken: Option<String>,
     },
 
+    /// Discord wants the account's two-factor code (or password) before it
+    /// does this (deleting a server, say). Verify with `ticket` at
+    /// [`HttpClient::verify_mfa`](crate::HttpClient::verify_mfa) and retry
+    /// with the token it gives.
+    #[error("discord wants your two-factor code first")]
+    Mfa {
+        ticket: String,
+        /// What can verify it: `totp`, `backup`, `sms`, `password`, `webauthn`.
+        methods: Vec<String>,
+    },
+
     #[error("could not decode discord's response: {source}")]
     Decode {
         status: wreq::StatusCode,
@@ -58,6 +69,7 @@ impl Error {
         match self {
             Self::Api { status, .. } | Self::Decode { status, .. } => Some(*status),
             Self::Captcha { .. } => Some(wreq::StatusCode::BAD_REQUEST),
+            Self::Mfa { .. } => Some(wreq::StatusCode::UNAUTHORIZED),
             _ => None,
         }
     }

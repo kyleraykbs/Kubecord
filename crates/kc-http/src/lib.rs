@@ -13,7 +13,7 @@ pub mod search;
 pub use client::{
     AvatarEdit, Ban, CaptchaAnswer, ChannelEdit, FAVORITE_GIF_FORMAT_IMAGE,
     FAVORITE_GIF_FORMAT_VIDEO, Gif, GifCategory, HttpClient, Invite, InviteChannel, MemberEdit,
-    NewPoll, Outgoing, RoleEdit, SearchPage, ServerProfileEdit, image_data_uri,
+    CommunityChange, NewPoll, Outgoing, RoleEdit, SearchPage, ServerProfileEdit, image_data_uri,
 };
 pub use commands::{
     Command, CommandApp, CommandChoice, CommandIndex, CommandOption, CommandScope,

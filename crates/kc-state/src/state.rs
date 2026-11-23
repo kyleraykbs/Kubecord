@@ -1087,6 +1087,18 @@ impl State {
         if let Some(features) = data["features"].as_array() {
             guild.features = features.iter().filter_map(|feature| feature.as_str().map(str::to_owned)).collect();
         }
+        if let Some(level) = data["verification_level"].as_u64() {
+            guild.verification_level = Some(level as u8);
+        }
+        if let Some(level) = data["explicit_content_filter"].as_u64() {
+            guild.explicit_content_filter = Some(level as u8);
+        }
+        if data.get("rules_channel_id").is_some() {
+            guild.rules_channel_id = snowflake(data, "rules_channel_id");
+        }
+        if data.get("public_updates_channel_id").is_some() {
+            guild.public_updates_channel_id = snowflake(data, "public_updates_channel_id");
+        }
         if let Some(icon) = data.get("icon") {
             guild.icon = icon.as_str().map(str::to_owned);
         }

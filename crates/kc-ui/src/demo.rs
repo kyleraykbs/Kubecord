@@ -1108,6 +1108,10 @@ impl AppState {
             }
             mode if mode.starts_with("settings-") || mode == "invite" => {
                 FAKE_REST.set(mode != "settings-error");
+                // The owner's pages need the owner.
+                if matches!(mode, "settings-owner" | "settings-community") {
+                    store.apply("GUILD_UPDATE", &json!({"id": GUILD.to_string(), "name": "Demo Server", "owner_id": ME.to_string()}));
+                }
                 // Some of the server's own emoji and stickers.
                 store.apply("GUILD_EMOJIS_UPDATE", &json!({"guild_id": GUILD.to_string(), "emojis": [
                     {"id": "900001", "name": "kubecord", "animated": false},

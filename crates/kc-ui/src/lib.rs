@@ -13,6 +13,7 @@ mod idle;
 mod forward;
 mod inbox;
 mod message_requests;
+mod mfa;
 mod polls;
 mod safety;
 mod soundboard;

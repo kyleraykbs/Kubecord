@@ -18,6 +18,7 @@ use kc_state::time::{iso_to_unix_millis, unix_millis_now};
 use kc_state::{ChannelType, Role, StoreEvent};
 
 mod expressions;
+mod ownership;
 
 use crate::moderation::color_dot;
 use crate::shell::AppState;
@@ -114,6 +115,19 @@ const PAGES: &[(&str, &str, &str, u64)] = &[
         "Audit Log",
         "document-open-recent-symbolic",
         permissions::VIEW_AUDIT_LOG,
+    ),
+    (
+        "community",
+        "Community",
+        "system-users-symbolic",
+        permissions::ADMINISTRATOR,
+    ),
+    // The owner's only (see `show_server_settings`).
+    (
+        "owner",
+        "Transfer & Delete",
+        "dialog-warning-symbolic",
+        permissions::ADMINISTRATOR,
     ),
 ];
 
@@ -290,6 +304,7 @@ pub(crate) struct Panel {
     emojis: gtk::Box,
     stickers: gtk::Box,
     sounds: gtk::Box,
+    community: gtk::Box,
 }
 
 impl Panel {
@@ -369,19 +384,21 @@ impl AppState {
         guild: Snowflake,
         page: Option<&str>,
     ) -> Option<Rc<Panel>> {
-        let (name, granted) = self
+        let (name, granted, owner) = self
             .with_session(|session| {
                 session.store.read(|state| {
+                    let server = state.guilds.get(&guild)?;
                     Some((
-                        state.guilds.get(&guild)?.name.clone(),
+                        server.name.clone(),
                         state.guild_permissions(guild),
+                        server.owner_id.is_some() && server.owner_id == state.my_id(),
                     ))
                 })
             })
             .flatten()?;
         let shown: Vec<&(&str, &str, &str, u64)> = PAGES
             .iter()
-            .filter(|(_, _, _, needs)| granted & needs != 0)
+            .filter(|(id, _, _, needs)| granted & needs != 0 && (*id != "owner" || owner))
             .collect();
         if shown.is_empty() {
             return None;
@@ -414,6 +431,7 @@ impl AppState {
             emojis: gtk::Box::new(gtk::Orientation::Vertical, 0),
             stickers: gtk::Box::new(gtk::Orientation::Vertical, 0),
             sounds: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            community: gtk::Box::new(gtk::Orientation::Vertical, 0),
         });
 
         let pages = gtk::Stack::new();
@@ -428,6 +446,8 @@ impl AppState {
                 "emoji" => self.emoji_page(&panel),
                 "stickers" => self.stickers_page(&panel),
                 "soundboard" => self.soundboard_page(&panel),
+                "community" => self.community_page(&panel),
+                "owner" => self.owner_page(&panel),
                 _ => self.audit_page(&panel),
             };
             pages.add_named(&page_scroll(&content), Some(id));
@@ -536,6 +556,7 @@ impl AppState {
                             app.fill_emojis(&panel);
                             app.fill_stickers(&panel);
                             app.fill_sounds(&panel);
+                            app.fill_community(&panel);
                         }
                         StoreEvent::GuildMembersUpdated(id) if id == guild => {
                             app.fill_members(&panel)

@@ -967,6 +967,80 @@ impl HttpClient {
     }
 
     /// Edits a guild (e.g. rename). Needs Manage Server.
+    // -- owner-only server actions ---------------------------------------
+
+    /// One request that may need a two-factor token (`mfa`, from
+    /// [`verify_mfa`](Self::verify_mfa)) in `X-Discord-MFA-Authorization`.
+    async fn request_with_mfa(&self, method: Method, path: &str, body: Option<&Value>, mfa: Option<&str>) -> Result<Value> {
+        let route = normalise_route(method.as_str(), path);
+        self.limiter.acquire(&route).await;
+        let mut request = self.request(method, path);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        if let Some(token) = mfa {
+            request = request.header("x-discord-mfa-authorization", token);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        self.limiter.update(&route, response.headers());
+        let bytes = response.bytes().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(error_from_body(status, &bytes));
+        }
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes).map_err(|source| Error::Decode { status, source })
+    }
+
+    /// Answers a two-factor prompt: `mfa_type` is `totp` (an authenticator
+    /// or backup code), `backup` or `password`. Returns the token that
+    /// lets the request through (for five minutes).
+    pub async fn verify_mfa(&self, ticket: &str, mfa_type: &str, data: &str) -> Result<String> {
+        let value = self
+            .post("/mfa/finish", json!({ "ticket": ticket, "mfa_type": mfa_type, "data": data }))
+            .await?;
+        value["token"].as_str().map(str::to_owned).ok_or_else(|| Error::Api {
+            status: StatusCode::OK,
+            code: None,
+            message: "two-factor check returned no token".to_owned(),
+            retry_after: None,
+        })
+    }
+
+    /// Deletes a server for good (its owner only).
+    pub async fn delete_guild(&self, guild_id: Snowflake, mfa: Option<&str>) -> Result<()> {
+        self.request_with_mfa(Method::DELETE, &format!("/guilds/{guild_id}"), None, mfa).await?;
+        Ok(())
+    }
+
+    /// Emails the owner the code that confirms an ownership transfer
+    /// (needed only when the account has an email and no two-factor).
+    pub async fn request_transfer_code(&self, guild_id: Snowflake) -> Result<()> {
+        self.request_json(Method::PUT, &format!("/guilds/{guild_id}/pincode"), None).await?;
+        Ok(())
+    }
+
+    /// Gives the server to another member (its owner only); `code` is the
+    /// emailed one, when asked for.
+    pub async fn transfer_ownership(&self, guild_id: Snowflake, user_id: Snowflake, code: Option<&str>, mfa: Option<&str>) -> Result<()> {
+        let mut body = json!({ "owner_id": user_id });
+        if let Some(code) = code {
+            body["code"] = json!(code);
+        }
+        self.request_with_mfa(Method::PATCH, &format!("/guilds/{guild_id}"), Some(&body), mfa).await?;
+        Ok(())
+    }
+
+    /// Turns a server into a Community server (or back, with `enable` off).
+    pub async fn set_community(&self, guild_id: Snowflake, change: &CommunityChange, mfa: Option<&str>) -> Result<Guild> {
+        let value = self
+            .request_with_mfa(Method::PATCH, &format!("/guilds/{guild_id}"), Some(&change.body()), mfa)
+            .await?;
+        Self::parse(value, StatusCode::OK)
+    }
+
     pub async fn edit_guild(&self, guild_id: Snowflake, payload: Value) -> Result<Guild> {
         let value = self.patch(&format!("/guilds/{guild_id}"), payload).await?;
         Self::parse(value, StatusCode::OK)
@@ -2419,6 +2493,54 @@ fn avatar_body(image: Option<&[u8]>) -> Value {
 }
 
 /// Fields to set on a role; `None` leaves a field alone.
+/// Turning Community on or off, as the web client's Enable Community does
+/// it: one change to the server with its features and what Community
+/// requires (a verification level of at least Low, media scanned for
+/// everyone, a rules channel and a channel for Discord's notices).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommunityChange {
+    pub enable: bool,
+    /// The server's features now.
+    pub features: Vec<String>,
+    pub verification_level: u8,
+    /// `None`: Discord makes a new one.
+    pub rules_channel: Option<Snowflake>,
+    pub updates_channel: Option<Snowflake>,
+    /// New members get notified of mentions only (Discord recommends it).
+    pub mentions_only: bool,
+}
+
+impl CommunityChange {
+    pub fn body(&self) -> Value {
+        let mut features: Vec<String> = self
+            .features
+            .iter()
+            // Discovery needs Community; it goes when Community does.
+            .filter(|feature| self.enable || !matches!(feature.as_str(), "COMMUNITY" | "DISCOVERABLE"))
+            .cloned()
+            .collect();
+        if !self.enable {
+            return json!({ "features": features });
+        }
+        if !features.iter().any(|feature| feature == "COMMUNITY") {
+            features.push("COMMUNITY".to_owned());
+        }
+        // "1" has Discord make a new #rules or #moderator-only channel.
+        let channel = |id: Option<Snowflake>| id.map_or_else(|| "1".to_owned(), |id| id.to_string());
+        let mut body = json!({
+            "features": features,
+            "verification_level": self.verification_level.max(1),
+            "explicit_content_filter": 2,
+            "rules_channel_id": channel(self.rules_channel),
+            "public_updates_channel_id": channel(self.updates_channel),
+        });
+        if self.mentions_only {
+            body["default_message_notifications"] = json!(1);
+        }
+        body
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoleEdit {
     pub name: Option<String>,
@@ -2648,6 +2770,19 @@ fn error_from_body(status: StatusCode, bytes: &[u8]) -> Error {
             rqtoken: text("captcha_rqtoken"),
         };
     }
+    if let Some(value) = &value
+        && value["code"].as_i64() == Some(60003)
+        && let Some(ticket) = value.pointer("/mfa/ticket").and_then(Value::as_str)
+    {
+        return Error::Mfa {
+            ticket: ticket.to_owned(),
+            methods: value
+                .pointer("/mfa/methods")
+                .and_then(Value::as_array)
+                .map(|methods| methods.iter().filter_map(|method| method["type"].as_str().map(str::to_owned)).collect())
+                .unwrap_or_default(),
+        };
+    }
     let detail = value
         .as_ref()
         .and_then(|value| value.get("errors"))
@@ -2747,6 +2882,42 @@ mod tests {
             .as_millis() as u64;
         assert!(now.abs_diff(millis) < 5_000);
         assert_eq!(first.to_string().len(), 19);
+    }
+
+    #[test]
+    fn a_two_factor_prompt_becomes_an_mfa_error() {
+        let body = br#"{"message": "Two factor is required for this operation", "code": 60003,
+            "mfa": {"ticket": "abc", "methods": [{"type": "totp", "backup_codes_allowed": true}, {"type": "password"}]}}"#;
+        match error_from_body(StatusCode::UNAUTHORIZED, body) {
+            Error::Mfa { ticket, methods } => {
+                assert_eq!(ticket, "abc");
+                assert_eq!(methods, vec!["totp", "password"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn community_changes_are_what_the_web_client_sends() {
+        let on = CommunityChange {
+            enable: true,
+            features: vec!["NEWS".into()],
+            verification_level: 0,
+            rules_channel: Some(Snowflake(7)),
+            updates_channel: None,
+            mentions_only: true,
+        };
+        assert_eq!(
+            on.body(),
+            json!({"features": ["NEWS", "COMMUNITY"], "verification_level": 1, "explicit_content_filter": 2,
+                "rules_channel_id": "7", "public_updates_channel_id": "1", "default_message_notifications": 1})
+        );
+        let off = CommunityChange {
+            enable: false,
+            features: vec!["COMMUNITY".into(), "DISCOVERABLE".into(), "NEWS".into()],
+            ..CommunityChange::default()
+        };
+        assert_eq!(off.body(), json!({"features": ["NEWS"]}));
     }
 
     #[test]

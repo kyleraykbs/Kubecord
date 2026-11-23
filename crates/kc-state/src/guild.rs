@@ -172,6 +172,18 @@ pub struct Guild {
     pub emojis: Vec<Emoji>,
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub stickers: Vec<Sticker>,
+    /// 0 none, 1 low (verified email), 2 medium, 3 high, 4 very high.
+    #[serde(default)]
+    pub verification_level: Option<u8>,
+    /// Whose media is scanned: 0 nobody, 1 members without roles, 2 all.
+    #[serde(default)]
+    pub explicit_content_filter: Option<u8>,
+    /// A Community server's rules channel.
+    #[serde(default)]
+    pub rules_channel_id: Option<Snowflake>,
+    /// Where a Community server's moderators get Discord's notices.
+    #[serde(default)]
+    pub public_updates_channel_id: Option<Snowflake>,
     /// What the server has turned on or been given (`COMMUNITY`, …).
     #[serde(default, deserialize_with = "crate::serde_util::null_default")]
     pub features: Vec<String>,
