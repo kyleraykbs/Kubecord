@@ -151,6 +151,9 @@ pub struct CapturePreferences {
     pub safety_limits: bool,
     /// Tell Discord when you are typing, so others see it.
     pub send_typing: bool,
+    /// Show as Idle after ten minutes away from the app, as Discord's own
+    /// clients do (only from Online). Off by default.
+    pub auto_idle: bool,
     /// Height of the call above a DM's chat, in pixels.
     pub call_height: i32,
     /// Camera capture format: 0 automatic, 1 MJPEG, 2 raw.
@@ -321,6 +324,7 @@ impl Default for CapturePreferences {
             captcha_in_app: true,
             safety_limits: true,
             send_typing: true,
+            auto_idle: false,
             call_height: CALL_HEIGHT,
             camera_format: 0,
             self_preview: true,

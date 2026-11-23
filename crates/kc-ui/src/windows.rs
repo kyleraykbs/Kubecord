@@ -76,10 +76,11 @@ impl AppState {
         // GIFs keep playing while any of the app's windows has the focus.
         let app = Rc::downgrade(self);
         window.connect_is_active_notify(move |_| {
+            crate::animation::set_window_focused(crate::animation::app_focused());
             if let Some(app) = app.upgrade() {
                 app.queue_players_update();
+                app.away_changed();
             }
-            crate::animation::set_window_focused(crate::animation::app_focused());
         });
         let app = Rc::downgrade(self);
         let key_owned = key.to_owned();

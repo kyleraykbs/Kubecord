@@ -9,6 +9,7 @@ mod channel_settings;
 mod chat;
 mod chat_select;
 mod code;
+mod idle;
 mod safety;
 mod components;
 mod composer;

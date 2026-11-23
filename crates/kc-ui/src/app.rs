@@ -644,6 +644,7 @@ impl AppState {
             // window is focused, unless the setting keeps them running.
             app.queue_players_update();
             crate::animation::set_window_focused(crate::animation::app_focused());
+            app.away_changed();
             if window.is_active() && app.chat.borrow().at_bottom {
                 let channel = app.chat.borrow().channel;
                 if let Some(channel) = channel {

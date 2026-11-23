@@ -179,6 +179,7 @@ Kubecord uses when neither the app nor your configuration sets a value.
 | --- | --- | --- |
 | `use_24_hour_time` | `false` | Show times on a 24-hour clock (`17:58`) instead of `5:58 PM`. |
 | `send_typing` | `true` | Tell others when you are typing. |
+| `auto_idle` | `false` | Show as Idle after 10 minutes away from the app, until you come back (only from Online). |
 | `spellcheck` | `true` | Underline misspelled words in the message box. |
 | `unload_distant_messages` | `true` | Unload messages far from where you are reading, to save memory (they reload when you scroll back). |
 | `animate_gifs_unfocused` | `false` | Keep GIFs playing while the window is not focused. |

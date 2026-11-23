@@ -669,6 +669,24 @@ impl AppState {
         typing.add(&show);
         page.append(&typing);
 
+        let status = adw::PreferencesGroup::new();
+        status.set_title("Status");
+        let idle = adw::SwitchRow::new();
+        idle.set_title("Go Idle When Away");
+        mark_declared(&idle, "auto_idle");
+        idle.set_subtitle(
+            "After 10 minutes away from Kubecord, show as Idle until you come back, as Discord's own apps do. Only when you're Online.",
+        );
+        idle.set_subtitle_lines(0);
+        idle.set_active(self.capture.borrow().auto_idle);
+        let app = self.clone();
+        idle.connect_active_notify(move |row| {
+            app.update_prefs(|prefs| prefs.auto_idle = row.is_active());
+            app.away_changed();
+        });
+        status.add(&idle);
+        page.append(&status);
+
         let time = adw::PreferencesGroup::new();
         time.set_title("Time");
         let clock = adw::SwitchRow::new();

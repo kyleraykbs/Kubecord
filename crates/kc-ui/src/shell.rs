@@ -1026,6 +1026,16 @@ impl AppState {
         let session = model.sessions.get_mut(&active)?;
         Some(write(session))
     }
+
+    /// Mutates one account's session, shown or not.
+    pub(crate) fn with_account_session_mut<R>(
+        &self,
+        account: crate::session::AccountId,
+        write: impl FnOnce(&mut Session) -> R,
+    ) -> Option<R> {
+        let mut model = self.model.borrow_mut();
+        Some(write(model.sessions.get_mut(&account)?))
+    }
 }
 
 /// What a notice's action button does.

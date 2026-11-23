@@ -304,26 +304,41 @@ impl GatewayHandle {
         custom: Option<(&str, Option<&str>, Option<Snowflake>)>,
         afk: bool,
     ) {
+        self.update_presence_since(status, custom, 0, afk);
+    }
+
+    /// [`Self::update_presence`] with `since`: when the user went idle, in
+    /// Unix milliseconds (0 when not idle).
+    pub fn update_presence_since(
+        &self,
+        status: &str,
+        custom: Option<(&str, Option<&str>, Option<Snowflake>)>,
+        since: u64,
+        afk: bool,
+    ) {
         let activities = match custom {
+            // The web client's custom status activity, in its order: an
+            // emoji (null without one) and empty metadata.
             Some((text, emoji_name, emoji_id)) => {
-                let mut activity = json!({
-                    "type": 4,
-                    "name": "Custom Status",
-                    "state": text,
-                });
-                if emoji_name.is_some() || emoji_id.is_some() {
-                    activity["emoji"] = json!({
+                let emoji = (emoji_name.is_some() || emoji_id.is_some()).then(|| {
+                    json!({
                         "name": emoji_name.unwrap_or(""),
                         "id": emoji_id.map(|id| id.to_string()),
-                    });
-                }
-                vec![activity]
+                    })
+                });
+                vec![json!({
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": text,
+                    "emoji": emoji,
+                    "metadata": {},
+                })]
             }
             None => Vec::new(),
         };
         self.send(json!({
             "op": 3,
-            "d": { "since": 0, "activities": activities, "status": status, "afk": afk }
+            "d": { "status": status, "since": since, "activities": activities, "afk": afk }
         }));
     }
 
@@ -341,6 +356,33 @@ impl GatewayHandle {
         self.send(json!({
             "op": 8,
             "d": { "guild_id": [guild_id.to_string()], "user_ids": ids, "presences": false }
+        }));
+    }
+
+    /// Stops the subscriptions of `guild_ids` (typing, activities, member
+    /// lists), as the web client does when the user goes idle; threads stay.
+    pub fn unsubscribe_guilds(&self, guild_ids: &[Snowflake]) {
+        if guild_ids.is_empty() {
+            return;
+        }
+        let mut subscriptions = serde_json::Map::new();
+        for guild_id in guild_ids {
+            subscriptions.insert(
+                guild_id.to_string(),
+                json!({
+                    "typing": false,
+                    "threads": true,
+                    "activities": false,
+                    "members": [],
+                    "member_updates": false,
+                    "channels": {},
+                    "thread_member_lists": [],
+                }),
+            );
+        }
+        self.send(json!({
+            "op": GUILD_SUBSCRIPTIONS_BULK,
+            "d": { "subscriptions": subscriptions }
         }));
     }
 
