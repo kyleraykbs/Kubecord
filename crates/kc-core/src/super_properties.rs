@@ -92,6 +92,29 @@ static HEARTBEAT_SESSION_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new
 /// Whether a window of the app has focus (`client_app_state`).
 static APP_FOCUSED: AtomicBool = AtomicBool::new(true);
 
+/// When the app started, in Unix milliseconds (the web client's page load:
+/// `initialization_timestamp` in the gateway's time-spent message).
+static LAUNCHED_MS: LazyLock<u64> = LazyLock::new(|| {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+});
+
+/// This launch's id (`client_launch_id`).
+pub fn launch_id() -> &'static str {
+    &LAUNCH_ID
+}
+
+/// This launch's analytics session (`client_heartbeat_session_id`).
+pub fn heartbeat_session_id() -> &'static str {
+    &HEARTBEAT_SESSION_ID
+}
+
+/// When this launch started, in Unix milliseconds.
+pub fn launched_ms() -> u64 {
+    *LAUNCHED_MS
+}
+
 /// Tells the identity whether one of the app's windows has focus.
 pub fn set_app_focused(focused: bool) {
     APP_FOCUSED.store(focused, Ordering::Relaxed);

@@ -829,6 +829,13 @@ impl AppState {
     }
 
     pub(crate) fn select_guild(self: &Rc<Self>, guild_id: Snowflake) {
+        // The web client asks for the server's voice channel statuses as it
+        // opens one.
+        if let Some((account, _, _)) = self.active()
+            && let Some(gateway) = crate::session::gateway(account)
+        {
+            gateway.request_channel_info(guild_id);
+        }
         let target = self.with_session_mut(|session| {
             session.dm_mode = false;
             session.selected_guild = Some(guild_id);
@@ -863,6 +870,13 @@ impl AppState {
             return;
         };
         self.withdraw_channel_notification(active, channel.id);
+        // Opening a DM, the web client asks whether a call is going on in it.
+        if channel.is_private()
+            && self.with_session(|session| session.selected_channel != Some(channel.id)).unwrap_or(true)
+            && let Some(gateway) = crate::session::gateway(active)
+        {
+            gateway.call_connect(channel.id);
+        }
         let is_voice_only = channel.kind.is_voice() && !channel.kind.is_text();
         let (fetch, subscribe) = self
             .with_session_mut(|session| {

@@ -20,6 +20,13 @@ const GUILD_SUBSCRIPTIONS_BULK: i64 = 37;
 const QOS_HEARTBEAT: i64 = 40;
 /// The version of the heartbeat's QoS payload the web client sends.
 const QOS_VERSION: u64 = 31;
+/// The time-spent message the web client sends on connecting and every 30
+/// minutes while the user is there.
+const UPDATE_TIME_SPENT_SESSION_ID: i64 = 41;
+const TIME_SPENT_EVERY: Duration = Duration::from_secs(30 * 60);
+/// After READY the web client first sets its voice state and presence, then
+/// (about half a second later) sends the time-spent message and a heartbeat.
+const AFTER_READY: Duration = Duration::from_millis(600);
 
 /// Discord closes a connection that sends more than this many messages in
 /// [`SEND_WINDOW`] (close code 4008).
@@ -333,7 +340,22 @@ impl GatewayHandle {
             .collect();
         self.send(json!({
             "op": 8,
-            "d": { "guild_id": [guild_id.to_string()], "user_ids": ids, "presences": true }
+            "d": { "guild_id": [guild_id.to_string()], "user_ids": ids, "presences": false }
+        }));
+    }
+
+    /// Opening a DM: asks whether a call is going on in it (op 13), as the
+    /// web client does when it shows a DM.
+    pub fn call_connect(&self, channel_id: Snowflake) {
+        self.send(json!({"op": 13, "d": {"channel_id": channel_id.to_string()}}));
+    }
+
+    /// Opening a server: asks for its voice channels' statuses and call
+    /// start times (op 43), as the web client does.
+    pub fn request_channel_info(&self, guild_id: Snowflake) {
+        self.send(json!({
+            "op": 43,
+            "d": {"guild_id": guild_id.to_string(), "fields": ["status", "voice_start_time"]}
         }));
     }
 
@@ -542,6 +564,9 @@ impl Gateway {
         budget.record(Instant::now());
         // Commands over the budget wait here instead of risking a 4008 close.
         let mut pending: VecDeque<Value> = VecDeque::new();
+        // When to send the time-spent message and a heartbeat after READY.
+        let mut after_ready: Option<tokio::time::Instant> = None;
+        let mut time_spent_sent: Option<Instant> = None;
 
         loop {
             // Send what the budget allows; a timer wakes for the rest.
@@ -576,6 +601,15 @@ impl Gateway {
                         if !*established {
                             continue;
                         }
+                        // Back after a long while: the time-spent message
+                        // too, then the heartbeat.
+                        if time_spent_sent.is_some_and(|sent| sent.elapsed() >= TIME_SPENT_EVERY) {
+                            budget.record(Instant::now());
+                            if write.send(Message::Text(time_spent_payload().to_string().into())).await.is_err() {
+                                return Outcome::Reconnect { resumable: true };
+                            }
+                            time_spent_sent = Some(Instant::now());
+                        }
                         let payload = heartbeat_payload(session.seq, &self.activity);
                         budget.record(Instant::now());
                         if write.send(Message::Text(payload.to_string().into())).await.is_err() {
@@ -587,10 +621,32 @@ impl Gateway {
                     enqueue(&mut pending, payload);
                 }
                 _ = tokio::time::sleep(throttled.unwrap_or(Duration::ZERO)), if throttled.is_some() => {}
+                _ = tokio::time::sleep_until(after_ready.unwrap_or_else(tokio::time::Instant::now)), if after_ready.is_some() => {
+                    after_ready = None;
+                    for payload in [time_spent_payload(), heartbeat_payload(session.seq, &self.activity)] {
+                        budget.record(Instant::now());
+                        if write.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            return Outcome::Reconnect { resumable: true };
+                        }
+                    }
+                    time_spent_sent = Some(Instant::now());
+                    awaiting_ack = true;
+                }
                 _ = heartbeat.tick() => {
                     if awaiting_ack {
                         warn!("gateway heartbeat not acknowledged; reconnecting");
                         return Outcome::Reconnect { resumable: true };
+                    }
+                    // Every 30 minutes while the user is there, the time-spent
+                    // message goes first.
+                    if self.activity.active()
+                        && time_spent_sent.is_some_and(|sent| sent.elapsed() >= TIME_SPENT_EVERY)
+                    {
+                        budget.record(Instant::now());
+                        if write.send(Message::Text(time_spent_payload().to_string().into())).await.is_err() {
+                            return Outcome::Reconnect { resumable: true };
+                        }
+                        time_spent_sent = Some(Instant::now());
                     }
                     let payload = heartbeat_payload(session.seq, &self.activity);
                     budget.record(Instant::now());
@@ -643,6 +699,7 @@ impl Gateway {
                                             .as_str()
                                             .map(str::to_owned);
                                         session.qos_token = data["qos_token"].as_str().map(str::to_owned);
+                                        after_ready = Some(tokio::time::Instant::now() + AFTER_READY);
                                         *established = true;
                                         info!(
                                             user = data.pointer("/user/username").and_then(|value| value.as_str()).unwrap_or("?"),
@@ -730,6 +787,20 @@ fn gateway_url(base: &str) -> String {
         "{}/?encoding=json&v={GATEWAY_VERSION}&compress=zlib-stream",
         base.trim_end_matches('/')
     )
+}
+
+/// The time-spent message (op 41): this launch's start, its analytics
+/// session and its launch id.
+fn time_spent_payload() -> Value {
+    use kc_core::super_properties as identity;
+    json!({
+        "op": UPDATE_TIME_SPENT_SESSION_ID,
+        "d": {
+            "initialization_timestamp": identity::launched_ms(),
+            "session_id": identity::heartbeat_session_id(),
+            "client_launch_id": identity::launch_id(),
+        }
+    })
 }
 
 /// A heartbeat as the web client sends it: op 40, with whether the user is
@@ -959,6 +1030,15 @@ mod tests {
             gateway_url("wss://gateway.discord.gg/"),
             "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream"
         );
+    }
+
+    #[test]
+    fn the_time_spent_message_names_this_launch() {
+        let payload = time_spent_payload();
+        assert_eq!(payload["op"], 41);
+        let keys: Vec<_> = payload["d"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["initialization_timestamp", "session_id", "client_launch_id"]);
+        assert_eq!(payload["d"]["client_launch_id"], kc_core::super_properties::launch_id());
     }
 
     #[test]

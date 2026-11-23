@@ -1139,6 +1139,7 @@ impl AppState {
                         "id": index.to_string(),
                         "filename": upload.name,
                         "uploaded_filename": handle["upload_filename"].take(),
+                        "original_content_type": kc_http::client::content_type(&upload.name),
                     }));
                 }
                 http.send(

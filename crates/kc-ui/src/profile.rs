@@ -242,6 +242,22 @@ impl AppState {
             clear_box(&servers);
             friends.append(&placeholder(message));
         });
+        // The note comes separately (as the web client fetches it, each time
+        // a profile opens).
+        if !is_me {
+            let weak = Rc::downgrade(&profile);
+            let http = http.clone();
+            spawn_local(
+                self,
+                async move { http.note(user_id).await },
+                move |_, result| {
+                    if let (Some(profile), Ok(note)) = (weak.upgrade(), result) {
+                        profile.model.borrow_mut().note = note.unwrap_or_default();
+                        profile.render();
+                    }
+                },
+            );
+        }
         // Shown in the last few minutes: no need to ask Discord again.
         if let Some(data) = http.cached_profile(user_id, guild) {
             show(&data);
@@ -780,7 +796,7 @@ impl Profile {
                     // Only once Discord takes it: a captcha or error leaves
                     // the button as it was.
                     let weak = Rc::downgrade(&profile);
-                    profile.app.befriend_user_then(user_id, move |sent| {
+                    profile.app.befriend_user_then(user_id, "User Profile", move |sent| {
                         if sent && let Some(profile) = weak.upgrade() {
                             profile.model.borrow_mut().relationship = Some(next);
                             profile.render();

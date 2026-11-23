@@ -914,10 +914,21 @@ fn spawn_account(
                                     }
                                     voice.self_user_id =
                                         serde_json::from_value(data["user"]["id"].clone()).ok();
-                                    // The identify said "unknown", as the web
-                                    // client's does; once connected it sets
-                                    // the status and custom status saved in
-                                    // the account's settings.
+                                    // As the web client does once connected:
+                                    // its voice state (in no channel, unless
+                                    // in a call being rejoined), then the
+                                    // status and custom status saved in the
+                                    // account's settings (the identify said
+                                    // "unknown").
+                                    if voice.connection.is_none() {
+                                        voice.handle.update_voice_state(
+                                            None,
+                                            None,
+                                            voice.muted,
+                                            voice.deafened,
+                                            false,
+                                        );
+                                    }
                                     let (status, custom) = store.read(|state| {
                                         (state.status.clone(), state.custom_status.clone())
                                     });

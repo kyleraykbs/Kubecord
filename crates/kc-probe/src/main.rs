@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
                 .and_then(|user| user["id"].as_str())
                 .and_then(|id| id.parse::<u64>().ok())
                 .context("no DM recipient with that username")?;
-            match http.accept_friend(kc_core::Snowflake(id), None).await {
+            match http.accept_friend(kc_core::Snowflake(id), "ContextMenu", None).await {
                 Ok(()) => println!("friend request sent"),
                 Err(error) => println!("failed: {error} (captcha: {})", error.is_captcha()),
             }
@@ -645,6 +645,8 @@ async fn subscribe(token: Token, guild_id: Snowflake, channel_id: Snowflake) -> 
         match event {
             GatewayEvent::Dispatch { name, .. } => {
                 if name == "READY" {
+                    handle.update_voice_state(None, None, true, false, false);
+                    handle.request_channel_info(guild_id);
                     handle.subscribe_channel(guild_id, channel_id);
                 }
                 eprintln!("dispatch {name}");

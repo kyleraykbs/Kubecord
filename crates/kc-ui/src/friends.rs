@@ -216,7 +216,7 @@ impl AppState {
                         "Discord wants to make sure you're human before it accepts this friend request.",
                         move |captcha| {
                             let http = http.clone();
-                            async move { http.accept_friend(id, captcha.as_ref()).await }
+                            async move { http.accept_friend(id, "Friends", captcha.as_ref()).await }
                         },
                         move |app, result| match result {
                             Ok(()) => {}

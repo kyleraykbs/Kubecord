@@ -955,17 +955,20 @@ impl HttpClient {
         Ok(())
     }
 
-    /// Accepts an incoming request or sends one to a known user.
+    /// Accepts an incoming request or sends one to a known user. `location`
+    /// is where in the app it was done, as the web client reports it
+    /// ("Friends", "ContextMenu", "User Profile").
     pub async fn accept_friend(
         &self,
         user_id: Snowflake,
+        location: &str,
         captcha: Option<&CaptchaAnswer>,
     ) -> Result<()> {
         self.request_json_full(
             Method::PUT,
             &format!("/users/@me/relationships/{user_id}"),
             Some(&json!({})),
-            Some(&json!({ "location": "Friends" })),
+            Some(&json!({ "location": location })),
             captcha,
         )
         .await?;
@@ -1008,14 +1011,15 @@ impl HttpClient {
 
     // -- users -----------------------------------------------------------
 
-    /// A user's profile: bio, pronouns, badges, mutual guilds and friends.
+    /// A user's profile: bio, pronouns, badges, mutual guilds and friends,
+    /// as the web client's full profile (`type=modal`) asks for it.
     pub async fn user_profile(
         &self,
         user_id: Snowflake,
         guild_id: Option<Snowflake>,
     ) -> Result<Value> {
         let mut path = format!(
-            "/users/{user_id}/profile?type=popout&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
+            "/users/{user_id}/profile?type=modal&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
         );
         if let Some(guild_id) = guild_id {
             path.push_str(&format!("&guild_id={guild_id}"));
@@ -1040,6 +1044,17 @@ impl HttpClient {
     pub fn forget_profile(&self, user_id: Snowflake) {
         if let Ok(mut cache) = self.profiles.lock() {
             cache.retain(|(user, _), _| *user != user_id);
+        }
+    }
+
+    /// The note on `user_id`, if there is one (Discord answers 404 when
+    /// there is none). READY no longer carries notes (the LAZY_USER_NOTES
+    /// capability), so the web client fetches the note with the profile.
+    pub async fn note(&self, user_id: Snowflake) -> Result<Option<String>> {
+        match self.get(&format!("/users/@me/notes/{user_id}")).await {
+            Ok(value) => Ok(value["note"].as_str().map(str::to_owned)),
+            Err(Error::Api { status, .. }) if status == StatusCode::NOT_FOUND => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -1216,7 +1231,9 @@ impl HttpClient {
     /// Sends a message with every option the composer supports.
     pub async fn send(&self, channel_id: Snowflake, message: &Outgoing) -> Result<Message> {
         let nonce = message.nonce.clone().unwrap_or_else(|| nonce().to_string());
+        // The web client's body, in its order.
         let mut body = json!({
+            "mobile_network_type": "unknown",
             "content": message.content,
             "nonce": nonce,
             "tts": false,
@@ -1239,7 +1256,12 @@ impl HttpClient {
             body["sticker_ids"] = json!(message.sticker_ids);
         }
         let value = self
-            .post(&format!("/channels/{channel_id}/messages"), body)
+            .request_json_in(
+                Method::POST,
+                &format!("/channels/{channel_id}/messages"),
+                Some(&body),
+                Some(&json!({ "location": "chat_input" })),
+            )
             .await?;
         Self::parse(value, StatusCode::OK)
     }
@@ -1541,15 +1563,20 @@ impl HttpClient {
 
     // -- reactions -------------------------------------------------------
 
+    /// Adds a reaction. `location` is where it was picked, as the web client
+    /// reports it: "Message" (an existing reaction clicked) or "Message
+    /// Reaction Picker".
     pub async fn add_reaction(
         &self,
         channel_id: Snowflake,
         message_id: Snowflake,
         emoji: &str,
+        location: &str,
     ) -> Result<()> {
         self.put_empty(&format!(
-            "/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
-            encode_emoji(emoji)
+            "/channels/{channel_id}/messages/{message_id}/reactions/{}/@me?location={}&type=0",
+            encode_emoji(emoji),
+            location.replace(' ', "%20"),
         ))
         .await
     }
@@ -1602,14 +1629,20 @@ impl HttpClient {
         bytes: Vec<u8>,
     ) -> Result<Value> {
         let size = bytes.len();
+        // The web client numbers the files it has picked this session and
+        // names their type (empty when the browser does not know it).
+        static PICKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let picked = PICKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let reserved = self
             .post(
                 &format!("/channels/{channel_id}/attachments"),
                 json!({
                     "files": [{
-                        "id": "0",
                         "filename": filename,
                         "file_size": size,
+                        "id": picked.to_string(),
+                        "is_clip": false,
+                        "original_content_type": content_type(filename),
                     }]
                 }),
             )
@@ -1636,6 +1669,8 @@ impl HttpClient {
             .http
             .put(upload_url)
             .header("content-type", "application/octet-stream")
+            .header("origin", "https://discord.com")
+            .header("referer", "https://discord.com/")
             .body(bytes)
             .send()
             .await?;
@@ -1772,14 +1807,55 @@ fn base64_json(value: &Value) -> String {
     base64::engine::general_purpose::STANDARD.encode(value.to_string())
 }
 
+/// A message nonce as the web client makes it: the snowflake for now
+/// (milliseconds since Discord's epoch, shifted 22 bits). Two in the same
+/// millisecond would clash, so a later one moves on a millisecond.
 fn nonce() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let millis = std::time::SystemTime::now()
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    (millis << 12) | (COUNTER.fetch_add(1, Ordering::Relaxed) & 0xfff)
+        .unwrap_or(0)
+        .saturating_sub(DISCORD_EPOCH_MS);
+    let millis = LAST
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |last| Some(now.max(last + 1)))
+        .map_or(now, |last| now.max(last + 1));
+    millis << 22
+}
+
+/// The MIME type a browser gives a file, from its extension; empty when it
+/// does not know it (as the web client then sends).
+pub fn content_type(filename: &str) -> &'static str {
+    let extension = filename.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "text/javascript",
+        _ => "",
+    }
 }
 
 /// `name:id` for custom emoji, percent-encoded UTF-8 for unicode emoji.
@@ -2218,6 +2294,30 @@ pub fn channel_notification_payload(channel_id: Snowflake, muted: bool, level: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonces_are_snowflakes_for_now_and_never_repeat() {
+        let first = nonce();
+        let second = nonce();
+        assert!(second > first);
+        // A snowflake's low 22 bits are zero, as the web client's are.
+        assert_eq!(first & ((1 << 22) - 1), 0);
+        let millis = (first >> 22) + 1_420_070_400_000;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(now.abs_diff(millis) < 5_000);
+        assert_eq!(first.to_string().len(), 19);
+    }
+
+    #[test]
+    fn content_types_are_what_a_browser_names() {
+        assert_eq!(content_type("cat.PNG"), "image/png");
+        assert_eq!(content_type("clip.mp4"), "video/mp4");
+        assert_eq!(content_type("notes"), "");
+        assert_eq!(content_type("weird.xyz"), "");
+    }
 
     #[test]
     fn last_viewed_counts_days_since_discords_epoch() {

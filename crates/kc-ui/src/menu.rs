@@ -544,14 +544,16 @@ impl AppState {
 
     /// Sends a friend request to a user already known to the client.
     pub(crate) fn befriend_user(self: &Rc<Self>, user_id: Snowflake) {
-        self.befriend_user_then(user_id, |_| {});
+        self.befriend_user_then(user_id, "ContextMenu", |_| {});
     }
 
     /// Sends (or accepts) a friend request; `done` learns whether Discord
     /// took it.
+    /// `location` is where it was asked for, as the web client reports it.
     pub(crate) fn befriend_user_then(
         self: &Rc<Self>,
         user_id: Snowflake,
+        location: &'static str,
         done: impl FnOnce(bool) + 'static,
     ) {
         let Some((_, _, store)) = self.active() else {
@@ -566,15 +568,20 @@ impl AppState {
                 .is_some_and(|relationship| relationship.kind == kc_state::Relationship::INCOMING_REQUEST)
         });
         if accepting {
-            self.befriend_now(user_id, done);
+            self.befriend_now(user_id, location, done);
         } else {
             // Refused or cancelled, `done` is not called: whatever waits on
             // it stays as it was, as when Discord refuses.
-            self.guard(crate::safety::Action::FriendRequest, move |app| app.befriend_now(user_id, done));
+            self.guard(crate::safety::Action::FriendRequest, move |app| app.befriend_now(user_id, location, done));
         }
     }
 
-    fn befriend_now(self: &Rc<Self>, user_id: Snowflake, done: impl FnOnce(bool) + 'static) {
+    fn befriend_now(
+        self: &Rc<Self>,
+        user_id: Snowflake,
+        location: &'static str,
+        done: impl FnOnce(bool) + 'static,
+    ) {
         let Some((_, http, _)) = self.active() else {
             return;
         };
@@ -582,7 +589,7 @@ impl AppState {
             "Discord wants to make sure you're human before it sends your friend request.",
             move |captcha| {
                 let http = http.clone();
-                async move { http.accept_friend(user_id, captcha.as_ref()).await }
+                async move { http.accept_friend(user_id, location, captcha.as_ref()).await }
             },
             move |app, result| match result {
                 Ok(()) => {

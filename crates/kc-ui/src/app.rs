@@ -79,6 +79,8 @@ pub fn run() -> glib::ExitCode {
     // the live one as soon as discord.com answers (before accounts connect,
     // usually).
     kc_core::super_properties::load_cached_build_number();
+    // Fixes the launch time now, not at the first gateway connection.
+    let _ = kc_core::super_properties::launched_ms();
     runtime.spawn(kc_http::client::refresh_build_number());
     runtime.spawn(kc_http::client::refresh_chrome_version());
     let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();

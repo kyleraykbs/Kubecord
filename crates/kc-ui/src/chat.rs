@@ -1862,7 +1862,7 @@ impl AppState {
         let (channel_id, message_id) = (message.channel_id, message.id);
         let was_mine = reaction.me;
         chip.connect_clicked(move |_| {
-            app.toggle_reaction(channel_id, message_id, key.clone(), !was_mine);
+            app.toggle_reaction(channel_id, message_id, key.clone(), !was_mine, "Message");
         });
         chip
     }
@@ -1873,6 +1873,7 @@ impl AppState {
         message_id: Snowflake,
         emoji: String,
         add: bool,
+        location: &'static str,
     ) {
         let Some((_, http, _)) = self.active() else {
             return;
@@ -1880,7 +1881,7 @@ impl AppState {
         self.spawn(
             async move {
                 if add {
-                    http.add_reaction(channel_id, message_id, &emoji).await
+                    http.add_reaction(channel_id, message_id, &emoji, location).await
                 } else {
                     http.remove_reaction(channel_id, message_id, &emoji).await
                 }
@@ -1913,7 +1914,7 @@ impl AppState {
                 chooser.set_parent(button);
                 let target = app.clone();
                 chooser.connect_emoji_picked(move |_, emoji| {
-                    target.toggle_reaction(channel_id, message_id, emoji.to_owned(), true);
+                    target.toggle_reaction(channel_id, message_id, emoji.to_owned(), true, "Message Reaction Picker");
                 });
                 let target = app.clone();
                 chooser.connect_closed(move |chooser| {
