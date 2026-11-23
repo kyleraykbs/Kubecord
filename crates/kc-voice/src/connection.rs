@@ -728,6 +728,9 @@ async fn run(
         }),
     )
     .await?;
+    // The web client then asks for the voice server's version (op 16; the
+    // answer is ignored, like any other message before READY).
+    send_json(&mut write, json!({"op": 16, "d": {}})).await?;
 
     let ready = wait_for_opcode(&mut read, 2).await?;
     let d = &ready["d"];
