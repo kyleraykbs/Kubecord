@@ -655,7 +655,8 @@ impl AppState {
             let channel_id = session.selected_channel?;
             session.store.read(|state| {
                 let channel = state.channels.get(&channel_id)?;
-                if channel.kind.is_voice() && !channel.kind.is_text() {
+                // A voice channel's chat has a box only while it shows.
+                if channel.kind.is_voice() && !channel.kind.is_text() && !self.side_chat.get() {
                     return None;
                 }
                 let title = state.channel_title(channel);

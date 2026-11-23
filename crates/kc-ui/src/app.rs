@@ -629,6 +629,26 @@ impl AppState {
         self.dm_call_button
             .connect_clicked(move |_| app.toggle_dm_call());
 
+        // A voice channel's chat beside its call: opening the channel again
+        // fetches its history and marks it read.
+        let app = self.clone();
+        self.side_chat_toggle.connect_toggled(move |button| {
+            if app.side_chat.replace(button.is_active()) == button.is_active() {
+                return;
+            }
+            button.set_tooltip_text(Some(if button.is_active() { "Hide Chat" } else { "Show Chat" }));
+            let channel = app
+                .with_session(|session| {
+                    let id = session.selected_channel?;
+                    session.store.read(|state| state.channels.get(&id).cloned())
+                })
+                .flatten();
+            if let Some(channel) = channel {
+                app.chat.borrow_mut().channel = None;
+                app.open_channel(channel);
+            }
+        });
+
         let app = self.clone();
         self.members_toggle.connect_toggled(move |button| {
             if app.members_guard.get() {
@@ -799,7 +819,9 @@ impl AppState {
         // The call's height above a DM's chat is kept too, while both show.
         let app = self.clone();
         self.call_split.connect_position_notify(move |split| {
-            if !(app.call_area.is_visible() && app.chat_box.is_visible()) {
+            if !(app.call_area.is_visible() && app.chat_box.is_visible())
+                || split.orientation() != gtk::Orientation::Vertical
+            {
                 return;
             }
             let height = split.position();

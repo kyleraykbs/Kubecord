@@ -441,7 +441,9 @@ impl AppState {
                 self.render_voice_view(channel_id);
                 return;
             }
-            crate::voice::CallLayout::WithChat => self.render_voice_view(channel_id),
+            crate::voice::CallLayout::WithChat | crate::voice::CallLayout::Beside => {
+                self.render_voice_view(channel_id)
+            }
             crate::voice::CallLayout::Hidden => {
                 self.set_call_layout(crate::voice::CallLayout::Hidden);
             }
@@ -2303,8 +2305,20 @@ impl AppState {
                 .and_then(|channel| channel.guild_id)
         });
         let title = format!("Results for “{query}”");
+        let scope = match guild {
+            Some(guild) => kc_http::search::Scope::Guild(guild),
+            None => kc_http::search::Scope::Channel(channel_id),
+        };
+        let params = kc_http::search::SearchParams {
+            content: query,
+            channels: guild.map(|_| channel_id).into_iter().collect(),
+            ..Default::default()
+        };
         self.spawn(
-            async move { http.search(guild, channel_id, &query, 0).await },
+            async move {
+                http.search(scope, &params, kc_http::search::Tab::Messages, kc_http::search::Sort::Newest, 0)
+                    .await
+            },
             move |app, result| match result {
                 Ok(page) if page.indexing => {
                     app.set_status("Discord is still indexing this channel; try again shortly")

@@ -877,7 +877,10 @@ impl AppState {
         {
             gateway.call_connect(channel.id);
         }
-        let is_voice_only = channel.kind.is_voice() && !channel.kind.is_text();
+        // A voice channel's chat counts as open while it shows beside the
+        // call.
+        let is_voice_only =
+            channel.kind.is_voice() && !channel.kind.is_text() && !self.side_chat.get();
         let (fetch, subscribe) = self
             .with_session_mut(|session| {
                 let already_selected = session.selected_channel == Some(channel.id);

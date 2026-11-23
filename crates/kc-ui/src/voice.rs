@@ -106,6 +106,8 @@ pub(crate) enum CallLayout {
     WithChat,
     /// A voice channel: the call alone.
     Only,
+    /// A voice channel with its text chat beside the call.
+    Beside,
 }
 
 impl AppState {
@@ -231,7 +233,7 @@ impl AppState {
                 .is_some_and(|voice| voice.channel_id == channel_id);
             session.store.read(|state| {
                 if state.channels.get(&channel_id).is_some_and(is_voice_only) {
-                    return CallLayout::Only;
+                    return if self.side_chat.get() { CallLayout::Beside } else { CallLayout::Only };
                 }
                 let active = state
                     .voice_states
@@ -248,6 +250,25 @@ impl AppState {
     }
 
     pub(crate) fn set_call_layout(&self, layout: CallLayout) {
+        // Beside: the call on the left, the chat on the right; otherwise the
+        // call sits above the chat.
+        let orientation = if layout == CallLayout::Beside {
+            gtk::Orientation::Horizontal
+        } else {
+            gtk::Orientation::Vertical
+        };
+        if self.call_split.orientation() != orientation {
+            self.call_split.set_orientation(orientation);
+            let position = if orientation == gtk::Orientation::Horizontal {
+                // The call takes a little more than half; the chat keeps
+                // room for its messages.
+                let width = self.call_split.width().max(self.chat_box.width() + self.call_area.width());
+                (width * 11 / 20).min(width - 340).max(crate::settings::CALL_HEIGHT_MIN)
+            } else {
+                self.capture.borrow().call_height
+            };
+            self.call_split.set_position(position);
+        }
         self.call_area.set_visible(layout != CallLayout::Hidden);
         self.chat_box.set_visible(layout != CallLayout::Only);
     }
@@ -335,6 +356,7 @@ impl AppState {
     pub(crate) fn render_voice_view(self: &Rc<Self>, channel_id: Snowflake) {
         let layout = match self.call_layout(channel_id) {
             CallLayout::Only => CallLayout::Only,
+            CallLayout::Beside => CallLayout::Beside,
             _ => CallLayout::WithChat,
         };
         self.set_call_layout(layout);

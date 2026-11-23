@@ -73,7 +73,9 @@ impl AppState {
                 self.channel_topic_label.set_label(first_line);
                 self.channel_topic_label
                     .set_tooltip_text((!topic.is_empty()).then_some(topic.as_str()));
-                let text_channel = kind.is_text();
+                let voice_channel = kind.is_voice() && !kind.is_text();
+                self.side_chat_toggle.set_visible(voice_channel);
+                let text_channel = kind.is_text() || (voice_channel && self.side_chat.get());
                 self.search_entry.set_visible(text_channel);
                 self.pins_button.set_visible(text_channel);
                 self.share_button.set_visible(text_channel);

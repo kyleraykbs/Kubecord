@@ -81,6 +81,8 @@ pub(crate) struct AppState {
     pub share_button: gtk::Button,
     pub members_toggle: gtk::ToggleButton,
     pub dm_call_button: gtk::Button,
+    /// A voice channel's text chat beside its call.
+    pub side_chat_toggle: gtk::ToggleButton,
 
     // Content.
     pub content_stack: gtk::Stack,
@@ -173,6 +175,8 @@ pub(crate) struct AppState {
     pub window_identifier: RefCell<Option<Arc<ashpd::WindowIdentifier>>>,
     pub chat: RefCell<ChatView>,
     pub show_members: Cell<bool>,
+    /// Voice channels show their text chat beside the call.
+    pub side_chat: Cell<bool>,
     pub members_guard: Cell<bool>,
     pub speaking: RefCell<HashSet<Snowflake>>,
     /// Sidebar rows of people in voice channels, for speaking updates.
@@ -448,6 +452,13 @@ impl AppState {
         let dm_call_button = icon_button("call-start-symbolic", "Start Voice Call");
         dm_call_button.set_visible(false);
 
+        // A voice channel's own text chat, beside the call.
+        let side_chat_toggle = toggle_icon_button(
+            first_icon(&["chat-bubbles-text-symbolic", "chat-symbolic", "mail-message-new-symbolic"]),
+            "Show Chat",
+        );
+        side_chat_toggle.set_visible(false);
+
         let content_header = adw::HeaderBar::new();
         content_header.add_css_class("kc-chat-header");
         content_header.set_show_title(false);
@@ -460,6 +471,7 @@ impl AppState {
         content_header.pack_end(&share_button);
         content_header.pack_end(&pins_button);
         content_header.pack_end(&dm_call_button);
+        content_header.pack_end(&side_chat_toggle);
 
         let banner = adw::Banner::new("");
         banner.set_revealed(false);
@@ -834,6 +846,7 @@ impl AppState {
             share_button,
             members_toggle,
             dm_call_button,
+            side_chat_toggle,
             content_stack,
             split,
             messages_scroll,
@@ -897,6 +910,7 @@ impl AppState {
             window_identifier: RefCell::new(None),
             chat: RefCell::new(ChatView::default()),
             show_members: Cell::new(true),
+            side_chat: Cell::new(false),
             members_guard: Cell::new(false),
             speaking: RefCell::new(HashSet::new()),
             voice_rows: RefCell::new(HashMap::new()),

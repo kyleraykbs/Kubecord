@@ -524,6 +524,24 @@ impl AppState {
                     self.open_channel(lounge);
                 }
             }
+            "voice-side-chat" => {
+                // A voice channel with its text chat beside the call.
+                for (index, text) in ["anyone joining?", "in a sec", "my mic is muted, typing here instead", "👍"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut posted = message(id_at((4 - index as u64) * 60_000, 10), 2 + index as u64 % 3, text);
+                    posted["channel_id"] = json!(LOUNGE.to_string());
+                    store.apply("MESSAGE_CREATE", &posted);
+                }
+                if let Some(lounge) = channel(LOUNGE) {
+                    self.open_channel(lounge);
+                }
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    app.side_chat_toggle.set_active(true);
+                });
+            }
             "voice-joined" => {
                 store.apply(
                     "VOICE_STATE_UPDATE",
