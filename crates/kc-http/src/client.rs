@@ -29,6 +29,9 @@ pub struct Outgoing {
     pub silent: bool,
     /// A poll to send (see [`NewPoll::body`]).
     pub poll: Option<Value>,
+    /// Forwards this message (its guild, channel and id); Discord wants no
+    /// content with it, so a note goes in a message of its own.
+    pub forward: Option<(Option<Snowflake>, Snowflake, Snowflake)>,
 }
 
 /// A poll to create: a question, two to ten answers, how long it runs and
@@ -79,6 +82,7 @@ impl Default for Outgoing {
             nonce: None,
             silent: false,
             poll: None,
+            forward: None,
         }
     }
 }
@@ -1288,6 +1292,16 @@ impl HttpClient {
                 "parse": ["users", "roles", "everyone"],
                 "replied_user": message.mention_reply,
             });
+        }
+        if let Some((guild_id, source_channel, message_id)) = message.forward {
+            let mut reference = json!({});
+            if let Some(guild_id) = guild_id {
+                reference["guild_id"] = json!(guild_id);
+            }
+            reference["channel_id"] = json!(source_channel);
+            reference["message_id"] = json!(message_id);
+            reference["type"] = json!(1);
+            body["message_reference"] = reference;
         }
         if !message.attachments.is_empty() {
             body["attachments"] = Value::Array(message.attachments.clone());

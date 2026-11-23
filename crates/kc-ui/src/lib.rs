@@ -10,6 +10,7 @@ mod chat;
 mod chat_select;
 mod code;
 mod idle;
+mod forward;
 mod polls;
 mod safety;
 mod search;

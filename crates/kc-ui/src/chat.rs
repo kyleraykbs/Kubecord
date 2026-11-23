@@ -2012,6 +2012,18 @@ impl AppState {
         });
         menu.append(&copy);
 
+        // Not a message only this account sees, nor one still sending.
+        if message.flags & Message::FLAG_EPHEMERAL == 0 && !message.deleted && message.send_state == kc_state::SendState::Sent {
+            let forward = item("Forward");
+            let app = self.clone();
+            let inner = popover.clone();
+            forward.connect_clicked(move |_| {
+                inner.popdown();
+                app.show_forward(channel_id, message_id);
+            });
+            menu.append(&forward);
+        }
+
         let link = item("Copy Message Link");
         let guild_part = message
             .guild_id

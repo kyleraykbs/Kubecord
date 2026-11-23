@@ -524,6 +524,20 @@ impl AppState {
                     self.open_channel(lounge);
                 }
             }
+            "forward" => {
+                // The Forward dialog for a message in #general.
+                self.open_channel(general.clone());
+                let app = self.clone();
+                let channel = general.id;
+                glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    let last = app
+                        .with_session(|session| session.store.read(|state| state.last_message_id(channel)))
+                        .flatten();
+                    if let Some(message) = last {
+                        app.show_forward(channel, message);
+                    }
+                });
+            }
             "polls" | "poll-create" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.
