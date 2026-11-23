@@ -311,13 +311,23 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
 - **Fine-tuning**: MANY stream settings, so you're in full control.
 - **DM and group calls**: including showing when the other side is being rung.
 - **Side chat**: a voice channel's own text chat beside its call.
+- **Stage channels**: speakers and audience, raising your hand, and for
+  moderators starting the stage, setting its topic and inviting people up.
+- **Soundboard**: Discord's sounds and your servers', played to the call (and
+  heard when others play them), with right-click to preview.
 - **Voice processing**: noise suppression, echo cancellation, automatic gain and
   input sensitivity.
 
   <img src="https://github.com/user-attachments/assets/74427ba5-3679-47b1-b78c-f0f7fddfb376" width="420" alt="Voice settings">
 
 ### Chat
-- **Messages**: send, edit, reply, react and pin.
+- **Messages**: send, edit, reply, react, pin and forward.
+- **Inbox**: your recent mentions, filtered by server, by whether that server
+  notifies you, and by @everyone and role mentions.
+- **Message requests**: DMs from people you haven't accepted wait under
+  Message Requests (with Discord's spam guesses apart) to accept or ignore.
+- **Polls**: vote, see results, end your own, and create them.
+- **Voice messages**: play them with their waveform, and record your own.
 - **Search**: a results panel beside the chat, across the whole server or a
   DM, with every filter Discord has (from, mentions, has, dates, channel,
   pinned, author type, links and files), its tabs and sort orders. Type
@@ -332,7 +342,8 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
   partial favorites search, matched by link).
 - **Emoji**: server and standard emoji with a picker, `:shortcode:` emoji as
   you type, and optionally Discord's own emoji artwork, even in the message box.
-- **Stickers**: all except Discord's stock ones.
+- **Stickers**: all of them, including Discord's animated stock stickers, sent
+  from a sticker picker; and "Wave to say hi" on join messages.
 - **Spellcheck**: with suggestions on right-click.
 - **Typing indicators**: with an option to hide your own.
 - **Apps and bots**: slash commands with autocomplete and file options;
@@ -342,7 +353,8 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
   that drop the largest media first.
 - **Share mode**: pick a range of messages, redact or add single ones, and
   export it as a picture or text, to the clipboard or a file.
-- **Admin tools**: everything available, including channel and server settings.
+- **Admin tools**: everything available, including channel and server settings,
+  and uploading a server's emoji, stickers and sounds.
 
 ### Profiles
 - **Your profile**: edit it, including status, notes and bio.
@@ -367,22 +379,12 @@ passed. They can be turned off in Settings → Advanced, behind a big warning.
 - Starting threads, and the list of archived threads (existing ones show in
   the sidebar)
 - Forum and media channels: their post list, and making posts
-- Polls: showing them, voting and creating them
-- An inbox of recent mentions
-- Forwarding messages (forwards you receive do show)
-- Sending stickers (stickers you receive do show)
 - Push-to-talk and voice keybinds
-- Voice messages: recording them, and their waveform
 - Server events
-- Stage channels: asking to speak, and moving between speakers and audience
-- Soundboard
-- Message requests from people who aren't your friends
 - Sending super reactions
-- Uploading server emoji and stickers
 - AutoMod and onboarding settings
 - Discord's web activities (its golf game, chess, wordle, …)
 - Animated profile overlays
-- Lottie stickers (Discord's stock stickers)
 
 ## Building
 
@@ -396,7 +398,8 @@ cargo run -p kubecord
 ```
 
 The flake provides GTK4, libadwaita, GStreamer with the plugins Kubecord uses,
-libopus and the Rust toolchain (1.92+). The packaged build wraps the GStreamer
+libopus, rlottie (for Discord's animated stickers) and the Rust toolchain
+(1.98+). The packaged build wraps the GStreamer
 plugin path and GTK schemas. New files need `git add` before `nix build`, as the
 flake only sees tracked files.
 
