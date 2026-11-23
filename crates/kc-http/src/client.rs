@@ -9,7 +9,6 @@ use crate::API_BASE;
 use crate::error::{ApiErrorBody, Error, Result};
 use crate::rate_limit::{RateLimiter, normalise_route};
 
-const USER_AGENT: &str = kc_core::super_properties::USER_AGENT;
 const MAX_ATTEMPTS: usize = 5;
 
 /// Everything the composer can put in one message.
@@ -111,7 +110,7 @@ impl HttpClient {
 
     pub fn with_base(token: Token, base: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
+            .user_agent(kc_core::super_properties::user_agent())
             .https_only(true)
             .build()
             .expect("reqwest client");
@@ -1599,7 +1598,7 @@ pub(crate) fn browser_headers(
     super_properties: &str,
 ) -> reqwest::RequestBuilder {
     request
-        .header("user-agent", USER_AGENT)
+        .header("user-agent", kc_core::super_properties::user_agent())
         .header("accept", "*/*")
         .header("accept-language", "en-US")
         .header("priority", "u=1, i")
@@ -2361,7 +2360,7 @@ mod tests {
 pub async fn refresh_build_number() {
     use kc_core::super_properties as identity;
     let client = match reqwest::Client::builder()
-        .user_agent(USER_AGENT)
+        .user_agent(kc_core::super_properties::user_agent())
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
@@ -2402,5 +2401,42 @@ pub async fn refresh_build_number() {
             identity::save_build_number(number);
         }
         None => tracing::warn!("no build number in the app page"),
+    }
+}
+
+/// Reads Chrome's current stable version from Google's version history and
+/// keeps it for the next start, so the user agent follows Chrome's releases.
+pub async fn refresh_chrome_version() {
+    use kc_core::super_properties as identity;
+    let client = match reqwest::Client::builder()
+        .user_agent(identity::user_agent())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "no client to read Chrome's version");
+            return;
+        }
+    };
+    let response = client
+        .get("https://versionhistory.googleapis.com/v1/chrome/platforms/win/channels/stable/versions?pageSize=5")
+        .send()
+        .await;
+    let body = match response {
+        Ok(response) => response.text().await.unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "could not read Chrome's version");
+            return;
+        }
+    };
+    match identity::parse_chrome_major(&body) {
+        Some(major) => {
+            tracing::info!(major, using = identity::chrome_major(), "Chrome's stable version");
+            if major > identity::chrome_major() {
+                identity::save_chrome_major(major);
+            }
+        }
+        None => tracing::warn!("no version in Chrome's version history"),
     }
 }

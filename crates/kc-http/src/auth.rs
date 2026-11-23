@@ -376,7 +376,7 @@ impl AuthClient {
         let base = base.into().trim_end_matches('/').to_owned();
         let loopback = base.starts_with("http://127.0.0.1:");
         let http = reqwest::Client::builder()
-            .user_agent(kc_core::super_properties::USER_AGENT)
+            .user_agent(kc_core::super_properties::user_agent())
             .https_only(!loopback)
             // Keep the device cookies Discord sets on the first request
             // (`__dcfduid` / `__sdcfduid`, tied to the fingerprint) and send

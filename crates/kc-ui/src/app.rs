@@ -80,6 +80,7 @@ pub fn run() -> glib::ExitCode {
     // usually).
     kc_core::super_properties::load_cached_build_number();
     runtime.spawn(kc_http::client::refresh_build_number());
+    runtime.spawn(kc_http::client::refresh_chrome_version());
     let (ui_tx, ui_rx) = async_channel::unbounded::<UiEvent>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
     session::spawn_dispatcher(&runtime, cmd_rx, ui_tx.clone());

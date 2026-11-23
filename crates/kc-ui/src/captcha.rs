@@ -143,7 +143,7 @@ impl AppState {
         view.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
         if let Some(settings) = WebViewExt::settings(&view) {
             // The same browser kubecord tells Discord it is.
-            settings.set_user_agent(Some(kc_core::super_properties::USER_AGENT));
+            settings.set_user_agent(Some(kc_core::super_properties::user_agent()));
             settings.set_enable_developer_extras(false);
         }
 
