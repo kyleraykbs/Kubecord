@@ -1326,6 +1326,46 @@ impl HttpClient {
         Self::parse(value, StatusCode::OK)
     }
 
+    // -- recent mentions -------------------------------------------------
+
+    /// Messages that mention this account, newest first: 25 before
+    /// `before`, in one server or all, with or without role and
+    /// @everyone/@here mentions.
+    pub async fn mentions(
+        &self,
+        before: Option<Snowflake>,
+        guild_id: Option<Snowflake>,
+        roles: bool,
+        everyone: bool,
+    ) -> Result<Vec<Message>> {
+        let mut path = String::from("/users/@me/mentions?");
+        if let Some(before) = before {
+            path.push_str(&format!("before={before}&"));
+        }
+        path.push_str("limit=25");
+        if let Some(guild_id) = guild_id {
+            path.push_str(&format!("&guild_id={guild_id}"));
+        }
+        path.push_str(&format!("&roles={roles}&everyone={everyone}"));
+        let body = self.get(&path).await?;
+        Ok(body
+            .as_array()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(|message| serde_json::from_value::<Message>(message.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Takes a mention out of the inbox.
+    pub async fn delete_mention(&self, message_id: Snowflake) -> Result<()> {
+        self.request_json(Method::DELETE, &format!("/users/@me/mentions/{message_id}"), None)
+            .await?;
+        Ok(())
+    }
+
     // -- stickers and server emoji ---------------------------------------
 
     /// Discord's own sticker packs (the free ones everyone may send).

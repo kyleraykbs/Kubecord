@@ -270,6 +270,23 @@ pub(crate) fn fake_bans() -> Option<Vec<kc_http::Ban>> {
     })
 }
 
+/// Mentions of the demo account, newest first.
+pub(crate) fn fake_mentions() -> Option<Vec<kc_state::Message>> {
+    fake(|| {
+        let mention = |minutes: u64, author: (&str, &str), content: &str, everyone: bool| {
+            json!({"id": id_at(minutes * 60_000, 7).to_string(), "channel_id": GENERAL.to_string(), "guild_id": GUILD.to_string(),
+                "author": {"id": author.0, "username": author.1, "global_name": author.1},
+                "content": content, "timestamp": millis_to_iso(unix_millis_now() - minutes * 60_000),
+                "mentions": [{"id": ME.to_string(), "username": "demo"}], "mention_everyone": everyone})
+        };
+        json!([
+            mention(5, ("2", "ada"), "<@1> could you look at the build when you get a sec?", false),
+            mention(42, ("3", "grace"), "@everyone the server's game night starts at 8!", true),
+            mention(180, ("2", "ada"), "Thanks <@1>, that fixed it 🎉", false)
+        ])
+    })
+}
+
 pub(crate) fn fake_invites() -> Option<Vec<kc_http::Invite>> {
     let soon = format!("{}+00:00", millis_to_iso(unix_millis_now() + 5 * 3_600_000));
     fake(move || {
@@ -590,6 +607,25 @@ impl AppState {
                         }
                     });
                 }
+            }
+            "inbox" => {
+                FAKE_REST.set(true);
+                self.open_channel(general.clone());
+                let app = self.clone();
+                glib::timeout_add_local_once(Duration::from_millis(2000), move || {
+                    app.show_inbox();
+                    // A popover is its own surface: saved beside the window.
+                    if let (Ok(path), Some(popover)) = (
+                        std::env::var("KUBECORD_SCREENSHOT"),
+                        app.inbox_button.last_child().and_downcast::<gtk::Popover>(),
+                    ) {
+                        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                            if let Err(error) = crate::app::save_window_png(&popover, std::path::Path::new(&format!("{path}.popover.png"))) {
+                                eprintln!("demo: could not save the inbox: {error}");
+                            }
+                        });
+                    }
+                });
             }
             "polls" | "poll-create" => {
                 // A poll waiting for a vote, one voted in, one over; with

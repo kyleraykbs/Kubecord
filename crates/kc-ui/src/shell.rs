@@ -79,6 +79,8 @@ pub(crate) struct AppState {
     /// Runs the search in the box.
     pub search_button: gtk::Button,
     pub pins_button: gtk::Button,
+    /// Recent mentions.
+    pub inbox_button: gtk::Button,
     /// Share mode: choose messages to export as a picture or text.
     pub share_button: gtk::Button,
     pub members_toggle: gtk::ToggleButton,
@@ -447,6 +449,10 @@ impl AppState {
         search_entry.set_valign(gtk::Align::Center);
 
         let pins_button = icon_button("view-pin-symbolic", "Pinned Messages");
+        let inbox_button = icon_button(
+            first_icon(&["mail-inbox-symbolic", "inbox-symbolic", "mail-unread-symbolic"]),
+            "Inbox",
+        );
         let share_button = icon_button(
             first_icon(&["share-symbolic", "emblem-shared-symbolic", "send-to-symbolic"]),
             "Share Messages",
@@ -480,6 +486,7 @@ impl AppState {
         search_bar.set_valign(gtk::Align::Center);
         search_bar.append(&search_entry);
         search_bar.append(&search_button);
+        content_header.pack_end(&inbox_button);
         content_header.pack_end(&search_bar);
         content_header.pack_end(&members_toggle);
         content_header.pack_end(&share_button);
@@ -884,6 +891,7 @@ impl AppState {
             search_entry,
             search_button,
             pins_button,
+            inbox_button,
             share_button,
             members_toggle,
             dm_call_button,

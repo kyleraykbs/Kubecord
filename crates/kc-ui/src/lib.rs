@@ -11,6 +11,7 @@ mod chat_select;
 mod code;
 mod idle;
 mod forward;
+mod inbox;
 mod polls;
 mod safety;
 mod stickers;

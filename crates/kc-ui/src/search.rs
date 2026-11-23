@@ -693,7 +693,7 @@ impl AppState {
     }
 
     /// Opens a result's channel (when another) and jumps to it.
-    fn jump_to_result(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
+    pub(crate) fn jump_to_result(self: &Rc<Self>, channel_id: Snowflake, message_id: Snowflake) {
         let open = self.with_session(|session| session.selected_channel).flatten();
         if open == Some(channel_id) {
             self.jump_or_fetch(channel_id, message_id);
