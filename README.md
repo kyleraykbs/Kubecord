@@ -250,6 +250,47 @@ ban is unlikely; friending people is the most likely place to get one.
 
 </details>
 
+<details>
+<summary><b>What Kubecord does to avoid getting flagged</b></summary>
+
+<br>
+
+**It looks like Discord's website in Chrome.** Kubecord was checked against
+captures of the real website, request by request:
+
+- **The connection itself**: TLS through BoringSSL (Chrome's own library) with
+  Chrome's handshake, and Chrome's HTTP/2 settings. A typical Rust or Python
+  client is easy to tell apart from a browser before it sends a single request.
+- **The identity**: the current Chrome version (checked against Google at
+  startup) and Discord's current build number (read from discord.com), with
+  the same headers, cookies and session details the website sends.
+- **The gateway**: the website's login message and features, its heartbeats
+  (including whether you're at the app), its compression, and the same
+  messages at the same moments (opening a server, a DM, a call).
+- **Each action**: sending, uploading, reacting, editing, slash commands,
+  friend requests and joining servers send the same fields the website does,
+  including where in the app they came from.
+- **How much it fetches**: messages are loaded in the website's page sizes,
+  profiles are kept for a few minutes instead of being fetched on every click,
+  and member searches wait for you to stop typing.
+
+**Safety limits.** The quickest way to get banned is doing what spammers do:
+lots of new DMs, friend requests or server joins in a short time, the same
+message in many channels, or going through many profiles. Kubecord asks
+before you do these quickly, and stops past a limit until enough time has
+passed. They can be turned off in Settings → Advanced, behind a big warning.
+
+**Things it can't hide:**
+
+- Kubecord doesn't send the website's analytics, shop, or quest requests.
+  Plenty of people block analytics anyway, and faking them would be riskier.
+- Several accounts signed in to one Kubecord share an IP address and an
+  install, so Discord can tell they're on the same machine (just like
+  several accounts in one browser). If one gets banned, the others may be
+  looked at too.
+
+</details>
+
 ## Features
 
 ### Voice and video
