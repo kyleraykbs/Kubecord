@@ -248,6 +248,46 @@ impl AppState {
         LOCAL.with_borrow_mut(|local| {
             local.remove(&message_id);
         });
+        // Demos: Discord's echo (the vote events, then the answer) made up
+        // here, at about the times they come, nothing sent.
+        if crate::demo::fake_rest() {
+            let Some((_, _, store)) = self.active() else {
+                return;
+            };
+            let me = self.with_session(|session| session.user.as_ref().map(|user| user.id)).flatten();
+            let earlier: Vec<u32> = store.read(|state| {
+                state
+                    .messages
+                    .get(&channel_id)
+                    .and_then(|buffer| buffer.get(message_id))
+                    .and_then(|message| message.poll.clone())
+                    .map(|poll| poll.answers.iter().map(|answer| answer.answer_id).filter(|id| poll.voted(*id)).collect())
+                    .unwrap_or_default()
+            });
+            let app = self.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                let Some(me) = me else {
+                    return;
+                };
+                let event = |name: &str, answer: u32| {
+                    store.apply(
+                        name,
+                        &serde_json::json!({"channel_id": channel_id.to_string(), "message_id": message_id.to_string(),
+                            "user_id": me.to_string(), "answer_id": answer}),
+                    );
+                };
+                for answer in earlier {
+                    event("MESSAGE_POLL_VOTE_REMOVE", answer);
+                }
+                for answer in &answers {
+                    event("MESSAGE_POLL_VOTE_ADD", *answer);
+                }
+                glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                    app.refresh_message(channel_id, message_id);
+                });
+            });
+            return;
+        }
         self.spawn(
             async move { http.vote_poll(channel_id, message_id, &answers).await },
             move |app, result| {

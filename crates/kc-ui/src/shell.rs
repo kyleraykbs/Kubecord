@@ -531,6 +531,12 @@ impl AppState {
         messages_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         messages_scroll.set_vexpand(true);
         messages_scroll.set_child(Some(&messages_column));
+        // A button clicked in a message (a poll's Vote) takes the focus, and
+        // a viewport scrolls the focused widget into view, moving the chat
+        // away from where it was. The chat keeps its place itself.
+        if let Some(viewport) = messages_scroll.child().and_downcast::<gtk::Viewport>() {
+            viewport.set_scroll_to_focus(false);
+        }
 
         let chat_placeholder = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat_placeholder.set_vexpand(true);

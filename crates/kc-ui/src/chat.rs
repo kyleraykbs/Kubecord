@@ -859,13 +859,16 @@ impl AppState {
             .row
             .compute_bounds(&self.messages_list)
             .map(|bounds| f64::from(bounds.y()) - value);
+        // Let go of the focus first: removing a focused row hands it to a
+        // neighbour, and giving it to the new row both make the list scroll
+        // the focused row into view (for a tall poll, away from where you
+        // were).
+        if had_focus {
+            gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        }
         self.messages_list.remove(&old.row);
         let row = self.chat.borrow().rows[position].row.clone();
         self.messages_list.insert(&row, position as i32);
-        if had_focus {
-            row.set_focusable(true);
-            row.grab_focus();
-        }
         if restoring {
             return;
         }
@@ -876,8 +879,11 @@ impl AppState {
             let wanted = if at_bottom {
                 Some(adjustment.upper() - adjustment.page_size())
             } else {
+                // Not laid out yet (its first frame): its place reads as
+                // the top, so wait for the next frame rather than jump there.
                 anchor
                     .upgrade()
+                    .filter(|row| row.is_mapped() && row.height() > 0)
                     .and_then(|row| row.compute_bounds(&list))
                     .zip(offset)
                     .map(|(bounds, offset)| f64::from(bounds.y()) - offset)

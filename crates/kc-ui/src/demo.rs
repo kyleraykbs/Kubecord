@@ -764,7 +764,7 @@ impl AppState {
                     self.voice_channel_clicked(stage);
                 }
             }
-            "polls" | "poll-create" | "poll-click" => {
+            "polls" | "poll-create" | "poll-click" | "poll-vote" => {
                 // A poll waiting for a vote, one voted in, one over; with
                 // `poll-create`, the Create Poll dialog.
                 let answers = json!([
@@ -788,6 +788,82 @@ impl AppState {
                     store.apply("MESSAGE_CREATE", &posted);
                 }
                 self.open_channel(general.clone());
+                if mode == "poll-vote" {
+                    // Pick an answer of the first poll and press Vote, then
+                    // Remove Vote; the view must stay where it was.
+                    FAKE_REST.set(true);
+                    let app = self.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        let adjustment = app.messages_scroll.vadjustment();
+                        let up = std::env::var("KUBECORD_POLL_UP").ok().and_then(|up| up.parse::<f64>().ok()).unwrap_or(150.0);
+                        adjustment.set_value(adjustment.upper() - adjustment.page_size() - up);
+                        fn find(widget: &gtk::Widget, test: &dyn Fn(&gtk::Widget) -> bool) -> Option<gtk::Widget> {
+                            if test(widget) {
+                                return Some(widget.clone());
+                            }
+                            let mut child = widget.first_child();
+                            while let Some(current) = child {
+                                if let Some(found) = find(&current, test) {
+                                    return Some(found);
+                                }
+                                child = current.next_sibling();
+                            }
+                            None
+                        }
+                        let button = |label: &'static str| {
+                            let app = app.clone();
+                            move || {
+                                find(app.messages_list.upcast_ref(), &|widget| {
+                                    widget.downcast_ref::<gtk::Button>().and_then(gtk::Button::label).is_some_and(|text| text == label)
+                                        && widget.is_sensitive()
+                                })
+                                .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+                            }
+                        };
+                        let report = {
+                            let app = app.clone();
+                            move |step: &str| {
+                                let adjustment = app.messages_scroll.vadjustment();
+                                eprintln!(
+                                    "poll-vote: {step} value={:.0} bottom={:.0}",
+                                    adjustment.value(),
+                                    adjustment.upper() - adjustment.page_size()
+                                );
+                            }
+                        };
+                        let (vote, remove) = (button("Vote"), button("Remove Vote"));
+                        let app2 = app.clone();
+                        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                            report("start");
+                            if let Some(answer) = find(app2.messages_list.upcast_ref(), &|widget| {
+                                widget.has_css_class("kc-poll-answer") && widget.is_sensitive()
+                            })
+                            .and_then(|widget| widget.downcast::<gtk::ToggleButton>().ok())
+                            {
+                                answer.grab_focus();
+                                answer.set_active(true);
+                            }
+                            let report2 = report.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                                report2("picked");
+                                if let Some(vote) = vote() {
+                                    vote.grab_focus();
+                                    vote.emit_clicked();
+                                }
+                                let report3 = report2.clone();
+                                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                                    report3("voted");
+                                    if let Some(remove) = remove() {
+                                        remove.grab_focus();
+                                        remove.emit_clicked();
+                                    }
+                                    let report4 = report3.clone();
+                                    glib::timeout_add_local_once(Duration::from_millis(900), move || report4("removed"));
+                                });
+                            });
+                        });
+                    });
+                }
                 if mode == "poll-click" {
                     // Scrolled up a little, click an answer of the first
                     // poll; the view must not move.
