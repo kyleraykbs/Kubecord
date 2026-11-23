@@ -28,7 +28,7 @@ OUT=${OUT:-target/appimage}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  clang libclang-dev cmake git pkg-config file curl ca-certificates squashfs-tools \
+  clang libclang-dev cmake make git pkg-config file curl ca-certificates squashfs-tools \
   libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   libpipewire-0.3-dev libopus-dev \
