@@ -794,7 +794,8 @@ impl AppState {
                     let app = self.clone();
                     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                         let adjustment = app.messages_scroll.vadjustment();
-                        adjustment.set_value(adjustment.upper() - adjustment.page_size() - 150.0);
+                        let up = std::env::var("KUBECORD_POLL_UP").ok().and_then(|up| up.parse::<f64>().ok()).unwrap_or(150.0);
+                        adjustment.set_value(adjustment.upper() - adjustment.page_size() - up);
                         let app = app.clone();
                         glib::timeout_add_local_once(Duration::from_millis(500), move || {
                             fn find(widget: &gtk::Widget) -> Option<gtk::ToggleButton> {
@@ -820,7 +821,8 @@ impl AppState {
                             let app = app.clone();
                             glib::timeout_add_local_once(Duration::from_millis(800), move || {
                                 let after = app.messages_scroll.vadjustment().value();
-                                eprintln!("poll-click: before={before:.0} after={after:.0}");
+                                let bottom = app.messages_scroll.vadjustment().upper() - app.messages_scroll.vadjustment().page_size();
+                                eprintln!("poll-click: before={before:.0} after={after:.0} bottom={bottom:.0}");
                             });
                         });
                     });

@@ -839,8 +839,8 @@ impl AppState {
         // clicked, say): removing a focused row sends the focus elsewhere in
         // the list, which scrolls to it. And where the row sits on screen,
         // to keep it there while the new one lays out.
-        let value = self.messages_scroll.vadjustment().value();
-        let at_bottom = self.chat.borrow().at_bottom;
+        let adjustment = self.messages_scroll.vadjustment();
+        let value = adjustment.value();
         // Loading older history restores the view itself (by the height
         // added above); holding it here too would undo that and keep the
         // view at the top, loading page after page.
@@ -848,6 +848,13 @@ impl AppState {
         let old = std::mem::replace(&mut self.chat.borrow_mut().rows[position], entry);
         let had_focus = gtk::prelude::GtkWindowExt::focus(&self.window)
             .is_some_and(|focus| focus == old.row || focus.is_ancestor(&old.row));
+        // "At the bottom" allows a little slack, so new messages keep the
+        // view down; but when it is your own click that changed the row (a
+        // poll vote), only a view right at the bottom follows it there.
+        if had_focus && adjustment.upper() - adjustment.page_size() - value > 2.0 {
+            self.chat.borrow_mut().at_bottom = false;
+        }
+        let at_bottom = self.chat.borrow().at_bottom;
         let offset = old
             .row
             .compute_bounds(&self.messages_list)
