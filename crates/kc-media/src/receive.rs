@@ -16,7 +16,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSrcCallbacks;
 use opus2::{Channels, Decoder};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::error::{Error, Result};
 
@@ -31,19 +31,96 @@ const FRAME_INTERLEAVED: usize = FRAME_SAMPLES * 2;
 /// The longest Opus frame, 120 ms, in samples per channel.
 const MAX_OPUS_SAMPLES: usize = 5760;
 
-/// Packets buffered before a talk burst starts playing: 60 ms of protection
-/// against network jitter.
-const TARGET_PACKETS: usize = 3;
-/// Beyond this the speaker has fallen behind (a stall, or clock drift) and
-/// playback skips ahead to the target depth.
-const MAX_PACKETS: usize = 15;
+/// Milliseconds of sound in one packet.
+const PACKET_MS: u32 = 20;
 /// Gaps longer than this are skipped rather than concealed.
 const MAX_CONCEALED_GAP: u32 = 5;
-/// Consecutive empty pulls that are concealed before the burst is considered
-/// over and the buffer starts collecting again.
+/// Without waiting for late packets: consecutive empty pulls that are
+/// concealed before the burst is considered over and the buffer starts
+/// collecting again.
 const CONCEALED_DRY_PULLS: u32 = 2;
 /// A sequence jump this large means the stream restarted.
 const RESTART_JUMP: i32 = 2000;
+
+/// How each speaker's sound is buffered before it plays: the trade between
+/// delay and sound that holds up when the network or the machine is uneven.
+///
+/// Like the devices, this is process-global: the UI sets it and calls follow
+/// it from their next frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Buffering {
+    /// Sound collected before someone's speech starts playing.
+    pub target_ms: u32,
+    /// Beyond this much waiting sound, the speaker has fallen behind (a
+    /// stall, or clock drift) and playback skips ahead to `target_ms`.
+    pub max_ms: u32,
+    /// How long an empty buffer waits for a late packet, smoothing over the
+    /// wait, before it treats the speech as over. Zero waits for nothing: a
+    /// late packet's slot is concealed and the packet thrown away.
+    pub late_wait_ms: u32,
+    /// How long the buffer must hold more than `target_ms` before one
+    /// packet of the extra delay is shed. Zero never sheds it (until the
+    /// speaker pauses).
+    pub settle_ms: u32,
+}
+
+impl Buffering {
+    pub const DEFAULT: Self = Self {
+        target_ms: 60,
+        max_ms: 300,
+        late_wait_ms: 40,
+        settle_ms: 2000,
+    };
+}
+
+impl Default for Buffering {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+static BUFFERING: RwLock<Buffering> = RwLock::new(Buffering::DEFAULT);
+
+/// Sets the buffering; running calls follow from their next frame.
+pub fn set_buffering(buffering: Buffering) {
+    *BUFFERING.write() = buffering;
+}
+
+pub fn buffering() -> Buffering {
+    *BUFFERING.read()
+}
+
+/// [`Buffering`] counted in packets, made consistent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Depths {
+    target: usize,
+    max: usize,
+    /// Whether an empty buffer keeps the late packet's slot.
+    wait: bool,
+    /// Consecutive empty pulls concealed before the burst counts as over.
+    dry_pulls: u32,
+    /// Pulls a drain window lasts; zero never drains.
+    drain_window: u32,
+}
+
+impl From<Buffering> for Depths {
+    fn from(buffering: Buffering) -> Self {
+        let target = (buffering.target_ms / PACKET_MS).clamp(1, 50) as usize;
+        let wait = buffering.late_wait_ms > 0;
+        Self {
+            target,
+            // Room to absorb at least a little jitter before skipping.
+            max: ((buffering.max_ms / PACKET_MS) as usize).max(target + 2),
+            wait,
+            dry_pulls: if wait {
+                (buffering.late_wait_ms / PACKET_MS).max(1)
+            } else {
+                CONCEALED_DRY_PULLS
+            },
+            drain_window: buffering.settle_ms / PACKET_MS,
+        }
+    }
+}
 
 /// What happened to the packets of the speakers, for diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,10 +151,17 @@ struct Speaker {
     /// The next sequence to play. `None` while collecting the start of a
     /// talk burst.
     next: Option<u32>,
+    /// While collecting, the first sequence not yet played: anything older
+    /// arriving now is late. (While playing, `next` is that boundary.)
+    floor: Option<u32>,
     /// Decoded samples not yet played, interleaved stereo.
     pcm: VecDeque<i16>,
     /// Consecutive pulls that found the buffer empty.
     dry: u32,
+    /// The fewest packets waiting at a pull in this drain window.
+    shallowest: usize,
+    /// Pulls so far in this drain window.
+    window_pulls: u32,
     volume: f32,
 }
 
@@ -90,8 +174,11 @@ impl Speaker {
             packets: BTreeMap::new(),
             newest: None,
             next: None,
+            floor: None,
             pcm: VecDeque::with_capacity(FRAME_INTERLEAVED * 2),
             dry: 0,
+            shallowest: usize::MAX,
+            window_pulls: 0,
             volume: 1.0,
         })
     }
@@ -113,7 +200,7 @@ impl Speaker {
         value
     }
 
-    fn push(&mut self, sequence: u16, opus: &[u8], stats: &mut ReceiveStats) {
+    fn push(&mut self, sequence: u16, opus: &[u8], depths: Depths, stats: &mut ReceiveStats) {
         if opus.is_empty() {
             return;
         }
@@ -126,9 +213,10 @@ impl Speaker {
             self.pcm.clear();
             self.newest = None;
             self.next = None;
+            self.floor = None;
         }
         let extended = self.extend(sequence);
-        if self.next.is_some_and(|next| extended < next) {
+        if self.next.or(self.floor).is_some_and(|next| extended < next) {
             stats.late += 1;
             return;
         }
@@ -136,27 +224,30 @@ impl Speaker {
             stats.packets += 1;
         }
 
-        if self.packets.len() > MAX_PACKETS {
+        if self.packets.len() > depths.max {
             // Fallen behind: drop the oldest and continue from the target
             // depth, trading a small skip for staying current.
-            let excess = self.packets.len() - TARGET_PACKETS;
+            let excess = self.packets.len() - depths.target;
             for _ in 0..excess {
                 self.packets.pop_first();
             }
             stats.skipped += excess as u64;
+            let first = self.packets.keys().next().copied();
             if self.next.is_some() {
-                self.next = self.packets.keys().next().copied();
+                self.next = first;
+            } else {
+                self.floor = first;
             }
         }
     }
 
     /// Decodes one packet's worth of audio into `pcm`. Returns false when
     /// there is nothing to play right now.
-    fn decode_next(&mut self, stats: &mut ReceiveStats) -> bool {
+    fn decode_next(&mut self, depths: Depths, stats: &mut ReceiveStats) -> bool {
         let next = match self.next {
             Some(next) => next,
             None => {
-                if self.packets.len() < TARGET_PACKETS {
+                if self.packets.len() < depths.target {
                     return false;
                 }
                 let Some(first) = self.packets.keys().next().copied() else {
@@ -184,15 +275,26 @@ impl Speaker {
         }
 
         let Some(first) = self.packets.keys().next().copied() else {
-            // Nothing queued: the burst ended or the network stalled.
-            // Smooth over a short stall, then start collecting again.
+            // Nothing queued: the packet is late, the network stalled, or
+            // the burst ended. Smooth over it, but keep waiting for `next`
+            // rather than giving its slot away: a packet that is only late
+            // still plays, a frame later, and the buffer comes out a frame
+            // deeper, so the next delay this size is absorbed. (Giving the
+            // slot away left the buffer empty for as long as the speaker
+            // kept talking, and every late packet thereafter was concealed
+            // and thrown away: robotic sound after a CPU stall.) Without
+            // waiting, the slot is given away as before.
             self.dry += 1;
-            if self.dry > CONCEALED_DRY_PULLS {
+            if self.dry > depths.dry_pulls {
                 self.next = None;
+                // `next` itself has not played, either way.
+                self.floor = Some(next);
                 self.dry = 0;
                 return false;
             }
-            self.next = Some(next + 1);
+            if !depths.wait {
+                self.next = Some(next + 1);
+            }
             return self.conceal(None, stats);
         };
 
@@ -200,7 +302,7 @@ impl Speaker {
         if first - next > MAX_CONCEALED_GAP {
             // Too much is missing to invent; resume at what did arrive.
             self.next = Some(first);
-            return self.decode_next(stats);
+            return self.decode_next(depths, stats);
         }
         // `next` was lost. The packet after it may carry a low-bitrate copy.
         self.next = Some(next + 1);
@@ -233,9 +335,10 @@ impl Speaker {
 
     /// Adds this speaker's next 20 ms to `output`. Returns whether it had
     /// audio to contribute.
-    fn mix_into(&mut self, output: &mut [i32], stats: &mut ReceiveStats) -> bool {
+    fn mix_into(&mut self, output: &mut [i32], depths: Depths, stats: &mut ReceiveStats) -> bool {
+        self.drain_excess(depths, stats);
         while self.pcm.len() < FRAME_INTERLEAVED {
-            if !self.decode_next(stats) {
+            if !self.decode_next(depths, stats) {
                 break;
             }
         }
@@ -247,12 +350,41 @@ impl Speaker {
         }
         true
     }
+
+    /// Sheds delay the buffer no longer needs. Waiting out late packets
+    /// deepens the buffer; once the network and the machine have been
+    /// steady for a whole window (never fewer than the target waiting), one
+    /// frame is dropped, until the depth is back at the target.
+    fn drain_excess(&mut self, depths: Depths, stats: &mut ReceiveStats) {
+        let Some(next) = self.next.filter(|_| depths.drain_window > 0) else {
+            self.shallowest = usize::MAX;
+            self.window_pulls = 0;
+            return;
+        };
+        self.shallowest = self.shallowest.min(self.packets.len());
+        self.window_pulls += 1;
+        if self.window_pulls < depths.drain_window {
+            return;
+        }
+        let excess = self.shallowest > depths.target;
+        self.shallowest = usize::MAX;
+        self.window_pulls = 0;
+        if excess && let Some(packet) = self.packets.remove(&next) {
+            // Decoded and discarded rather than skipped, so the decoder's
+            // state runs on without a gap.
+            let mut buffer = vec![0i16; MAX_OPUS_SAMPLES * 2];
+            let _ = self.decoder.decode(&packet, &mut buffer, false);
+            self.next = Some(next + 1);
+            stats.skipped += 1;
+        }
+    }
 }
 
 /// Every speaker in a call, mixed into one stream.
 struct Mixer {
     speakers: HashMap<u64, Speaker>,
     master: f32,
+    depths: Depths,
     stats: ReceiveStats,
 }
 
@@ -261,6 +393,7 @@ impl Mixer {
         Self {
             speakers: HashMap::new(),
             master: 1.0,
+            depths: Buffering::DEFAULT.into(),
             stats: ReceiveStats::default(),
         }
     }
@@ -270,7 +403,7 @@ impl Mixer {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(Speaker::new()?),
         };
-        speaker.push(sequence, opus, &mut self.stats);
+        speaker.push(sequence, opus, self.depths, &mut self.stats);
         Ok(())
     }
 
@@ -279,7 +412,7 @@ impl Mixer {
         let mut sum = vec![0i32; FRAME_INTERLEAVED];
         let mut voiced = false;
         for speaker in self.speakers.values_mut() {
-            voiced |= speaker.mix_into(&mut sum, &mut self.stats);
+            voiced |= speaker.mix_into(&mut sum, self.depths, &mut self.stats);
         }
         if voiced {
             self.stats.frames_with_voice += 1;
@@ -412,7 +545,15 @@ impl RemoteAudio {
     pub fn start() -> Result<Self> {
         let mixer = Arc::new(Mutex::new(Mixer::new()));
         let source = mixer.clone();
-        let output = Output::start_with(move || source.lock().mix(), true)?;
+        let output = Output::start_with(
+            move || {
+                let mut mixer = source.lock();
+                // A settings change applies from the next frame.
+                mixer.depths = buffering().into();
+                mixer.mix()
+            },
+            true,
+        )?;
         Ok(Self {
             mixer,
             _output: output,
@@ -597,10 +738,186 @@ mod tests {
             mixer.push(1, index as u16, packet).unwrap();
         }
         let speaker = &mixer.speakers[&1];
-        assert!(speaker.packets.len() <= MAX_PACKETS);
+        assert!(speaker.packets.len() <= mixer.depths.max);
         assert!(mixer.stats.skipped > 0);
         // What is left is the newest audio.
         assert_eq!(*speaker.packets.keys().next_back().unwrap(), (1 << 16) + 39);
+    }
+
+    /// A call under CPU load: playback catches up after a stall and empties
+    /// the buffer, then about one packet in four arrives just after the
+    /// frame it belongs to was due. Returns the stats and how many of the 57
+    /// frames after the stall had sound.
+    fn stalled_call(buffering: Buffering) -> (ReceiveStats, usize) {
+        let packets = tone_packets(60, false);
+        let mut mixer = Mixer::new();
+        mixer.depths = buffering.into();
+        for (index, packet) in packets.iter().enumerate().take(3) {
+            mixer.push(1, index as u16, packet).unwrap();
+        }
+        // The catch-up burst: three pulls with nothing new arriving.
+        for _ in 0..3 {
+            mixer.mix();
+        }
+        assert!(mixer.speakers[&1].packets.is_empty());
+        let mut voiced = 0;
+        for (index, packet) in packets.iter().enumerate().skip(3) {
+            if index % 4 == 0 {
+                voiced += usize::from(loud(&mixer.mix()));
+                mixer.push(1, index as u16, packet).unwrap();
+            } else {
+                mixer.push(1, index as u16, packet).unwrap();
+                voiced += usize::from(loud(&mixer.mix()));
+            }
+        }
+        (mixer.stats, voiced)
+    }
+
+    #[test]
+    fn after_a_stall_late_packets_still_play_and_the_buffer_recovers() {
+        let (stats, voiced) = stalled_call(Buffering::DEFAULT);
+        // The first late packet is waited for once; that frame of depth
+        // absorbs every later one. None is thrown away.
+        assert_eq!(stats.late, 0, "{stats:?}");
+        assert_eq!(stats.concealed, 1, "{stats:?}");
+        assert!(voiced >= 54, "only {voiced} of 57 frames had audio");
+    }
+
+    #[test]
+    fn without_waiting_late_packets_are_concealed_and_dropped() {
+        // Waiting switched off: what happened before it existed. Every late
+        // packet costs a concealed frame and is thrown away.
+        let (stats, _) = stalled_call(Buffering {
+            late_wait_ms: 0,
+            ..Buffering::DEFAULT
+        });
+        assert_eq!(stats.late, 14, "{stats:?}");
+        assert_eq!(stats.concealed, 14, "{stats:?}");
+    }
+
+    #[test]
+    fn a_deeper_starting_buffer_rides_out_the_stall() {
+        // 100 ms collected before playing: the catch-up burst no longer
+        // empties it, so nothing needs concealing.
+        let packets = tone_packets(60, false);
+        let mut mixer = Mixer::new();
+        mixer.depths = Buffering {
+            target_ms: 100,
+            ..Buffering::DEFAULT
+        }
+        .into();
+        for (index, packet) in packets.iter().enumerate().take(5) {
+            mixer.push(1, index as u16, packet).unwrap();
+        }
+        for _ in 0..3 {
+            mixer.mix();
+        }
+        for (index, packet) in packets.iter().enumerate().skip(5) {
+            if index % 4 == 0 {
+                mixer.mix();
+                mixer.push(1, index as u16, packet).unwrap();
+            } else {
+                mixer.push(1, index as u16, packet).unwrap();
+                mixer.mix();
+            }
+        }
+        assert_eq!(
+            mixer.stats.concealed + mixer.stats.late,
+            0,
+            "{:?}",
+            mixer.stats
+        );
+    }
+
+    #[test]
+    fn settings_become_consistent_depths() {
+        assert_eq!(
+            Depths::from(Buffering::DEFAULT),
+            Depths {
+                target: 3,
+                max: 15,
+                wait: true,
+                dry_pulls: 2,
+                drain_window: 100,
+            }
+        );
+        // A maximum under the target still leaves room to absorb jitter,
+        // and a wait shorter than a packet still waits one.
+        let odd = Depths::from(Buffering {
+            target_ms: 200,
+            max_ms: 100,
+            late_wait_ms: 10,
+            settle_ms: 0,
+        });
+        assert_eq!((odd.target, odd.max), (10, 12));
+        assert!(odd.wait && odd.dry_pulls == 1);
+        assert_eq!(odd.drain_window, 0);
+        // Nothing below one packet.
+        assert_eq!(
+            Depths::from(Buffering {
+                target_ms: 0,
+                ..Buffering::DEFAULT
+            })
+            .target,
+            1
+        );
+    }
+
+    #[test]
+    fn shedding_switched_off_keeps_the_extra_delay() {
+        let packets = tone_packets(400, false);
+        let mut mixer = Mixer::new();
+        mixer.depths = Buffering {
+            settle_ms: 0,
+            ..Buffering::DEFAULT
+        }
+        .into();
+        for (index, packet) in packets.iter().enumerate().take(10) {
+            mixer.push(1, index as u16, packet).unwrap();
+        }
+        for (index, packet) in packets.iter().enumerate().skip(10) {
+            mixer.push(1, index as u16, packet).unwrap();
+            mixer.mix();
+        }
+        assert_eq!(mixer.speakers[&1].packets.len(), 10);
+        assert_eq!(mixer.stats.skipped, 0);
+    }
+
+    #[test]
+    fn a_packet_older_than_a_finished_burst_is_late() {
+        let packets = tone_packets(6, false);
+        let mut mixer = Mixer::new();
+        for (index, packet) in packets.iter().enumerate() {
+            mixer.push(1, index as u16, packet).unwrap();
+        }
+        // Play the burst out until the buffer starts collecting again.
+        for _ in 0..12 {
+            mixer.mix();
+        }
+        assert!(mixer.speakers[&1].next.is_none());
+        mixer.push(1, 2, &packets[2]).unwrap();
+        assert_eq!(mixer.stats.late, 1);
+        assert!(mixer.speakers[&1].packets.is_empty());
+    }
+
+    #[test]
+    fn extra_delay_drains_back_to_the_target_once_steady() {
+        // A stall left eleven packets waiting at each pull; from then on one
+        // arrives per frame played, so the extra 160 ms is no longer needed.
+        let packets = tone_packets(1200, false);
+        let mut mixer = Mixer::new();
+        for (index, packet) in packets.iter().enumerate().take(10) {
+            mixer.push(1, index as u16, packet).unwrap();
+        }
+        for (index, packet) in packets.iter().enumerate().skip(10) {
+            mixer.push(1, index as u16, packet).unwrap();
+            mixer.mix();
+        }
+        // The next arrival brings it to the target depth at the next pull.
+        let depth = mixer.speakers[&1].packets.len() + 1;
+        assert_eq!(depth, mixer.depths.target, "{:?}", mixer.stats);
+        assert_eq!(mixer.stats.skipped, 8);
+        assert_eq!(mixer.stats.concealed + mixer.stats.late, 0);
     }
 
     #[test]

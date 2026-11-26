@@ -62,6 +62,16 @@ pub const OPEN_CHANNEL_QUIET: [(OpenChannelQuiet, &str); 3] = [
 /// Least time between keyframes sent because packets were lost.
 pub const LOSS_KEYFRAME_SPACINGS_MS: [u32; 4] = [500, 1000, 2000, 3000];
 
+/// Sound collected before someone's speech starts playing, in ms.
+pub const PLAYBACK_BUFFERS_MS: [u32; 7] = [20, 40, 60, 80, 100, 150, 200];
+/// The most sound that may wait before playback skips ahead, in ms.
+pub const PLAYBACK_MAX_MS: [u32; 4] = [200, 300, 500, 1000];
+/// How long playback waits for a late packet, in ms (0: it doesn't).
+pub const LATE_SOUND_WAITS_MS: [u32; 4] = [0, 40, 100, 200];
+/// How long playback must be steady before extra delay is shed, in ms (0:
+/// never).
+pub const PLAYBACK_SETTLE_MS: [u32; 5] = [1000, 2000, 5000, 10000, 0];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapturePreferences {
@@ -226,6 +236,18 @@ pub struct CapturePreferences {
     pub auto_input_sensitivity: bool,
     /// Microphone frames quieter than this (dBFS) are not sent.
     pub input_threshold_db: f32,
+    /// Other people's sound collected before it starts playing, in ms: one
+    /// of [`PLAYBACK_BUFFERS_MS`].
+    pub playback_buffer_ms: u32,
+    /// The most of it that may wait before playback skips ahead, in ms: one
+    /// of [`PLAYBACK_MAX_MS`].
+    pub playback_buffer_max_ms: u32,
+    /// How long playback waits for late sound instead of skipping it, in
+    /// ms: one of [`LATE_SOUND_WAITS_MS`] (0: it doesn't wait).
+    pub late_sound_wait_ms: u32,
+    /// How long playback must be steady before delay added by waiting is
+    /// shed again, in ms: one of [`PLAYBACK_SETTLE_MS`] (0: never).
+    pub playback_settle_ms: u32,
     /// Show desktop notifications.
     pub notify_desktop: bool,
     /// Put the message text in a notification.
@@ -352,6 +374,10 @@ impl Default for CapturePreferences {
             auto_gain_control: false,
             auto_input_sensitivity: true,
             input_threshold_db: kc_media::processing::DEFAULT_THRESHOLD_DB,
+            playback_buffer_ms: kc_media::receive::Buffering::DEFAULT.target_ms,
+            playback_buffer_max_ms: kc_media::receive::Buffering::DEFAULT.max_ms,
+            late_sound_wait_ms: kc_media::receive::Buffering::DEFAULT.late_wait_ms,
+            playback_settle_ms: kc_media::receive::Buffering::DEFAULT.settle_ms,
             notify_desktop: true,
             notify_preview: true,
             notify_all_dms: true,
@@ -528,9 +554,20 @@ impl CapturePreferences {
         }
     }
 
+    /// How other people's sound is buffered before it plays.
+    pub fn playback_buffering(&self) -> kc_media::receive::Buffering {
+        kc_media::receive::Buffering {
+            target_ms: self.playback_buffer_ms,
+            max_ms: self.playback_buffer_max_ms,
+            late_wait_ms: self.late_sound_wait_ms,
+            settle_ms: self.playback_settle_ms,
+        }
+    }
+
     /// Pushes the chosen devices and volumes into the media pipelines.
     pub fn apply_devices(&self) {
         kc_media::processing::set(self.voice_processing());
+        kc_media::receive::set_buffering(self.playback_buffering());
         kc_media::devices::set_input_device(
             (!self.input_device.is_empty()).then(|| self.input_device.clone()),
         );
@@ -683,6 +720,19 @@ impl CapturePreferences {
         {
             self.input_threshold_db = kc_media::processing::DEFAULT_THRESHOLD_DB;
         }
+        let buffering = kc_media::receive::Buffering::DEFAULT;
+        if !PLAYBACK_BUFFERS_MS.contains(&self.playback_buffer_ms) {
+            self.playback_buffer_ms = buffering.target_ms;
+        }
+        if !PLAYBACK_MAX_MS.contains(&self.playback_buffer_max_ms) {
+            self.playback_buffer_max_ms = buffering.max_ms;
+        }
+        if !LATE_SOUND_WAITS_MS.contains(&self.late_sound_wait_ms) {
+            self.late_sound_wait_ms = buffering.late_wait_ms;
+        }
+        if !PLAYBACK_SETTLE_MS.contains(&self.playback_settle_ms) {
+            self.playback_settle_ms = buffering.settle_ms;
+        }
         if self.camera_format > 2 {
             self.camera_format = 0;
         }
@@ -805,6 +855,43 @@ mod tests {
         assert_eq!(
             processing.sensitivity(),
             kc_media::processing::Sensitivity::Manual(-42.0)
+        );
+    }
+
+    #[test]
+    fn playback_buffering_defaults_and_reaches_the_mixer() {
+        use kc_media::receive::Buffering;
+        // Settings from before these existed get the defaults.
+        let mut old: CapturePreferences = serde_json::from_str(r#"{"fps": 30}"#).unwrap();
+        old.normalize();
+        assert_eq!(old.playback_buffering(), Buffering::DEFAULT);
+        // Every default is one of the choices the settings offer.
+        assert!(PLAYBACK_BUFFERS_MS.contains(&Buffering::DEFAULT.target_ms));
+        assert!(PLAYBACK_MAX_MS.contains(&Buffering::DEFAULT.max_ms));
+        assert!(LATE_SOUND_WAITS_MS.contains(&Buffering::DEFAULT.late_wait_ms));
+        assert!(PLAYBACK_SETTLE_MS.contains(&Buffering::DEFAULT.settle_ms));
+
+        // Values the app does not offer fall back to the defaults.
+        let mut odd: CapturePreferences = serde_json::from_str(
+            r#"{"playback_buffer_ms": 7, "playback_buffer_max_ms": 99999, "late_sound_wait_ms": 3, "playback_settle_ms": 1}"#,
+        )
+        .unwrap();
+        odd.normalize();
+        assert_eq!(odd.playback_buffering(), Buffering::DEFAULT);
+
+        let mut chosen: CapturePreferences = serde_json::from_str(
+            r#"{"playback_buffer_ms": 100, "playback_buffer_max_ms": 1000, "late_sound_wait_ms": 0, "playback_settle_ms": 0}"#,
+        )
+        .unwrap();
+        chosen.normalize();
+        assert_eq!(
+            chosen.playback_buffering(),
+            Buffering {
+                target_ms: 100,
+                max_ms: 1000,
+                late_wait_ms: 0,
+                settle_ms: 0,
+            }
         );
     }
 

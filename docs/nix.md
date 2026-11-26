@@ -231,6 +231,10 @@ Kubecord uses when neither the app nor your configuration sets a value.
 | `auto_input_sensitivity` | `true` | Let Kubecord decide what is speech; `false` uses `input_threshold_db`. |
 | `input_threshold_db` | `-50.0` | Microphone sound quieter than this (dBFS, `-100` to `0`) is not sent. |
 | `volume_boost_cap` | `3` | The most one person's volume can be turned up, as a multiple (`1` to `5`). |
+| `playback_buffer_ms` | `60` | Other people's sound collected before it starts playing, in ms: `20`, `40`, `60`, `80`, `100`, `150` or `200`. |
+| `late_sound_wait_ms` | `40` | How long playback waits for late sound instead of skipping it, in ms: `0` (don't wait), `40`, `100` or `200`. |
+| `playback_settle_ms` | `2000` | How long sound must arrive steadily before delay added by waiting is shed again, in ms: `1000`, `2000`, `5000`, `10000` or `0` (never). |
+| `playback_buffer_max_ms` | `300` | The most sound that may wait before playback skips ahead to catch up, in ms: `200`, `300`, `500` or `1000`. |
 
 ### Camera and screen share
 

@@ -1659,6 +1659,7 @@ impl AppState {
 
         page.append(&self.sensitivity_group(panel));
         page.append(&self.processing_group());
+        page.append(&self.playback_group());
 
         let people = adw::PreferencesGroup::new();
         people.set_title("Other People");
@@ -1780,6 +1781,125 @@ impl AppState {
     }
 
     /// Noise suppression, echo cancellation and automatic gain.
+    /// How other people's sound is buffered before it plays: the trade
+    /// between delay and sound that holds up when the network or this
+    /// computer is uneven.
+    fn playback_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        use crate::settings::{
+            LATE_SOUND_WAITS_MS, PLAYBACK_BUFFERS_MS, PLAYBACK_MAX_MS, PLAYBACK_SETTLE_MS,
+        };
+        let current = self.capture.borrow().clone();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Hearing Others");
+        group.set_description(Some(
+            "How other people's sound is held before it plays. If people sound robotic or choppy while your computer is busy, raise Starting Buffer or Wait for Late Sound; lower them for less delay on a fast, quiet machine. Changes apply at once, also in a call.",
+        ));
+
+        let milliseconds = |ms: &u32| format!("{ms} ms");
+        let buffer = self.playback_choice_row(
+            "Starting Buffer",
+            "playback_buffer_ms",
+            "Sound collected before someone's speech starts playing. More rides out longer hiccups, at the cost of that much delay. Default 60 ms.",
+            &PLAYBACK_BUFFERS_MS,
+            milliseconds,
+            current.playback_buffer_ms,
+            |prefs, ms| prefs.playback_buffer_ms = ms,
+        );
+        group.add(&buffer);
+
+        let wait = self.playback_choice_row(
+            "Wait for Late Sound",
+            "late_sound_wait_ms",
+            "When sound arrives late, usually because your computer is busy, wait this long for it instead of skipping it. Each wait adds a little delay that settles again. Off makes up the missing sound and throws the late sound away, which sounds robotic under load. Default 40 ms.",
+            &LATE_SOUND_WAITS_MS,
+            |ms| match ms {
+                0 => "Off".to_owned(),
+                ms => format!("Up to {ms} ms"),
+            },
+            current.late_sound_wait_ms,
+            |prefs, ms| prefs.late_sound_wait_ms = ms,
+        );
+        group.add(&wait);
+
+        let settle = self.playback_choice_row(
+            "Settle Back After",
+            "playback_settle_ms",
+            "Once sound has arrived steadily this long, delay added by waiting is shed again, a packet at a time. Never keeps it until the person pauses. Default 2 s.",
+            &PLAYBACK_SETTLE_MS,
+            |ms| match ms {
+                0 => "Never".to_owned(),
+                ms => format!("{} s", ms / 1000),
+            },
+            current.playback_settle_ms,
+            |prefs, ms| prefs.playback_settle_ms = ms,
+        );
+        group.add(&settle);
+
+        let max = self.playback_choice_row(
+            "Maximum Delay",
+            "playback_buffer_max_ms",
+            "When more than this has piled up, playback skips ahead to the Starting Buffer to catch up. Default 300 ms.",
+            &PLAYBACK_MAX_MS,
+            milliseconds,
+            current.playback_buffer_max_ms,
+            |prefs, ms| prefs.playback_buffer_max_ms = ms,
+        );
+        group.add(&max);
+
+        let reset = gtk::Button::with_label("Reset");
+        reset.add_css_class("flat");
+        reset.set_valign(gtk::Align::Center);
+        reset.set_tooltip_text(Some("Puts these four back to their defaults."));
+        let defaults = kc_media::receive::Buffering::DEFAULT;
+        reset.connect_clicked(move |_| {
+            // Each row's own handler saves its value.
+            for (row, values, value) in [
+                (&buffer, &PLAYBACK_BUFFERS_MS[..], defaults.target_ms),
+                (&wait, &LATE_SOUND_WAITS_MS[..], defaults.late_wait_ms),
+                (&settle, &PLAYBACK_SETTLE_MS[..], defaults.settle_ms),
+                (&max, &PLAYBACK_MAX_MS[..], defaults.max_ms),
+            ] {
+                if let Some(index) = values.iter().position(|ms| *ms == value) {
+                    row.set_selected(index as u32);
+                }
+            }
+        });
+        group.set_header_suffix(Some(&reset));
+        group
+    }
+
+    /// A row choosing one of `values` (shown by `name`), saved by `save`.
+    #[allow(clippy::too_many_arguments)]
+    fn playback_choice_row(
+        self: &Rc<Self>,
+        title: &str,
+        key: &str,
+        subtitle: &str,
+        values: &'static [u32],
+        name: impl Fn(&u32) -> String,
+        current: u32,
+        save: impl Fn(&mut CapturePreferences, u32) + 'static,
+    ) -> adw::ComboRow {
+        let row = adw::ComboRow::new();
+        row.set_title(title);
+        mark_declared(&row, key);
+        row.set_subtitle(subtitle);
+        row.set_subtitle_lines(0);
+        let names: Vec<String> = values.iter().map(name).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        row.set_model(Some(&gtk::StringList::new(&names)));
+        if let Some(index) = values.iter().position(|ms| *ms == current) {
+            row.set_selected(index as u32);
+        }
+        let app = self.clone();
+        row.connect_selected_notify(move |row| {
+            if let Some(ms) = values.get(row.selected() as usize).copied() {
+                app.update_prefs(|prefs| save(prefs, ms));
+            }
+        });
+        row
+    }
+
     fn processing_group(self: &Rc<Self>) -> adw::PreferencesGroup {
         let current = self.capture.borrow().clone();
         let group = adw::PreferencesGroup::new();
